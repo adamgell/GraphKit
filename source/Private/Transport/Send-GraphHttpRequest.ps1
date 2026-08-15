@@ -327,6 +327,7 @@ function ConvertFrom-GraphResponseBody {
     }
 
     if (-not [string]::IsNullOrEmpty($contentType) -and $contentType -match 'json') {
+        $text = $null
         try {
             $text = [System.Text.Encoding]::UTF8.GetString($Bytes)
             $trimmed = $text.Trim()
@@ -336,7 +337,17 @@ function ConvertFrom-GraphResponseBody {
         }
         catch {
             Write-Verbose ('Body JSON parse skipped: {0}' -f $_.Exception.Message)
-            # Truncated or malformed JSON: fall through to the raw string.
+        }
+
+        # Content-Type claimed JSON but the payload is not parseable JSON - a gateway or
+        # WAF returning an HTML error page under a JSON content type, or a mid-response
+        # truncation. Return the DECODED STRING, which is what the comment above always
+        # promised. Falling through to the byte[] return below (the previous behaviour)
+        # handed the caller a byte dump: Get-GraphErrorCodeChain finds nothing in it, and
+        # an operator debugging an outage sees '60 104 116 109 108 62' instead of the
+        # gateway's message.
+        if ($null -ne $text) {
+            return $text
         }
     }
 

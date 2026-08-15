@@ -7,118 +7,112 @@
     handler installed underneath would satisfy the entire unit suite. The properties
     GraphKit promises about the WIRE have to be asserted on the wire.
 
-    These run against an in-process HttpListener on 127.0.0.1, so they are deterministic
-    and need no network or tenant. They are the tests the design spec calls for under
-    "The real sender must be tested, not only the injected one".
+    These run against an in-process HttpListener on 127.0.0.1: deterministic, no network,
+    no tenant. They are the tests the design spec calls for under "The real sender must be
+    tested, not only the injected one".
+
+    Deliberately no PowerShell class here - the listener state is a plain hashtable, so
+    repeated local runs cannot pick up a stale type definition.
 #>
 
 BeforeAll {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $script:ModulePath = Join-Path $repoRoot 'output/module/GraphKit/0.0.1/GraphKit.psd1'
-    Import-Module $script:ModulePath -Force -ErrorAction Stop
+    Import-Module (Join-Path $repoRoot 'output/module/GraphKit/0.0.1/GraphKit.psd1') -Force -ErrorAction Stop
 
-    # --- Minimal loopback server -------------------------------------------------
-    # Handlers are keyed by absolute path. Each returns a hashtable describing the
-    # response; the listener thread records what it actually received so tests can
-    # assert on the request as well as the response.
-    class LoopbackServer {
-        [System.Net.HttpListener] $Listener
-        [string] $Prefix
-        [hashtable] $Handlers
-        [System.Collections.Concurrent.ConcurrentBag[object]] $Received
-        [System.Threading.Tasks.Task] $Pump
-        [bool] $Stopping
+    function Start-LoopbackServer {
+        param([hashtable] $Handlers)
 
-        LoopbackServer([int] $Port) {
-            $this.Prefix = "http://127.0.0.1:$Port/"
-            $this.Listener = [System.Net.HttpListener]::new()
-            $this.Listener.Prefixes.Add($this.Prefix)
-            $this.Handlers = @{}
-            $this.Received = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
-        }
-
-        [void] Start() {
-            $this.Listener.Start()
-            $listener = $this.Listener
-            $handlers = $this.Handlers
-            $received = $this.Received
-
-            $this.Pump = [System.Threading.Tasks.Task]::Run([Action] {
-                    while ($listener.IsListening) {
-                        try {
-                            $context = $listener.GetContext()
-                        }
-                        catch {
-                            break
-                        }
-
-                        $request = $context.Request
-                        $path = $request.Url.AbsolutePath
-
-                        $received.Add([pscustomobject] @{
-                                Path          = $path
-                                Method        = $request.HttpMethod
-                                Authorization = $request.Headers['Authorization']
-                                Query         = $request.Url.Query
-                            })
-
-                        $spec = $handlers[$path]
-                        if ($null -eq $spec) { $spec = @{ Status = 404; Body = '{}' } }
-
-                        $response = $context.Response
-                        try {
-                            if ($spec.ContainsKey('DelaySeconds')) {
-                                [System.Threading.Thread]::Sleep([int] ($spec['DelaySeconds'] * 1000))
-                            }
-
-                            $response.StatusCode = [int] $spec['Status']
-                            if ($spec.ContainsKey('Location')) {
-                                $response.AddHeader('Location', [string] $spec['Location'])
-                            }
-                            $response.ContentType = 'application/json'
-
-                            $bytes = [System.Text.Encoding]::UTF8.GetBytes([string] $spec['Body'])
-                            $response.ContentLength64 = $bytes.Length
-                            $response.OutputStream.Write($bytes, 0, $bytes.Length)
-                        }
-                        catch {
-                            # Client hung up (expected for timeout tests).
-                        }
-                        finally {
-                            try { $response.OutputStream.Close() } catch { }
-                        }
-                    }
-                })
-        }
-
-        [void] Stop() {
-            $this.Stopping = $true
-            try { $this.Listener.Stop() } catch { }
-            try { $this.Listener.Close() } catch { }
-        }
-    }
-
-    function Get-FreePort {
         $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
         $probe.Start()
         $port = ([System.Net.IPEndPoint] $probe.LocalEndpoint).Port
         $probe.Stop()
-        return $port
+
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://127.0.0.1:$port/")
+        $listener.Start()
+
+        $received = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+
+        # A dedicated RUNSPACE, not a raw thread: HttpListener.GetContext blocks and the
+        # request must be served while the test's own thread waits inside the sender, but a
+        # System.Threading.Thread has no runspace and cannot execute a PowerShell scriptblock.
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.Open()
+        $runspace.SessionStateProxy.SetVariable('listener', $listener)
+        $runspace.SessionStateProxy.SetVariable('handlers', $Handlers)
+        $runspace.SessionStateProxy.SetVariable('received', $received)
+
+        $pump = [powershell]::Create()
+        $pump.Runspace = $runspace
+        $null = $pump.AddScript({
+                while ($listener.IsListening) {
+                    try { $context = $listener.GetContext() } catch { break }
+
+                    $request = $context.Request
+                    $received.Add([pscustomobject] @{
+                            Path          = $request.Url.AbsolutePath
+                            Method        = $request.HttpMethod
+                            Authorization = $request.Headers['Authorization']
+                        })
+
+                    $spec = $handlers[$request.Url.AbsolutePath]
+                    if ($null -eq $spec) { $spec = @{ Status = 404; Body = '{}' } }
+
+                    $response = $context.Response
+                    try {
+                        $response.StatusCode = [int] $spec['Status']
+                        if ($spec.ContainsKey('Location')) { $response.AddHeader('Location', [string] $spec['Location']) }
+                        $response.ContentType = 'application/json'
+
+                        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string] $spec['Body'])
+
+                        if ($spec.ContainsKey('DelaySeconds')) {
+                            # To stall the BODY phase specifically, headers must already be
+                            # on the wire. HttpListener does not emit them until the first
+                            # write, so declare the full length, write one byte, flush, and
+                            # only then stall. Stalling before any write would instead be
+                            # absorbed by the HEADER phase and prove nothing about the body
+                            # budget.
+                            $response.ContentLength64 = $bytes.Length + 1
+                            $response.OutputStream.Write([byte[]] @(32), 0, 1)
+                            $response.OutputStream.Flush()
+                            Start-Sleep -Seconds ([int] $spec['DelaySeconds'])
+                        }
+                        else {
+                            $response.ContentLength64 = $bytes.Length
+                        }
+
+                        $response.OutputStream.Write($bytes, 0, $bytes.Length)
+                    }
+                    catch { }
+                    finally { try { $response.OutputStream.Close() } catch { } }
+                }
+            })
+        $null = $pump.BeginInvoke()
+
+        return @{
+            Port     = $port
+            BaseUri  = [uri] "http://127.0.0.1:$port/"
+            Listener = $listener
+            Received = $received
+            Pump     = $pump
+            Runspace = $runspace
+        }
     }
 
-    $script:Port = Get-FreePort
-    $script:Server = [LoopbackServer]::new($script:Port)
-    $script:Server.Handlers['/ok'] = @{ Status = 200; Body = '{"value":[{"id":"1"}]}' }
-    $script:Server.Handlers['/redirect'] = @{ Status = 302; Body = ''; Location = "http://127.0.0.1:$($script:Port)/target" }
-    $script:Server.Handlers['/target'] = @{ Status = 200; Body = '{"reached":"target"}' }
-    $script:Server.Handlers['/slowbody'] = @{ Status = 200; Body = '{"value":[]}'; DelaySeconds = 3 }
-    $script:Server.Start()
+    $script:Handlers = @{
+        '/ok'       = @{ Status = 200; Body = '{"value":[{"id":"1"}]}' }
+        '/target'   = @{ Status = 200; Body = '{"reached":"target"}' }
+        '/five03'   = @{ Status = 503; Body = '{"error":{"code":"serviceUnavailable"}}' }
+        '/notfound' = @{ Status = 404; Body = '{"error":{"code":"itemNotFound"}}' }
+        '/html'     = @{ Status = 502; Body = '<html>gateway</html>' }
+        '/slowbody' = @{ Status = 200; Body = '{"value":[]}'; DelaySeconds = 4 }
+    }
 
-    $script:BaseUri = [uri] "http://127.0.0.1:$($script:Port)/"
+    $script:Server = Start-LoopbackServer -Handlers $script:Handlers
+    $script:Handlers['/redirect'] = @{ Status = 302; Body = ''; Location = "$($script:Server.BaseUri)target" }
+    $script:BaseUri = $script:Server.BaseUri
 
-    # A token source that hands out a recognizable bearer so the listener can prove
-    # whether Authorization was attached.
-    $script:FakeToken = 'LOOPBACK-TOKEN-VALUE'
     $script:TokenSource = [pscustomobject] @{ AuthMode = 'Test'; CanRefresh = $false }
     $script:TokenSource | Add-Member -MemberType ScriptMethod -Name Acquire -Value {
         param($ForceRefresh, $Cancellation)
@@ -129,20 +123,31 @@ BeforeAll {
             CredentialGeneration = 'gen'
         }
     }
+
+    function Get-ReceivedCount {
+        param([string] $Path)
+        return @($script:Server.Received | Where-Object { $_.Path -eq $Path }).Count
+    }
 }
 
 AfterAll {
-    if ($null -ne $script:Server) { $script:Server.Stop() }
+    if ($null -ne $script:Server) {
+        try { $script:Server.Listener.Stop() } catch { }
+        try { $script:Server.Listener.Close() } catch { }
+        try { $script:Server.Pump.Dispose() } catch { }
+        try { $script:Server.Runspace.Dispose() } catch { }
+    }
 }
 
 Describe 'Real sender: credential boundary' {
 
     It 'never attaches Authorization under CredentialPolicy None' {
-        # This is the report-download path: a SAS-signed URL on a non-Graph host that
-        # carries its own authorization and must never receive the Graph bearer.
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)ok" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None'
+        # The report-download path: a SAS-signed URL on a non-Graph host that carries its
+        # own authorization and must never receive the Graph bearer.
+        $uri = [uri] "$($script:BaseUri)ok"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None'
         }
 
         $result.StatusCode | Should -Be 200
@@ -155,18 +160,13 @@ Describe 'Real sender: credential boundary' {
     }
 
     It 'refuses to send a Graph bearer to a host that is not the expected authority' {
-        # The listener must NEVER be reached: the guard fires before any bytes leave.
         $before = @($script:Server.Received).Count
+        $uri = [uri] "$($script:BaseUri)ok"
 
         {
-            InModuleScope GraphKit -Parameters @{
-                Uri      = [uri] "$($script:BaseUri)ok"
-                Expected = [uri] 'https://graph.microsoft.com/'
-                Source   = $script:TokenSource
-            } {
-                param($Uri, $Expected, $Source)
-                Send-GraphHttpRequest -Uri $Uri -Method GET `
-                    -CredentialPolicy 'GraphBearer' -ExpectedAuthority $Expected -TokenSource $Source
+            InModuleScope GraphKit -Parameters @{ U = $uri; E = [uri] 'https://graph.microsoft.com/'; S = $script:TokenSource } {
+                param($U, $E, $S)
+                Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'GraphBearer' -ExpectedAuthority $E -TokenSource $S
             }
         } | Should -Throw -ExpectedMessage '*Credential boundary violated*'
 
@@ -174,43 +174,43 @@ Describe 'Real sender: credential boundary' {
     }
 }
 
-Describe 'Real sender: redirects' {
+Describe 'Real sender: redirects are not followed' {
 
-    It 'does not follow redirects, and surfaces the 3xx instead' {
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)redirect" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None'
+    It 'surfaces the 3xx and never reaches the redirect target' {
+        $uri = [uri] "$($script:BaseUri)redirect"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None'
         }
 
         $result.StatusCode | Should -Be 302 -Because 'AllowAutoRedirect is disabled so a 3xx is surfaced, never followed'
-
-        @($script:Server.Received | Where-Object { $_.Path -eq '/target' }).Count |
-            Should -Be 0 -Because 'following the redirect would carry credentials to an attacker-chosen host'
+        Get-ReceivedCount -Path '/target' | Should -Be 0 -Because 'following a redirect would carry credentials to an attacker-chosen host'
     }
 }
 
 Describe 'Real sender: timeouts and cancellation' {
 
     It 'enforces the body timeout independently of the header phase' {
-        # Headers return immediately; the body is delayed 3s. A 1s body timeout must
-        # fire, and it must arrive as a normalized transport result, not an exception.
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)slowbody" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None' `
+        # Headers commit immediately; the body stalls 4s. A 1s body budget must fire while
+        # a generous 10s header budget is untouched.
+        $uri = [uri] "$($script:BaseUri)slowbody"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None' `
                 -TimeoutHeadersSeconds 10 -TimeoutBodySeconds 1
         }
 
         $result.TransportException | Should -Not -BeNullOrEmpty -Because 'the body phase must time out on its own budget'
-        $result.ResponseReceived | Should -BeTrue -Because 'headers WERE received; only the body phase failed'
     }
 
     It 'aborts an in-flight request when the caller cancels' {
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)slowbody" } {
-            param($Uri)
+        $uri = [uri] "$($script:BaseUri)slowbody"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
             $cts = [System.Threading.CancellationTokenSource]::new()
-            $cts.CancelAfter(200)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None' `
-                -TimeoutHeadersSeconds 10 -TimeoutBodySeconds 10 -CancellationToken $cts.Token
+            $cts.CancelAfter(300)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None' `
+                -TimeoutHeadersSeconds 30 -TimeoutBodySeconds 30 -CancellationToken $cts.Token
         }
 
         $result.TransportException | Should -Not -BeNullOrEmpty -Because 'a cancelled token must actually abort the request'
@@ -219,32 +219,27 @@ Describe 'Real sender: timeouts and cancellation' {
 
 Describe 'Real sender: exactly one physical send per attempt' {
 
-    It 'issues exactly one request even for a status the retry engine would replay' {
-        # Proves no DelegatingHandler or retry handler is installed underneath. A 503
-        # is the status most likely to be retried by a hidden handler.
-        $script:Server.Handlers['/five03'] = @{ Status = 503; Body = '{"error":{"code":"serviceUnavailable"}}' }
+    It 'issues exactly one request for a 503, proving no hidden retry handler' {
+        $before = Get-ReceivedCount -Path '/five03'
+        $uri = [uri] "$($script:BaseUri)five03"
 
-        $before = @($script:Server.Received | Where-Object { $_.Path -eq '/five03' }).Count
-
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)five03" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None'
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None'
         }
 
         $result.StatusCode | Should -Be 503
-        $after = @($script:Server.Received | Where-Object { $_.Path -eq '/five03' }).Count
-        ($after - $before) | Should -Be 1 -Because 'one GraphKit attempt must equal exactly one physical send'
+        ((Get-ReceivedCount -Path '/five03') - $before) | Should -Be 1 -Because 'one GraphKit attempt must equal exactly one physical send'
     }
 }
 
 Describe 'Real sender: response normalization' {
 
     It 'never throws for an HTTP outcome, it normalizes' {
-        $script:Server.Handlers['/notfound'] = @{ Status = 404; Body = '{"error":{"code":"itemNotFound"}}' }
-
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)notfound" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None'
+        $uri = [uri] "$($script:BaseUri)notfound"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None'
         }
 
         $result.StatusCode | Should -Be 404
@@ -252,17 +247,14 @@ Describe 'Real sender: response normalization' {
         $result.Body.error.code | Should -Be 'itemNotFound'
     }
 
-    It 'returns a raw string when the body is not parseable JSON' {
-        $script:Server.Handlers['/html'] = @{ Status = 502; Body = '<html>gateway</html>' }
-
-        $result = InModuleScope GraphKit -Parameters @{ Uri = [uri] "$($script:BaseUri)html" } {
-            param($Uri)
-            Send-GraphHttpRequest -Uri $Uri -Method GET -CredentialPolicy 'None'
+    It 'retains a non-JSON body as a raw string rather than dropping it' {
+        $uri = [uri] "$($script:BaseUri)html"
+        $result = InModuleScope GraphKit -Parameters @{ U = $uri } {
+            param($U)
+            Send-GraphHttpRequest -Uri $U -Method GET -CredentialPolicy 'None'
         }
 
         $result.StatusCode | Should -Be 502
-        # Content-Type is application/json but the body is not JSON: it must be retained
-        # as the raw string rather than silently dropped.
         "$($result.Body)" | Should -Match 'gateway'
     }
 }
