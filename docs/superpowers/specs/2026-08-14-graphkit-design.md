@@ -207,8 +207,83 @@ Therefore:
   token acquisition inside a customer engagement.
 - A QA test asserts GraphKit ships no `Microsoft.Identity.Client.dll` of its own.
 
-**What would flip this decision:** a supported way to obtain per-context isolation from the Graph
-SDK, or MSAL becoming independently installable as a PSGallery module without conflict.
+**This is an accepted compatibility constraint for v1, not a sound long-term boundary.**
+`Microsoft.Identity.Client.dll` is a *private implementation detail* of
+`Microsoft.Graph.Authentication`. That module publishes no contract for the assembly's location,
+its load timing, or its exact version, and it is free to change or drop it in any release. A
+pinned minimum version on the parent module does not prove which MSAL binary is actually loaded:
+in the default load context the first version to load wins for the whole process, and
+PSResourceGet's older copy is present in effectively every session before GraphKit is imported.
+
+Because contexts own an `IGraphTokenSource` rather than an MSAL client directly, replacing this
+mechanism later is an **implementation change, not an interface change**. That abstraction is
+what makes the interim position tolerable.
+
+**Interim requirement.** While the transitive approach stands, CI must include an
+**import-order matrix** — fresh processes importing `Az.Accounts`, `Microsoft.Graph.Authentication`,
+and `Microsoft.PowerShell.PSResourceGet` in each meaningful order before GraphKit, asserting that
+token acquisition still succeeds and recording which MSAL version won. A silent version change is
+otherwise indistinguishable from a working configuration until a customer engagement.
+
+### GraphKit.Auth — the end-state authentication boundary
+
+**Status: much later. Not v1, not phase 1.** Recorded here so the interim above is understood as
+a deliberate stopgap with a known exit, and so the `IGraphTokenSource` contract is designed to
+accommodate it now rather than being retrofitted.
+
+A small compiled adapter owns the MSAL boundary outright:
+
+- References an **explicit `Microsoft.Identity.Client` package version**, resolved at build time
+  rather than discovered at runtime.
+- Loads that MSAL into an **isolated `AssemblyLoadContext`**, so GraphKit's version is unaffected
+  by whatever `Az.Accounts`, the Graph SDK, or PSResourceGet loaded first, and GraphKit does not
+  perturb theirs. This is the pattern `Az.Accounts` already uses for its own dependency isolation.
+- Exposes **only GraphKit-owned request and result types**. No MSAL type crosses the boundary,
+  which is what keeps the ALC isolation intact — types leaking across contexts is the standard way
+  this pattern fails.
+- Removes `Microsoft.Graph.Authentication` as a runtime dependency entirely.
+
+#### Contract
+
+```text
+GraphTokenRequest    Authority, ClientId, Resource/Scopes, Credential, ForceRefresh, Cancellation
+GraphTokenResult     AccessToken, ExpiresOnUtc, TokenType, Scopes, VerifiedTenantId
+```
+
+`Credential` is a discriminated shape mirroring the profile schema: certificate (as
+`X509Certificate2`, a framework type available in both contexts), client secret, managed identity
+(system- or user-assigned), or caller-supplied token. Each maps to the correct MSAL builder —
+`ConfidentialClientApplicationBuilder` for certificate and secret,
+`ManagedIdentityApplicationBuilder` for managed identity — which is precisely why
+`IGraphTokenSource` exists rather than a single client type.
+
+One MSAL application instance per context, cached and reused: MSAL's in-memory token cache lives
+on the application object, so discarding it per call would defeat caching and invite token-endpoint
+throttling. MSAL applications are thread-safe; single-flight coordination per cache key stays on
+the GraphKit side.
+
+#### Costs, stated plainly
+
+- GraphKit stops being pure PowerShell. Releases require a .NET SDK in CI and a compiled artifact
+  in the package.
+- Target `net8.0` — the floor matching PowerShell 7.4, forward-compatible with the .NET 10 runtime
+  under 7.6. A single assembly serves both; no per-platform native build is involved.
+- Debugging across an ALC boundary is harder, and type-identity mistakes surface as confusing cast
+  failures rather than clear errors.
+- Release complexity rises: build, package, and verify the assembly alongside the PowerShell
+  module, and the QA test asserting "GraphKit ships no `Microsoft.Identity.Client.dll`" inverts to
+  assert it ships exactly one, at the expected version, loaded into the expected context.
+
+#### Migration
+
+The swap is behind `IGraphTokenSource`, so it is additive: implement
+`GraphKitAuthTokenSource` alongside the existing transitive source, run both against the same
+contract tests, cut contexts over, then delete the transitive source and drop the
+`Microsoft.Graph.Authentication` dependency. No public command signature changes.
+
+**What would bring this forward:** the transitive MSAL breaking in a supported configuration, an
+import-order matrix failure, or `Microsoft.Graph.Authentication` changing or removing its bundled
+MSAL. Any of those turns the interim from tolerable into broken.
 
 #### Token cache
 
@@ -1006,6 +1081,11 @@ tests and CI inject a stub.
   In-memory only.
 - Cross-process throttle coordination.
 - Simultaneous multi-tenant contexts.
+- **`GraphKit.Auth`**, the compiled MSAL adapter with an isolated `AssemblyLoadContext`. It is the
+  recorded end-state authentication boundary, deliberately deferred: v1 consumes MSAL transitively
+  through `Microsoft.Graph.Authentication` as an accepted compatibility constraint, guarded by the
+  import-order matrix. `IGraphTokenSource` exists so the eventual swap is an implementation
+  change rather than an interface change.
 - Porting all ~175 scripts. Phase 1 validates the module against Ivy24; it does not migrate a
   backlog. Existing scripts are catalogued as `type: script` vault pages and ported when next
   touched.
