@@ -16,8 +16,8 @@ Live-verification status by auth mode:
 
 - `Certificate` - PROVEN end to end against Ivy24 (vault -> PFX -> MSAL -> token -> paged reads -> mutation and revert).
 - `ClientSecret` - PROVEN end to end against Ivy24 on 2026-08-15. A one-hour secret was added to the app registration, stored in the vault, registered as a second profile, used to acquire a token and read 13 managed devices, and then removed from the app registration, the vault and the profile store. Verified afterwards that zero client secrets remain on the registration.
-- `BearerToken` (vault-resolved) - wired, not yet proven live.
-- `ManagedIdentity` - wired, and cannot be proven from a workstation; it needs an Azure compute identity.
+- `BearerToken` (vault-resolved) - PROVEN end to end against Ivy24 on 2026-08-15. A real token was stored in the vault, registered as a profile holding only a vault reference, resolved back through `Get-GraphVaultCredential`, and used to read 13 managed devices. The source correctly reports `CanRefresh = False`, and a forced refresh fails loudly rather than silently returning a token the service may already have rejected. Secret and profile removed afterwards; verified nothing remained.
+- `ManagedIdentity` - wired, and CANNOT be proven from a workstation: `AcquireTokenForManagedIdentity` requires an Azure compute identity (VM, App Service, Container App, Function). Leave it marked unproven until something runs there; do not infer coverage from the other three passing.
 
 Proving `ClientSecret` also demonstrated context independence directly against the tenant: a `Certificate` context and a `ClientSecret` context for the same tenant reported their own `AuthMode` and held distinct tokens, which is the isolation claim the design rests on.
 
