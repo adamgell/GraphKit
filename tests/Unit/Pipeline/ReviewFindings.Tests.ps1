@@ -287,3 +287,32 @@ Describe 'Review finding: truncated paging is carried by the envelope' {
         $result.PageCount | Should -Be 3
     }
 }
+
+Describe 'Review finding: -Name cannot escape -Path on export' {
+    # -Name was concatenated into the export filename without validation, while the
+    # analogous raw-export path was containment-checked. Name is exactly the kind of
+    # value built from a report title or profile rather than typed literally.
+
+    BeforeAll {
+        $script:ExportDir = Join-Path ([System.IO.Path]::GetTempPath()) "gkexp-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $script:ExportDir -Force | Out-Null
+        $script:Rows = @([pscustomobject] @{ id = 'a'; name = 'one' })
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:ExportDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'writes an ordinary name inside -Path' {
+        Export-GraphResult -Result $script:Rows -As Json -Path $script:ExportDir -Name 'devices'
+        Test-Path -LiteralPath (Join-Path $script:ExportDir 'devices.json') | Should -BeTrue
+    }
+
+    It 'refuses a name that escapes the output directory' {
+        {
+            Export-GraphResult -Result $script:Rows -As Json -Path $script:ExportDir -Name '../escaped'
+        } | Should -Throw -ExpectedMessage '*outside -Path*'
+
+        Test-Path -LiteralPath (Join-Path (Split-Path $script:ExportDir -Parent) 'escaped.json') | Should -BeFalse
+    }
+}

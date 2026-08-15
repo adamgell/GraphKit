@@ -243,6 +243,17 @@ function Export-GraphResult {
         }
         $filePath = Join-Path $outputDir "$baseName.$extension"
 
+        # -Name is free text and is concatenated into a path, so it is verified rather
+        # than trusted - the same rule the raw-export path below already follows. A Name
+        # containing a separator or '..' would otherwise write outside -Path, and Name is
+        # exactly the kind of value that gets built from a report title or profile rather
+        # than typed literally.
+        if (-not (Test-GraphPathContainment -Root $outputDir -Candidate $filePath)) {
+            throw (
+                "Refusing to write outside -Path: the resolved export file '{0}' is not beneath '{1}'. " -f $filePath, $outputDir
+            ) + "Check -Name ('$baseName') for path separators or '..'."
+        }
+
         switch ($As) {
             'Csv' {
                 $rows.ToArray() | Export-Csv -LiteralPath $filePath -NoTypeInformation -Encoding utf8
