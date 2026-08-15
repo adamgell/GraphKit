@@ -23,6 +23,18 @@ function Enter-GraphProfileStoreLock {
     $lockPath = "$StorePath.lock"
     $maxAttempts = 10
 
+    # The lock sidecar cannot be created if its directory does not exist, and on a clean
+    # machine it does not: the first Register-GraphTenant ever run would fail. Worse, the
+    # DirectoryNotFoundException was caught by the retry loop below and reported as "another
+    # GraphKit process may be writing", which is a confident diagnosis of the wrong problem.
+    # Save-GraphProfileStore creates the directory, but it runs AFTER this lock is taken.
+    $directory = Split-Path -Parent $lockPath
+    if (-not [string]::IsNullOrEmpty($directory) -and -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $directory -Force
+    }
+
+    $lastError = $null
+
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
             return [System.IO.File]::Open(
@@ -32,15 +44,22 @@ function Enter-GraphProfileStoreLock {
                 [System.IO.FileShare]::None
             )
         }
-        catch {
-            if ($attempt -ge $maxAttempts) {
-                break
-            }
+        catch [System.IO.IOException] {
+            # A sharing violation is genuine contention and worth retrying.
+            $lastError = $_
+            if ($attempt -ge $maxAttempts) { break }
             Start-Sleep -Milliseconds 100
+        }
+        catch {
+            # Anything else - permissions, an unwritable path - will not resolve by waiting,
+            # so surface it immediately with its real cause rather than after a second of
+            # retries under a contention message that does not apply.
+            throw "Could not open the profile store lock at '$lockPath': $($_.Exception.Message)"
         }
     }
 
-    throw "Could not acquire the profile store lock at '$lockPath' after $maxAttempts attempts (10 x 100 ms). Another GraphKit process may be writing '$StorePath'; retry once it completes."
+    $detail = if ($null -ne $lastError) { " Last error: $($lastError.Exception.Message)" } else { '' }
+    throw "Could not acquire the profile store lock at '$lockPath' after $maxAttempts attempts (10 x 100 ms). Another GraphKit process may be writing '$StorePath'; retry once it completes.$detail"
 }
 
 function Exit-GraphProfileStoreLock {

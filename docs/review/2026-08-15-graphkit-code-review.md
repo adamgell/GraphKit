@@ -2,17 +2,17 @@
 
 - **Scope:** all 7,907 lines of `source/`, after phases 1–4
 - **Baseline:** 510 deterministic tests green
-- **Result:** 16 defects found and fixed; 557 tests green
+- **Result:** 17 defects found and fixed; 559 tests green
 - **Commits:** `81cfe0a`, `7bad06a`, `795c427`, `6c682df`, `f92cf54`, `50f829e`
 
-Every finding was reproduced before being fixed. **None of the 16 was caught by the existing
+Every finding was reproduced before being fixed. **None of the 17 was caught by the existing
 510-test suite**, which is the most useful signal in this review: the suite tested the paths the
 code takes, not the paths it refuses to take - and, in two cases, the paths it had never
 implemented at all.
 
 ## The dominant failure mode
 
-Nine of the sixteen are one shape: **bounded or partial work reported as complete.**
+Nine of the seventeen are one shape: **bounded or partial work reported as complete.**
 
 | Where | Reported | Actually |
 | --- | --- | --- |
@@ -119,8 +119,9 @@ idempotent under `ShouldProcess`. Permission `Configured` is genuinely tri-state
 
 ## Found later, by running for real
 
-Two further defects surfaced only when the module was pointed at a live tenant, after the
-static review was complete. Both are recorded here because they say something the review
+Three further defects surfaced only when the module was run for real - two against a live
+tenant, and one on a machine that had never run it before - all after the static review was
+complete. Both are recorded here because they say something the review
 itself could not: **a passing suite proved less than it appeared to.**
 
 15. **Every auth method was a stub.** `New-GraphTokenSource` defaulted Certificate,
@@ -136,10 +137,27 @@ itself could not: **a passing suite proved less than it appeared to.**
     transports do not type that parameter strictly, so only a real paged read against a live
     tenant could expose it.
 
+17. **The first `Register-GraphTenant` on a clean machine failed, and blamed the wrong thing.**
+    `Enter-GraphProfileStoreLock` opens a `.lock` sidecar next to `profiles.json`, but nothing
+    creates `~/.graphkit` first — `Save-GraphProfileStore` does, and it runs *after* the lock is
+    taken. The resulting `DirectoryNotFoundException` was swallowed by the retry loop and
+    reported as *"Another GraphKit process may be writing"*: ten retries, one second, and a
+    confident diagnosis of a concurrent writer that did not exist. Every machine is in this
+    state until the first profile is registered. The lock now creates its directory, retries
+    only on `IOException` (genuine contention), and surfaces anything else immediately with its
+    real cause.
+
 The generalisable lesson, and the reason the loopback and live gates matter more than their
 test count suggests: **the suite tested the seams it was built around.** Wherever a test
 injects a dependency, the real implementation of that dependency is unverified by
 construction - and in two cases here it did not exist at all.
+
+Finding 17 adds a second axis to that lesson. It was not a seam problem — no dependency was
+injected — it was a **state** problem: every developer machine, every CI runner with a warm
+home directory, and every test using `TestDrive` had already passed through the one state
+where the bug lives. It took a container that had never run GraphKit before to find it, which
+is an argument for gates that **start from nothing**, not merely gates that use real
+components.
 
 ## Residual risk
 

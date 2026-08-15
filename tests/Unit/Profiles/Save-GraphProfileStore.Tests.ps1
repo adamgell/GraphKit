@@ -58,4 +58,36 @@ Describe 'GraphProfileStoreLock' {
             Exit-GraphProfileStoreLock -Lock $second
         }
     }
+
+    It 'creates the store directory so the first-ever acquisition on a clean machine succeeds' {
+        # Regression: the lock sidecar cannot be created when ~/.graphkit does not yet
+        # exist, which is the state of every machine before the first Register-GraphTenant.
+        # Found by running GraphKit in a fresh container, not by this suite.
+        InModuleScope GraphKit -Parameters @{ Path = (Join-Path $TestDrive 'no-such-dir/nested/profiles.json') } {
+            Test-Path -LiteralPath (Split-Path -Parent $Path) | Should -BeFalse
+
+            $lock = Enter-GraphProfileStoreLock -StorePath $Path
+            try {
+                $lock | Should -BeOfType [System.IO.FileStream]
+            }
+            finally {
+                Exit-GraphProfileStoreLock -Lock $lock
+            }
+        }
+    }
+
+    It 'reports a non-contention failure with its real cause instead of the retry message' {
+        # A path that cannot be opened will never become openable by waiting, so it must
+        # surface immediately rather than after ten retries under a message that blames
+        # a concurrent process that does not exist.
+        InModuleScope GraphKit -Parameters @{ Root = $TestDrive } {
+            # A directory occupying the lock path: opening it as a file fails, and not
+            # with a sharing violation.
+            $storePath = Join-Path $Root 'blocked.json'
+            $null = New-Item -ItemType Directory -Path "$storePath.lock" -Force
+
+            { Enter-GraphProfileStoreLock -StorePath $storePath } |
+                Should -Throw -ExpectedMessage '*Could not open the profile store lock*'
+        }
+    }
 }
