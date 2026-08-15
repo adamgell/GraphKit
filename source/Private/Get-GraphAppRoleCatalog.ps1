@@ -86,6 +86,28 @@ function Get-GraphEnvelopeStatusCode {
     return [int] $last.StatusCode
 }
 
+<#
+    Extracts @odata.nextLink from a directory read result, handling both the
+    hashtable and PSCustomObject shapes the transport can produce.
+#>
+function Get-GraphDirectoryNextLink {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()] $Data)
+
+    if ($null -eq $Data) { return $null }
+
+    if ($Data -is [System.Collections.IDictionary]) {
+        if ($Data.Contains('@odata.nextLink')) { return [string] $Data['@odata.nextLink'] }
+        return $null
+    }
+
+    $property = $Data.PSObject.Properties['@odata.nextLink']
+    if ($null -ne $property) { return [string] $property.Value }
+
+    return $null
+}
+
 function Invoke-GraphDirectoryRead {
     # One directory GET through the normal pipeline. Synthesizes a Safe read
     # descriptor, delegates to Invoke-GraphRetry, and interprets the envelope:
@@ -130,7 +152,54 @@ function Invoke-GraphDirectoryRead {
     }
 
     if ($envelope.Outcome -eq 'Succeeded') {
-        return $envelope.Data
+        $data = $envelope.Data
+
+        # Follow @odata.nextLink. appRoleAssignments and oauth2PermissionGrants are
+        # paged relationship collections (Graph defaults to 100 per page), and this
+        # previously returned the FIRST PAGE ONLY. The permission analyzer would then
+        # report MissingGrant for permissions that are in fact granted - under-reporting
+        # grants, which is the dangerous direction: it invites an operator to re-grant
+        # what already exists, or to conclude a working registration is broken.
+        #
+        # Each hop is authority-validated by the same guard the main paging path uses,
+        # because a nextLink is opaque but never trusted.
+        $nextLink = Get-GraphDirectoryNextLink -Data $data
+        $pageGuard = 0
+
+        while ($null -ne $nextLink -and $pageGuard -lt 200) {
+            $pageGuard++
+            $null = Test-GraphNextLinkAuthority -NextLink ([uri] $nextLink) -Context $Context
+
+            $pageEnvelope = Invoke-GraphRetry `
+                -Context $Context `
+                -Descriptor $descriptor `
+                -Uri ([uri] $nextLink) `
+                -Method 'GET' `
+                -Headers @{} `
+                -Body $null `
+                -CancellationToken ([System.Threading.CancellationToken]::None)
+
+            if ($null -eq $pageEnvelope -or $pageEnvelope.Outcome -ne 'Succeeded') {
+                throw (
+                    "GraphKit read of '$ResourceFamily' in tenant '{0}' failed while following a nextLink on page {1}. " -f $Context.TenantId, ($pageGuard + 1)
+                ) + 'A partial directory collection must not be treated as complete.'
+            }
+
+            $pageData = $pageEnvelope.Data
+            if ($null -ne $pageData -and $null -ne $pageData.value) {
+                $data.value = @($data.value) + @($pageData.value)
+            }
+
+            $nextLink = Get-GraphDirectoryNextLink -Data $pageData
+        }
+
+        if ($null -ne $nextLink) {
+            throw (
+                "GraphKit read of '$ResourceFamily' in tenant '{0}' exceeded {1} pages. " -f $Context.TenantId, $pageGuard
+            ) + 'Refusing to return a truncated directory collection, because an incomplete grant list reads as a missing grant.'
+        }
+
+        return $data
     }
 
     $statusCode = Get-GraphEnvelopeStatusCode -Envelope $envelope

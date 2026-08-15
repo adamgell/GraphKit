@@ -316,3 +316,59 @@ Describe 'Review finding: -Name cannot escape -Path on export' {
         Test-Path -LiteralPath (Join-Path (Split-Path $script:ExportDir -Parent) 'escaped.json') | Should -BeFalse
     }
 }
+
+Describe 'Review finding: directory reads follow nextLink' {
+    # Invoke-GraphDirectoryRead returned $envelope.Data from a single request, so
+    # appRoleAssignments and oauth2PermissionGrants (paged relationship collections,
+    # 100 per page) were read FIRST PAGE ONLY. The permission analyzer then reported
+    # MissingGrant for permissions that were in fact granted - under-reporting grants.
+
+    It 'concatenates every page of a paged directory collection' {
+        $result = InModuleScope GraphKit {
+            $script:calls = 0
+            Mock Invoke-GraphRetry {
+                $script:calls++
+                if ($script:calls -eq 1) {
+                    return [pscustomobject] @{
+                        Outcome = 'Succeeded'
+                        Data    = @{ value = @(@{ id = 'a' }); '@odata.nextLink' = 'https://graph.microsoft.com/v1.0/next1' }
+                    }
+                }
+                return [pscustomobject] @{ Outcome = 'Succeeded'; Data = @{ value = @(@{ id = 'b' }) } }
+            }
+            Mock Test-GraphNextLinkAuthority { $true }
+
+            Invoke-GraphDirectoryRead `
+                -Context ([pscustomobject] @{ TenantId = [guid]::Empty; GraphBaseUri = [uri] 'https://graph.microsoft.com'; Cloud = 'Global' }) `
+                -Uri ([uri] 'https://graph.microsoft.com/v1.0/servicePrincipals/x/appRoleAssignments') `
+                -ResourceFamily 'Directory.AppRoleAssignments'
+        }
+
+        @($result.value).Count | Should -Be 2 -Because 'a truncated grant list reads as a missing grant'
+        @($result.value).id | Should -Contain 'b'
+    }
+
+    It 'refuses rather than truncating when a later page fails' {
+        {
+            InModuleScope GraphKit {
+                $script:calls = 0
+                Mock Invoke-GraphRetry {
+                    $script:calls++
+                    if ($script:calls -eq 1) {
+                        return [pscustomobject] @{
+                            Outcome = 'Succeeded'
+                            Data    = @{ value = @(@{ id = 'a' }); '@odata.nextLink' = 'https://graph.microsoft.com/v1.0/next1' }
+                        }
+                    }
+                    return [pscustomobject] @{ Outcome = 'Failed'; Data = $null; Telemetry = @() }
+                }
+                Mock Test-GraphNextLinkAuthority { $true }
+
+                Invoke-GraphDirectoryRead `
+                    -Context ([pscustomobject] @{ TenantId = [guid]::Empty; GraphBaseUri = [uri] 'https://graph.microsoft.com'; Cloud = 'Global' }) `
+                    -Uri ([uri] 'https://graph.microsoft.com/v1.0/servicePrincipals/x/appRoleAssignments') `
+                    -ResourceFamily 'Directory.AppRoleAssignments'
+            }
+        } | Should -Throw -ExpectedMessage '*must not be treated as complete*'
+    }
+}
