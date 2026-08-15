@@ -31,8 +31,10 @@ BeforeAll {
         $source | Add-Member -MemberType ScriptMethod -Name Acquire -Value {
             param([bool] $forceRefresh, $ct)
             [pscustomobject] @{
-                AccessToken      = 'test-bearer-token'
-                VerifiedTenantId = $script:VerifiedTenant
+                AccessToken          = 'test-bearer-token'
+                VerifiedTenantId     = $script:VerifiedTenant
+                TokenFingerprint     = 'test-fingerprint'
+                CredentialGeneration = 'test-generation'
             }
         }
         return $source
@@ -213,23 +215,35 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         }
         $authority = [uri] "http://127.0.0.1:$port"
 
-        # Matching tenant: send proceeds.
-        $r = InModuleScope GraphKit -ArgumentList $port, $authority, (New-TestTokenSource), $script:VerifiedTenant {
-            param($Port, $ExpectedAuthority, $TokenSource, $TargetTenantId)
+        # Matching tenant: the injected prover stands in for the real
+        # /organization proof read and marks the token verified for the target
+        # tenant, so the binding gate passes and the send is attempted.
+        $verifiedProver = {
+            param($Context, $TokenResult)
+            $TokenResult.VerifiedTenantId = $Context.TenantId
+        }
+        $r = InModuleScope GraphKit -ArgumentList $port, $authority, (New-TestTokenSource), $script:VerifiedTenant, $verifiedProver {
+            param($Port, $ExpectedAuthority, $TokenSource, $TargetTenantId, $TenantBindingProver)
             Send-GraphHttpRequest -Uri ([uri] "http://127.0.0.1:$Port/x") -Method POST -Body @{} `
                 -CredentialPolicy GraphBearer -ExpectedAuthority $ExpectedAuthority -TokenSource $TokenSource `
-                -TargetTenantId $TargetTenantId -VerifyTenantBinding
+                -TargetTenantId $TargetTenantId -VerifyTenantBinding -TenantBindingProver $TenantBindingProver
         }
         $captured = Stop-GraphLoopback $server
         $r.StatusCode | Should -Be 204
 
-        # Mismatched tenant: hard error, no send.
+        # Mismatched tenant: the injected prover confirms the token's REAL
+        # tenant (the one its source was issued for), which is not the target,
+        # so the sender's binding gate fires its hard error and nothing is sent.
+        $realTenantProver = {
+            param($Context, $TokenResult)
+            $TokenResult.VerifiedTenantId = [string] $Context.TokenSource.VerifiedTenantId
+        }
         $port2 = Get-FreePort
-        InModuleScope GraphKit -ArgumentList $port2, ([uri] "http://127.0.0.1:$port2"), (New-TestTokenSource), ([guid] 'ffffffff-ffff-ffff-ffff-ffffffffffff') {
-            param($Port, $ExpectedAuthority, $TokenSource, $TargetTenantId)
+        InModuleScope GraphKit -ArgumentList $port2, ([uri] "http://127.0.0.1:$port2"), (New-TestTokenSource), ([guid] 'ffffffff-ffff-ffff-ffff-ffffffffffff'), $realTenantProver {
+            param($Port, $ExpectedAuthority, $TokenSource, $TargetTenantId, $TenantBindingProver)
             { Send-GraphHttpRequest -Uri ([uri] "http://127.0.0.1:$Port/x") -Method POST -Body @{} `
                 -CredentialPolicy GraphBearer -ExpectedAuthority $ExpectedAuthority -TokenSource $TokenSource `
-                -TargetTenantId $TargetTenantId -VerifyTenantBinding } |
+                -TargetTenantId $TargetTenantId -VerifyTenantBinding -TenantBindingProver $TenantBindingProver } |
                 Should -Throw '*Tenant binding failed*'
         }
     }

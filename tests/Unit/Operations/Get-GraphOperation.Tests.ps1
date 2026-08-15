@@ -14,10 +14,10 @@ Describe 'Get-GraphOperation' {
         It 'returns every descriptor with -List' {
             $all = @(InModuleScope GraphKit { Get-GraphOperationInternal -List })
 
-            $all.Count | Should -Be 3
+            $all.Count | Should -Be 6
         }
 
-        It 'returns all three known descriptors by Type and Operation' {
+        It 'returns all six known descriptors by Type and Operation' {
             $pairs = @(InModuleScope GraphKit {
                 Get-GraphOperationInternal -List | ForEach-Object { "$($_['Type'])/$($_['Operation'])" } | Sort-Object
             })
@@ -76,7 +76,7 @@ Describe 'Get-GraphOperation' {
         It 'filters by a supported cloud' {
             $all = @(InModuleScope GraphKit { Get-GraphOperationInternal -Cloud 'USGov' })
 
-            $all.Count | Should -Be 3
+            $all.Count | Should -Be 6
         }
 
         It 'returns no descriptors for a cloud nobody declares support for' {
@@ -92,7 +92,7 @@ Describe 'Get-GraphOperation' {
         It 'lists the catalog through the exported command' {
             $all = @(Get-GraphOperation -List)
 
-            $all.Count | Should -Be 3
+            $all.Count | Should -Be 6
         }
 
         It 'resolves a single descriptor through the exported command' {

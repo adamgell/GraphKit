@@ -1,0 +1,128 @@
+<#
+    Phase 1.6 gate: the MSAL import-order matrix.
+
+    Microsoft.Identity.Client is a private implementation detail of
+    Microsoft.Graph.Authentication, and in the default .NET load context the first
+    copy loaded into the process wins for every consumer. This matrix imports
+    GraphKit's dependencies in each meaningful order, in a FRESH pwsh process per
+    row, and asserts that the import-time guard still passes and records which MSAL
+    version actually won. A silent version change is otherwise indistinguishable
+    from a working configuration until a customer engagement.
+
+    Run:  ./build.ps1 -Tasks build   then   Invoke-Pester ./tests/QA/ImportOrderMatrix.tests.ps1
+#>
+
+BeforeDiscovery {
+    $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    $script:BuiltBase = Get-ChildItem -Path (Join-Path $repoRoot 'output/module/GraphKit') -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1
+    $script:AzAvailable = [bool](Get-Module Az.Accounts -ListAvailable -ErrorAction SilentlyContinue)
+
+    $matrixRows = @(
+        @{ Name = 'GraphKit-first';      PreModules = @();                                             IsAz = $false }
+        @{ Name = 'PSResourceGet-first'; PreModules = @('Microsoft.PowerShell.PSResourceGet');         IsAz = $false }
+        @{ Name = 'GraphAuth-first';     PreModules = @('Microsoft.Graph.Authentication');             IsAz = $false }
+    )
+    if ($script:AzAvailable) {
+        $matrixRows += @{ Name = 'AzAccounts-first'; PreModules = @('Az.Accounts'); IsAz = $true }
+    }
+}
+
+Describe 'MSAL import-order matrix' -Skip:($null -eq $script:BuiltBase) {
+
+    BeforeAll {
+        $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $script:BuiltBase = Get-ChildItem -Path (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+        $script:manifestPath = Join-Path $script:BuiltBase.FullName 'GraphKit.psd1'
+        $script:AzAvailable = [bool](Get-Module Az.Accounts -ListAvailable -ErrorAction SilentlyContinue)
+
+        $script:MatrixRows = @(
+            @{ Name = 'GraphKit-first';      PreModules = @();                                             IsAz = $false }
+            @{ Name = 'PSResourceGet-first'; PreModules = @('Microsoft.PowerShell.PSResourceGet');         IsAz = $false }
+            @{ Name = 'GraphAuth-first';     PreModules = @('Microsoft.Graph.Authentication');             IsAz = $false }
+        )
+        if ($script:AzAvailable) {
+            $script:MatrixRows += @{ Name = 'AzAccounts-first'; PreModules = @('Az.Accounts'); IsAz = $true }
+        }
+
+        function Invoke-GraphImportOrderProbe {
+            param(
+                [string] $ManifestPath,
+                [string[]] $PreModules
+            )
+
+            $imports = ($PreModules | ForEach-Object { "    Import-Module '$_' -ErrorAction Stop" }) -join "`n"
+
+            $childTemplate = @'
+$ErrorActionPreference = 'Stop'
+$result = [ordered]@{
+    ImportSucceeded     = $true
+    GuardOutcome        = 'passed'
+    GuardError          = $null
+    DetectedMsalVersion = $null
+}
+try {
+__IMPORTS__
+    Import-Module '__MANIFEST__' -ErrorAction Stop
+}
+catch {
+    $result.ImportSucceeded = $false
+    $result.GuardOutcome = 'failed'
+    $result.GuardError = $_.Exception.Message
+}
+$msal = [AppDomain]::CurrentDomain.GetAssemblies() |
+    Where-Object { $_.GetName().Name -eq 'Microsoft.Identity.Client' } |
+    Select-Object -First 1
+if ($msal) { $result.DetectedMsalVersion = $msal.GetName().Version.ToString() }
+[pscustomobject] $result | ConvertTo-Json -Compress
+'@
+
+            $escapedManifest = $ManifestPath.Replace("'", "''")
+            $child = $childTemplate.Replace('__IMPORTS__', $imports).Replace('__MANIFEST__', $escapedManifest)
+
+            $output = & pwsh -NoProfile -Command $child 2>&1 | ForEach-Object { $_.ToString() }
+            $jsonLine = $output | Where-Object { $_.StartsWith('{"ImportSucceeded"') } | Select-Object -Last 1
+
+            if (-not $jsonLine) {
+                throw "import-order probe produced no JSON report. Raw output:`n$($output -join "`n")"
+            }
+
+            return $jsonLine | ConvertFrom-Json
+        }
+
+        # One fresh child process per row; each is bounded well under 60 seconds.
+        $script:Results = @{}
+        foreach ($row in $script:MatrixRows) {
+            $script:Results[$row.Name] = Invoke-GraphImportOrderProbe -ManifestPath $script:manifestPath -PreModules $row.PreModules
+        }
+    }
+
+    It 'row <Name> imports GraphKit successfully (guard passed)' -ForEach $matrixRows {
+        $result = $script:Results[$_.Name]
+        $result.ImportSucceeded | Should -BeTrue -Because "guard error: $($result.GuardError)"
+        $result.GuardOutcome | Should -Be 'passed'
+    }
+
+    It 'row <Name> detects a MSAL version at or above the tested minimum' -ForEach $matrixRows {
+        $version = $script:Results[$_.Name].DetectedMsalVersion
+        $version | Should -Not -BeNullOrEmpty
+        ([version] $version) -ge [version] '4.82.1' | Should -BeTrue -Because "detected MSAL $version is below the tested minimum 4.82.1"
+    }
+
+    It 'all non-Az rows agree on a single winning MSAL version' {
+        $winners = @($script:MatrixRows | Where-Object { -not $_.IsAz } | ForEach-Object { $script:Results[$_.Name].DetectedMsalVersion } | Select-Object -Unique)
+        $winners.Count | Should -Be 1 -Because "non-Az rows surfaced different winners: $($winners -join ', ')"
+    }
+
+    It 'Az.Accounts row stays within the tested minimum (a different winner warns, not fails)' -Skip:(-not $script:AzAvailable) {
+        $azRow = $script:MatrixRows | Where-Object { $_.IsAz } | Select-Object -First 1
+        $azVersion = $script:Results[$azRow.Name].DetectedMsalVersion
+        ([version] $azVersion) -ge [version] '4.82.1' | Should -BeTrue
+
+        $baseline = @($script:MatrixRows | Where-Object { -not $_.IsAz } | ForEach-Object { $script:Results[$_.Name].DetectedMsalVersion } | Select-Object -Unique)
+        if ($azVersion -notin $baseline) {
+            Write-Warning "Az.Accounts loaded MSAL $azVersion, a different winner from the non-Az baseline ($($baseline -join ', ')). The guard still passed; this divergence is exactly what the import-order matrix exists to surface."
+        }
+    }
+}

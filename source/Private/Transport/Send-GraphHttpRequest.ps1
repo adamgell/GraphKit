@@ -84,7 +84,9 @@ function Send-GraphHttpRequest {
 
         [guid] $TargetTenantId = [guid]::Empty,
 
-        [switch] $VerifyTenantBinding
+        [switch] $VerifyTenantBinding,
+
+        [scriptblock] $TenantBindingProver
     )
 
     $result = [GraphTransportResult]::new()
@@ -176,8 +178,41 @@ function Send-GraphHttpRequest {
         }
         if ($VerifyTenantBinding) {
             # Mutating sends require tenant proof BEFORE the request is issued.
-            # A null or mismatched VerifiedTenantId is a hard error: no send and no
-            # bearer token leaves the process.
+            # A result that carries no VerifiedTenantId, or whose binding is not
+            # recorded for the current fingerprint + generation + tenant, is
+            # proven now. A provider's claim is never trusted: only a recorded
+            # binding skips the proof call.
+            $verifiedTenant = [string] $tokenResult.VerifiedTenantId
+            $claimMatches = -not [string]::IsNullOrEmpty($verifiedTenant) -and
+                [string]::Equals($verifiedTenant, [string] $TargetTenantId, [System.StringComparison]::OrdinalIgnoreCase)
+
+            $bindingCached = $false
+            if ($claimMatches) {
+                $bindingCached = Test-GraphTenantBinding `
+                    -Fingerprint ([string] $tokenResult.TokenFingerprint) `
+                    -Generation ([string] $tokenResult.CredentialGeneration) `
+                    -TenantId $TargetTenantId
+            }
+
+            if (-not $claimMatches -or -not $bindingCached) {
+                # The sender is deliberately context-free (it receives the
+                # expected authority, target tenant and token source rather than
+                # the full context), so reconstruct the minimal shape the prover
+                # needs to build its proof read and binding key.
+                $proofContext = [pscustomobject] @{
+                    TenantId     = $TargetTenantId
+                    GraphBaseUri = $ExpectedAuthority
+                    TokenSource  = $TokenSource
+                }
+
+                $prover = $TenantBindingProver
+                if ($null -eq $prover) {
+                    $prover = { param($Context, $TokenResult) Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult }
+                }
+
+                & $prover -Context $proofContext -TokenResult $tokenResult
+            }
+
             if ($null -eq $tokenResult -or
                 [string]::IsNullOrEmpty([string] $tokenResult.VerifiedTenantId) -or
                 -not [string]::Equals([string] $tokenResult.VerifiedTenantId, [string] $TargetTenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
