@@ -17,7 +17,14 @@
 
 BeforeAll {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    Import-Module (Join-Path $repoRoot 'output/module/GraphKit/0.0.1/GraphKit.psd1') -Force -ErrorAction Stop
+    # Discover the built version rather than naming it: a hard-coded path silently
+    # breaks the whole file on any version bump, which is exactly what happened.
+    $built = Get-ChildItem -Path (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($null -eq $built) {
+        throw 'GraphKit is not built. Run ./build.ps1 -Tasks build first, then re-run the tests.'
+    }
+    Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force -ErrorAction Stop
 
     function Start-LoopbackServer {
         param([hashtable] $Handlers)

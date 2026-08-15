@@ -16,7 +16,14 @@
 
 BeforeAll {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $script:ModulePath = Join-Path $repoRoot 'output/module/GraphKit/0.0.1/GraphKit.psd1'
+    # Discover the built version rather than naming it: a hard-coded path silently
+    # breaks the whole file on any version bump, which is exactly what happened.
+    $built = Get-ChildItem -Path (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($null -eq $built) {
+        throw 'GraphKit is not built. Run ./build.ps1 -Tasks build first, then re-run the tests.'
+    }
+    $script:ModulePath = Join-Path $built.FullName 'GraphKit.psd1'
     Import-Module $script:ModulePath -Force -ErrorAction Stop
 
     # A child runspace needs Pester too: InModuleScope is a Pester command, and without it
