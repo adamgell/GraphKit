@@ -25,9 +25,15 @@ The container run was worth more than the one auth mode it was built for, becaus
 
 Two things about the container are worth knowing before repeating it. `Microsoft.PowerShell.SecretManagement` is a hard `RequiredModules` entry, so it must be installed even for managed identity, which has no stored secret and never opens a vault; installing the module is not the same as registering a vault, and no vault extension was present, so lazy vault validation was still genuinely tested. Whether that dependency should be hard is an open question - the spec asks that managed identity, injected credentials, help, catalog inspection and CI all stay usable without a vault, and the module dependency is the one part of that which is not yet lazy.
 
-Deterministic CI (`.github/workflows/ci.yml`) gates on the whole Pester result across PowerShell 7.4/7.6 on Windows/Ubuntu/macOS. 559 deterministic tests are green under `./build.ps1 -Tasks test`; `tests/QA/Assert-GateResult.ps1` enforces the expected-minimum-count gate. Test suites now include `tests/Adapter/LoopbackSender.Tests.ps1` (the real HttpClient against an in-process HttpListener) and `tests/Concurrency/TokenIsolation.Tests.ps1`.
+Deterministic CI (`.github/workflows/ci.yml`) gates on the whole Pester result across PowerShell 7.4/7.6 on Windows/Ubuntu/macOS. 607 deterministic tests are green under `./build.ps1 -Tasks test`; `tests/QA/Assert-GateResult.ps1` enforces the expected-minimum-count gate. Test suites now include `tests/Adapter/LoopbackSender.Tests.ps1` (the real HttpClient against an in-process HttpListener) and `tests/Concurrency/TokenIsolation.Tests.ps1`.
 
-Remaining per spec: the phase-5 cutover, deliberately not started until a private package channel is decided.
+**Phase 5 (cutover) is in progress.** Steps 1-4 are done and proven: legacy-caller inventory, `Import-GraphLegacyProfile` (dry-run verified against the real `secrets.json`), a private versioned package channel with publish/pin/install, and a live read through the *installed* package. Steps 5-6 are partially unblocked - the operation catalog went from 0 to 15 collections covered at the API version IHA actually calls - and steps 7-8 are correctly gated behind them. Read `docs/cutover/2026-08-15-phase5-cutover.md` before touching any of it; it records why the remaining blocks are structural rather than remaining effort.
+
+Three things from that work belong here because they change how you run the build:
+
+- **Pack before test, not after.** The `pack` task begins with `Clean`, so `build,test,pack` rebuilds the module *after* the suite ran and packages bytes nothing tested. `Publish-GraphKitPackage.ps1` now enforces this by comparing the packaged `GraphKit.psm1` against the built module the tests imported, and refuses on mismatch.
+- **IntuneHealthAutomation is a beta-first consumer.** It declares its Graph surface in `src/data/GraphEndpoints.json` and reads beta for almost all of it. A v1.0 descriptor does not serve a beta caller, because API version is per-operation metadata. Measure coverage with `./scripts/Get-GraphKitCutoverCoverage.ps1`.
+- **A descriptor's `RequiredPermissions` is a claim about the service, and only the service can confirm it.** Three of the twenty-six descriptors added declared permissions that returned 403 despite the token demonstrably carrying them. Live-verify every new descriptor.
 
 Two exceptions are real and runnable today, copied from IntuneHealthAutomation:
 
