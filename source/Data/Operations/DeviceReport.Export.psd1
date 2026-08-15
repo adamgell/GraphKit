@@ -1,35 +1,29 @@
 <#
-    Operation descriptor - data only.
-
-    This is the normative example from the design spec. Descriptors are versioned,
-    data-only .psd1 files: behavioural fields reference validated strategy IDs,
-    never scriptblocks, so a descriptor can be loaded with Import-PowerShellDataFile
-    without executing anything.
+    Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 #>
 @{
     SchemaVersion       = 1
 
-    Type                = 'MobileApp'
-    Operation           = 'Assign'
-    OperationKind       = 'Action'
-    HandlerStrategyId   = 'Action.Default'
+    Type                = 'DeviceReport'
+    Operation           = 'Export'
+    OperationKind       = 'LongRunningJob'
+    HandlerStrategyId   = 'LongRunningJob.PollStatus'
 
     ApiVersion          = 'v1.0'
     Stability           = 'Stable'
     BetaReason          = $null
 
     Method              = 'POST'
-    PathTemplate        = '/deviceAppManagement/mobileApps/{id}/assign'
-    RequestBodyKind     = 'MobileAppAssignmentSet'
-    ResponseKind        = 'NoContent'
+    PathTemplate        = '/deviceManagement/reports/exportJobs'
+    RequestBodyKind     = 'DeviceReportExportJob'
+    ResponseKind        = 'Json'
     PagingStrategy      = 'None'
     RequiredPagingHeaders = @()
     DeduplicationKey    = $null
     SupportsAll         = $false
     SupportsDelta       = $false
 
-    # Intrinsic replay policy. Attempt certainty is determined at runtime and is NOT stored here.
-    ReplayPolicy        = 'NeverReplay'
+    ReplayPolicy        = 'Safe'
     Condition           = $null
     Reconciliation      = $null
 
@@ -41,12 +35,12 @@
     RedirectPolicy      = 'None'
     IdentityRequirement = 'Verified'
 
-    ResourceFamily      = 'Intune.MobileApps'
+    ResourceFamily      = 'Intune.Reporting'
     ThrottleClass       = 'Write'
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(
-        @{ Type = 'Application'; Value = 'DeviceManagementApps.ReadWrite.All' }
+        @{ Type = 'Application'; Value = 'DeviceManagementManagedDevices.Read.All' }
     )
     RequiredLicense     = @('Microsoft Intune')
     SupportedClouds     = @('Global', 'USGov', 'USGovDoD')

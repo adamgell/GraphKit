@@ -91,7 +91,7 @@ PowerShell classes CANNOT declare new interfaces (only implement existing .NET o
 
 ### Public command surface (files below)
 
-`Register-GraphTenant`, `Get-GraphTenant`, `Remove-GraphTenant`, `Test-GraphTenant`, `Get-GraphContext`, `Use-GraphTenant` (slice 2); `Get-GraphOperation` (slice 1); `Invoke-GraphRequest`, `Invoke-GraphBatch` (slice 5). All accept `-Context` or `-ProfileId` (never display `Name` as selector).
+`Register-GraphTenant`, `Get-GraphTenant`, `Remove-GraphTenant`, `Test-GraphTenant`, `Get-GraphContext`, `Use-GraphTenant` (slice 2); `Get-GraphOperation` (slice 1); `Invoke-GraphOperation`, `Invoke-GraphBatch` (slice 5). All accept `-Context` or `-ProfileId` (never display `Name` as selector).
 
 ---
 
@@ -158,7 +158,7 @@ PowerShell classes CANNOT declare new interfaces (only implement existing .NET o
 - `source/Private/Test-GraphCredentialPolicy.ps1` — GraphBearer: HTTPS + exact authority; None: allowlist + HTTPS; hard error naming offending authority (active under `-Raw` too)
 - `source/Private/Invoke-GraphPaging.ps1` — NextLink loop: opaque nextLink, authority-validated per hop, required headers repeated per page, empty page with nextLink continues, dedup by DeduplicationKey, page cap, per-page retry via Invoke-GraphRetry, aggregates Data + per-page telemetry
 - `source/Private/Invoke-GraphHandlerStrategy.ps1` — executes registered strategy (`Collection.Default`, `Action.Default`, `Reconciliation.StableExternalKey`, `LongRunningJob.PollStatus`) with `($Context, $Descriptor, $Parameters, $Transport)` (+ `$IntendedState` for reconciliation); registers the four v1 strategies at import; handlers use only injected transport delegates
-- `source/Public/Invoke-GraphRequest.ps1` — orchestrates: resolve descriptor + context, validate credential policy, run strategy/retry, warn-once-per-session for BetaPreferred, stamp provenance, return ONE envelope per logical operation
+- `source/Public/Invoke-GraphOperation.ps1` — orchestrates: resolve descriptor + context, validate credential policy, run strategy/retry, warn-once-per-session for BetaPreferred, stamp provenance, return ONE envelope per logical operation
 - `source/Public/Invoke-GraphBatch.ps1` — read-only by default: ordered per-subrequest envelopes, 424 dependency reporting with blocking id, retry only failed retryable `Safe` subrequests, never replay successful write subrequests, single batch transport call
 - `tests/Unit/Pipeline/*.tests.ps1` + `<Name>.Tests.ps1` files
 

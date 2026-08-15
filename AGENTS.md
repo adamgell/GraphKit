@@ -4,7 +4,7 @@
 
 GraphKit is planned as an app-only, multi-tenant Microsoft Graph execution and analysis layer with explicit Intune and Entra operation semantics. It is not a generic Graph SDK or an OAuth implementation. Its core value is reliable request execution: immutable tenant contexts, operation metadata, semantics-aware retry/throttling, permission analysis, and evidence export.
 
-**Repository status:** design-approved and scaffolded with Sampler (2026-08-15, Plaster template invoked directly — `New-SampleModule` itself cannot run unattended). `source/`, `build.ps1`, `build.yaml`, and `RequiredModules.psd1` exist; no CI workflows exist yet. Module implementation is under way: phase 1 (Core) is the active increment, and `source/Public/` currently contains only scaffold placeholder functions.
+**Repository status:** design-approved, scaffolded with Sampler, and mid-implementation. Phase 1 core (1.2 descriptors/loader/registry, 1.3 contexts/profiles/token sources, 1.4 transport/retry/telemetry, 1.5 URI security/paging/batch, 1.7 scoped throttle + AIMD) is implemented with ~360 deterministic tests green under `./build.ps1 -Tasks test`. Remaining phase-1 increments: 1.6 auth/vault integration and 1.8 the protected Ivy24 smoke workflow; phases 2-4 (operations expansion, permissions, export) follow.
 
 Two exceptions are real and runnable today, copied from IntuneHealthAutomation:
 
@@ -21,7 +21,7 @@ Planned flow:
 1. `Register-GraphTenant` persists non-secret profile metadata; credentials stay in `Microsoft.PowerShell.SecretManagement`.
 2. `Get-GraphContext` resolves a profile into an immutable runtime context before parallel work begins.
 3. Public commands resolve an operation descriptor from `source/Data/Operations/*.psd1`.
-4. `Invoke-GraphRequest` validates URI/query/version/cloud/permission rules, then issues the request through a **GraphKit-owned `HttpClient`** using a token from the context's own MSAL confidential client.
+4. `Invoke-GraphOperation` validates URI/query/version/cloud/permission rules, then issues the request through a **GraphKit-owned `HttpClient`** using a token from the context's own MSAL confidential client.
 5. The request pipeline handles paging, deadlines, cancellation, scoped admission control, and semantics-aware retry. GraphKit is the **sole retry owner**; there is no underlying handler that can retry behind its back.
 6. Results return as `PSCustomObject` values with `PSTypeName` `GraphKit.<Type>` and provenance such as `_Tenant`, `_RetrievedUtc`, `_GraphPath`, and `_ApiVersion` where applicable.
 7. `Export-GraphResult` writes CSV, JSON, Markdown, or redacted vault evidence.
@@ -82,7 +82,7 @@ Treat `build.ps1`, `build.yaml`, and `RequiredModules.psd1` as authoritative for
 
 ## Code Conventions & Common Patterns
 
-- Use standard PowerShell `Verb-Noun` names with the `Graph` noun prefix, for example `Get-GraphContext`, `Invoke-GraphRequest`, and `Test-GraphPermission`.
+- Use standard PowerShell `Verb-Noun` names with the `Graph` noun prefix, for example `Get-GraphContext`, `Invoke-GraphOperation`, and `Test-GraphPermission`.
 - Keep exported commands in `source/Public/` and implementation helpers in `source/Private/`; do not add a second module layout.
 - Make operation behavior descriptor-driven. Descriptors own method, path, API version, response kind, paging, retry safety, concurrency, permissions, licensing, clouds, and stability.
 - Prefer explicit operation-specific handling over abstractions that hide Graph differences.

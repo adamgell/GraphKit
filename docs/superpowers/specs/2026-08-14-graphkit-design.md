@@ -411,7 +411,7 @@ GraphKit/
     Public/
       Register-GraphTenant, Get-GraphTenant, Remove-GraphTenant, Test-GraphTenant
       Get-GraphContext, Use-GraphTenant
-      Invoke-GraphRequest, Invoke-GraphBatch
+      Invoke-GraphOperation, Invoke-GraphBatch
       Get-GraphObject, Get-GraphOperation
       Test-GraphPermission, Get-GraphAppRegistrationPermission,
       Compare-GraphPermission, Grant-GraphAppPermission
@@ -707,7 +707,7 @@ abstraction starts lying.
 | **National-cloud availability** is per operation, not inferable from hostname. | `SupportedClouds`; completion hides or marks unsupported operations for the active profile. |
 | **`$expand` is a performance trap** — ~1,000 `mobileApps` expanded with assignments exhausted SDK retries where Graph Explorer succeeded. | Query strategy in the descriptor, caller-overridable. Never auto-prefer one-shot `$expand` over paged child reads. |
 
-**Escape hatch:** `Invoke-GraphRequest -Raw` bypasses descriptor validation entirely, so strictness
+**Escape hatch:** `Invoke-GraphOperation -Raw` bypasses descriptor validation entirely, so strictness
 never blocks expert use.
 
 #### API version is a fact, not a mode
@@ -749,10 +749,14 @@ additionally require:
 
 ### Request pipeline
 
-`Invoke-GraphRequest` issues requests through a GraphKit-owned `HttpClient` using a token from
+`Invoke-GraphOperation` issues requests through a GraphKit-owned `HttpClient` using a token from
 the context's `IGraphTokenSource`. **GraphKit is the sole retry owner** — there is no underlying
 handler that can retry behind its back, which is what makes the replay guarantees below
 enforceable rather than aspirational.
+
+The command is named Invoke-GraphOperation, not Invoke-GraphRequest: Microsoft.Graph.Authentication,
+a required module, already exports a cmdlet named Invoke-GraphRequest, and exporting the same name
+would collide in every session.
 
 A contract test asserts that **one GraphKit attempt produces exactly one physical send**.
 
@@ -977,7 +981,7 @@ There is exactly one envelope, `GraphKit.OperationResult`:
 | `Telemetry` | Per-attempt evidence, as above |
 | `Provenance` | Tenant, API version, endpoint family, retrieval time, `IdentityState`, and `ActualTenantId` when verified |
 
-- `Invoke-GraphRequest` **always** returns exactly one envelope.
+- `Invoke-GraphOperation` **always** returns exactly one envelope.
 - **`Invoke-GraphBatch` returns one ordered envelope per original subrequest**, not one envelope
   for the batch. A batch routinely mixes outcomes — some subrequests succeed, some are throttled
   and retried, some fail, and a write that timed out is indeterminate. A single `Outcome` and

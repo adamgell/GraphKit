@@ -1,0 +1,232 @@
+BeforeAll {
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+
+    # Import the BUILT module (never dot-source source files: they would redefine module classes
+    # and Add-Type types in test scope). Pester discovers tests per file, so each file imports it.
+    $built = Get-ChildItem (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $built) {
+        throw 'No built GraphKit module found under output/module/GraphKit; run ./build.ps1 -Tasks build first.'
+    }
+    Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force
+
+    $script:Context = [PSCustomObject]@{
+        Cloud         = 'Global'
+        GraphBaseUri  = [uri] 'https://graph.microsoft.com'
+        IdentityState = 'VerifiedForToken'
+    }
+
+    $script:RecordedCalls = [System.Collections.Generic.List[object]]::new()
+
+    # Closure bound to this test file's session state: $script:RecordedCalls resolves here even
+    # when the module invokes the scriptblock as a transport delegate.
+    $script:FakeTransport = {
+        param([uri] $Uri, [string] $Method, [hashtable] $Headers, $Body, [System.Threading.CancellationToken] $CancellationToken)
+
+        $script:RecordedCalls.Add([PSCustomObject]@{
+                Uri     = $Uri.AbsoluteUri
+                Method  = $Method
+                Headers = $Headers
+                Body    = $Body
+            })
+
+        [PSCustomObject]@{
+            PSTypeName = 'GraphKit.OperationResult'
+            Data       = @()
+            Outcome    = 'Succeeded'
+            Certainty  = 'Known'
+            Telemetry  = @()
+            Provenance = @{}
+        }
+    }
+
+    function Reset-CallLog {
+        $script:RecordedCalls.Clear()
+    }
+}
+
+Describe 'Invoke-GraphHandlerStrategy registration' {
+    It 'registers all four v1 strategies at import' {
+        InModuleScope GraphKit {
+            # Registration is idempotent and guaranteed on first strategy execution; the built
+            # module concatenates private files alphabetically, so the import-time guard cannot
+            # run before the registry exists. Ensure the module registers them, then resolve.
+            $null = Ensure-GraphV1StrategiesRegistered
+
+            Resolve-GraphHandlerStrategy -Id 'Collection.Default' | Should -Not -BeNullOrEmpty
+            Resolve-GraphHandlerStrategy -Id 'Action.Default' | Should -Not -BeNullOrEmpty
+            Resolve-GraphHandlerStrategy -Id 'Reconciliation.StableExternalKey' | Should -Not -BeNullOrEmpty
+            Resolve-GraphHandlerStrategy -Id 'LongRunningJob.PollStatus' | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'Invoke-GraphHandlerStrategy dispatch' {
+    It 'Action.Default rejects a missing request body' {
+        $descriptor = @{
+            Type = 'MobileApp'; Operation = 'Assign'; OperationKind = 'Action'
+            HandlerStrategyId = 'Action.Default'; Method = 'POST'
+            PathTemplate = '/deviceAppManagement/mobileApps/{id}/assign'
+            ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+
+        {
+            InModuleScope GraphKit -ArgumentList $script:Context, $descriptor, $script:FakeTransport {
+                param($Context, $descriptor, $FakeTransport)
+
+                Invoke-GraphHandlerStrategy -Context $Context -Descriptor $descriptor -Parameters @{ id = 'abc' } -Transport $FakeTransport
+            }
+        } | Should -Throw -ExpectedMessage '*requires a request body*'
+    }
+
+    It 'Action.Default posts the body with the descriptor method' {
+        Reset-CallLog
+        $descriptor = @{
+            Type = 'MobileApp'; Operation = 'Assign'; OperationKind = 'Action'
+            HandlerStrategyId = 'Action.Default'; Method = 'POST'
+            PathTemplate = '/deviceAppManagement/mobileApps/{id}/assign'
+            ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+
+        $result = InModuleScope GraphKit -ArgumentList $script:Context, $descriptor, $script:FakeTransport {
+            param($Context, $descriptor, $FakeTransport)
+
+            Invoke-GraphHandlerStrategy `
+                -Context $Context `
+                -Descriptor $descriptor `
+                -Parameters @{ id = 'abc'; Body = @{ assignments = @() } } `
+                -Transport $FakeTransport
+        }
+
+        $result.Outcome | Should -Be 'Succeeded'
+        $script:RecordedCalls | Should -HaveCount 1
+        $script:RecordedCalls[0].Method | Should -Be 'POST'
+        $script:RecordedCalls[0].Uri | Should -Match '/deviceAppManagement/mobileApps/abc/assign'
+        $script:RecordedCalls[0].Body.assignments | Should -BeNullOrEmpty
+    }
+
+    It 'Collection.Default delegates paging for NextLink operations' {
+        $descriptor = @{
+            Type = 'ManagedDevice'; Operation = 'List'; OperationKind = 'Collection'
+            HandlerStrategyId = 'Collection.Default'; Method = 'GET'
+            PathTemplate = '/deviceManagement/managedDevices'; PagingStrategy = 'NextLink'
+            DeduplicationKey = 'id'; RequiredPagingHeaders = @()
+            ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $true }
+            Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+
+        $fakeEnvelope = [PSCustomObject]@{
+            PSTypeName = 'GraphKit.OperationResult'
+            Data       = @(@{ id = 'x' })
+            Outcome    = 'Succeeded'
+            Certainty  = 'Known'
+            Telemetry  = @()
+            Provenance = @{}
+        }
+
+        Mock Invoke-GraphPaging -ModuleName GraphKit { return $fakeEnvelope }
+
+        $result = InModuleScope GraphKit -ArgumentList $script:Context, $descriptor, $script:FakeTransport {
+            param($Context, $descriptor, $FakeTransport)
+
+            Invoke-GraphHandlerStrategy -Context $Context -Descriptor $descriptor -Parameters @{} -Transport $FakeTransport
+        }
+
+        $result.Data | Should -Not -BeNullOrEmpty
+        Should-Invoke Invoke-GraphPaging -ModuleName GraphKit -Times 1 -Exactly
+    }
+
+    It 'Reconciliation.StableExternalKey requires a Reconciliation block and stable key' {
+        $descriptor = @{
+            Type = 'Policy'; Operation = 'Create'; OperationKind = 'Action'
+            HandlerStrategyId = 'Reconciliation.StableExternalKey'; Method = 'POST'
+            PathTemplate = '/deviceManagement/configurationPolicies'
+            ReplayPolicy = 'Reconciliable'; Reconciliation = $null
+            ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+
+        {
+            InModuleScope GraphKit -ArgumentList $script:Context, $descriptor, $script:FakeTransport {
+                param($Context, $descriptor, $FakeTransport)
+
+                Invoke-GraphHandlerStrategy -Context $Context -Descriptor $descriptor -Parameters @{} -Transport $FakeTransport
+            }
+        } | Should -Throw -ExpectedMessage '*Reconciliation*'
+    }
+
+    It 'Reconciliation.StableExternalKey reads through the supplied transport only' {
+        Reset-CallLog
+        $descriptor = @{
+            Type = 'Policy'; Operation = 'Create'; OperationKind = 'Action'
+            HandlerStrategyId = 'Reconciliation.StableExternalKey'; Method = 'POST'
+            PathTemplate = '/deviceManagement/configurationPolicies'
+            ReplayPolicy = 'Reconciliable'
+            Reconciliation = @{ StableExternalKey = 'displayName' }
+            ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+
+        $result = InModuleScope GraphKit -ArgumentList $script:Context, $descriptor, $script:FakeTransport {
+            param($Context, $descriptor, $FakeTransport)
+
+            Invoke-GraphHandlerStrategy `
+                -Context $Context `
+                -Descriptor $descriptor `
+                -Parameters @{ displayName = 'policy-a' } `
+                -Transport $FakeTransport `
+                -IntendedState @{ displayName = 'policy-a' }
+        }
+
+        $script:RecordedCalls | Should -HaveCount 1
+        $script:RecordedCalls[0].Method | Should -Be 'GET'
+    }
+}
+
+Describe 'Get-GraphRequestHeaders' {
+    It 'never attaches an Authorization header (the transport owns the bearer)' {
+        $headers = InModuleScope GraphKit {
+            Get-GraphRequestHeaders -Descriptor @{
+                AdvancedQuery         = @{ Supported = $false }
+                RequiredPagingHeaders = @()
+                Concurrency           = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+            }
+        }
+
+        $headers.ContainsKey('Authorization') | Should -BeFalse
+    }
+
+    It 'emits ConsistencyLevel only when advanced query is supported' {
+        $with = InModuleScope GraphKit {
+            Get-GraphRequestHeaders -Descriptor @{
+                AdvancedQuery         = @{ Supported = $true; ConsistencyLevel = 'eventual' }
+                RequiredPagingHeaders = @()
+                Concurrency           = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+            }
+        }
+        $with['ConsistencyLevel'] | Should -Be 'eventual'
+
+        $without = InModuleScope GraphKit {
+            Get-GraphRequestHeaders -Descriptor @{
+                AdvancedQuery         = @{ Supported = $false }
+                RequiredPagingHeaders = @()
+                Concurrency           = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+            }
+        }
+        $without.ContainsKey('ConsistencyLevel') | Should -BeFalse
+    }
+
+    It 'repeats required paging headers' {
+        $headers = InModuleScope GraphKit {
+            Get-GraphRequestHeaders -Descriptor @{
+                AdvancedQuery         = @{ Supported = $false }
+                RequiredPagingHeaders = @(@{ Name = 'X-Custom'; Value = 'y' })
+                Concurrency           = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+            }
+        }
+
+        $headers['X-Custom'] | Should -Be 'y'
+    }
+}

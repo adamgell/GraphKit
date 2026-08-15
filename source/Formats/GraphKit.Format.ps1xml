@@ -7,7 +7,7 @@
     registering it, and the views then silently never apply.
 
     Views are added as GraphKit.<Type> objects are introduced. The GraphKit.OperationResult
-    view below is the envelope returned by Invoke-GraphRequest and Invoke-GraphBatch.
+    view below is the envelope returned by Invoke-GraphOperation and Invoke-GraphBatch.
 -->
 <Configuration>
     <ViewDefinitions>
@@ -34,6 +34,13 @@
                     <TableColumnHeader>
                         <Label>Tenant</Label>
                     </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>ApiVersion</Label>
+                        <Width>10</Width>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>RetrievedUtc</Label>
+                    </TableColumnHeader>
                 </TableHeaders>
                 <TableRowEntries>
                     <TableRowEntry>
@@ -48,7 +55,13 @@
                                 <ScriptBlock>@($_.Data).Count</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
-                                <ScriptBlock>$_.Provenance.Tenant</ScriptBlock>
+                                <ScriptBlock>$_.Provenance.TenantId</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>$_.Provenance.ApiVersion</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>$_.Provenance.RetrievedUtc</ScriptBlock>
                             </TableColumnItem>
                         </TableColumnItems>
                     </TableRowEntry>

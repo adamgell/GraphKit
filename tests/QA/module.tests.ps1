@@ -81,7 +81,7 @@ Describe 'General module control' -Tags 'FunctionalQuality' {
 
 BeforeDiscovery {
     # Must use the imported module to build test cases.
-    $allModuleFunctions = & $mut { Get-Command -Module $args[0] -CommandType Function } $script:moduleName
+    $allModuleFunctions = Get-Command -Module $script:moduleName
 
     # Build test cases.
     $testCases = @()
