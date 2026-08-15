@@ -507,6 +507,27 @@ contamination the SDK transport was rejected for. Therefore:
 `config/secrets.json` tenant array and the `Start-WithConsole *.cmd` launchers, moving secrets
 into the vault so the plaintext copies can be deleted.
 
+#### Profile store durability
+
+`~/.graphkit/profiles.json` is the index for every tenant this tool can reach. Losing or
+corrupting it is not a cosmetic failure, and a half-written file is worse than a missing one.
+
+- **`SchemaVersion` at the root**, with explicit migrations. An older GraphKit reading a newer
+  file must refuse with a clear message rather than silently ignoring fields it does not
+  understand — dropping an unrecognized `Credential` shape would fall back to the wrong auth mode.
+- **Atomic replacement:** write to a temporary file in the same directory, fsync, then rename over
+  the original. A partial write during `Register-GraphTenant` must never leave an unparseable
+  store.
+- **Backup and recovery:** retain the previous generation. If the primary fails to parse, report
+  the parse error and the backup's location rather than silently recreating an empty store, which
+  would look like "all profiles vanished".
+- **Interprocess lock** around read-modify-write. Two `pwsh` sessions registering profiles
+  concurrently is ordinary — the unattended lab runner and an interactive session already do it —
+  and last-writer-wins would silently discard a registration.
+
+The vault holds the secrets; this file holds everything needed to *find* them. It is not
+sensitive, but it is not disposable either.
+
 ### Operation catalog — not a type-to-endpoint table
 
 A flat type→endpoint map is sufficient for basic collection reads and **breaks down everywhere
@@ -874,9 +895,16 @@ There is exactly one envelope, `GraphKit.OperationResult`:
 - `Get-GraphObject` projects `Data` onto the success stream for pipeline ergonomics, and **throws
   on any non-`Succeeded` outcome** so a failure can never be mistaken for an empty result. The
   envelope is available via `-PassThruResult`.
+- `-PassThruResult` is an **envelope-only output mode**, not an addition to the success stream.
+  Emitting rows and envelopes together would make the output shape depend on a switch, and any
+  downstream `Where-Object` would then see two unrelated object types.
 - `Export-GraphResult` accepts **either**, unwrapping envelopes itself. It refuses to export an
   `Indeterminate` result without `-Force`, because filing an uncertain write as evidence is
   exactly the error the certainty field exists to prevent.
+- `-As Json` preserves the **full envelope** — outcome, certainty, telemetry, provenance — not
+  just `Data`. Json is the format used for machine hand-off and for attaching to a support case,
+  which is precisely where certainty and the diagnostic chain matter. CSV and Markdown are
+  row-shaped and export `Data` only.
 
 ### Permission analysis
 
@@ -898,6 +926,15 @@ Four distinct states:
 2. **Application permissions granted** — locate the customer-tenant service principal by `appId`,
    inspect its app-role assignments against the Microsoft Graph service principal, resolving
    `appRoleAssignment.appRoleId` against `graphServicePrincipal.appRoles`.
+
+**States 1 and 2 live in different tenants and need different authenticated contexts.** The
+application object exists only in its home tenant; the service principal and its grants exist in
+the customer tenant. A single context cannot read both for a multi-tenant app.
+
+`Configured` is therefore tri-state: `Yes`, `No`, or **`Unknown`** when no home-tenant context is
+available. Reporting `Configured = No` because the analyzer simply could not look would invert the
+most consequential finding — "granted but no longer configured" and "never configured" are
+opposite conclusions, and the second is what an operator acts on.
 3. **Delegated grants** — `oauth2PermissionGrants`, resolving space-delimited scopes, consent
    type, principal, client and resource service principals. Separate from app-role assignments.
 4. **Runtime effectiveness** — may still fail on Intune licensing, Intune RBAC scope, Entra role
@@ -958,8 +995,17 @@ pointers to source paths, never raw exports, credentials, or PII:
 5. **Path containment is verified, not assumed.** Only `ProfileId` builds paths, and both output
    roots are canonicalized and asserted to remain beneath their configured base before any write.
    A `Name` is free text and would otherwise let `../` or a separator escape the root.
-6. A **redaction assertion** before any write: no tenantId, clientId, secret, or bearer token may
-   reach vault output. Enforced in code and covered by a test.
+6. **Vault evidence is built from an allowlist, not filtered by a denylist.** An earlier draft
+   asserted that tenantId, clientId, secrets, and bearer tokens were absent — four known-bad
+   values. That is a denylist, and it cannot catch what it was not told about: user principal
+   names, device names, serial numbers, IMEIs, IP addresses, email addresses, and group
+   memberships all flow through Intune results and none of them appear on that list.
+   `SCHEMA.md` forbids PII in evidence pages generally, not four specific fields.
+
+   The page is therefore constructed from a **summary DTO with a declared field set**. Raw Graph
+   objects never reach the writer. Any field not on the allowlist is rejected rather than
+   dropped, so a new Graph property cannot silently appear in evidence. The credential assertion
+   remains as a second, independent check — belt and braces, not the primary control.
 
 ## Versions
 
@@ -1015,13 +1061,46 @@ asserting attempt counts, exact requested delays, delay-source precedence, deadl
 cancellation, resulting throttle state, no replay after 202, no replay of ambiguous POST, one
 refresh after 401, and correct batch-subrequest selection.
 
-### Narrow adapter tests around the HTTP cmdlet
+### The real sender must be tested, not only the injected one
 
-Verify conversion into `GraphTransportResult` for: normal JSON, 204 with no body, binary, 429 in
-each `Retry-After` form, malformed `Retry-After`, a 200 batch response, 202 + `Retry-After`, 503
-with JSON error, HTML/plain-text gateway failures, connection reset, and header casing.
-Integration tests run a **loopback HTTP server** for behaviors a mock cannot reproduce —
-duplicate headers, content encoding, empty bodies, malformed header values, connection closure.
+Injecting `Send` makes retry logic deterministic, but **those tests pass whether or not the actual
+`HttpClient` behaves.** A sender that silently follows redirects, forwards `Authorization` to a
+redirect target, ignores the split timeouts, or has a retrying handler installed underneath would
+satisfy every unit test in the suite. The properties GraphKit promises about the *wire* have to be
+asserted on the wire.
+
+Adapter tests convert real responses into `GraphTransportResult`: normal JSON, 204 with no body,
+binary, 429 in each `Retry-After` form, malformed `Retry-After`, a 200 batch envelope containing
+inner 429s, 202 + `Retry-After`, 503 with a JSON error, HTML/plain-text gateway failures,
+connection reset, and header casing.
+
+**Loopback tests run through the built sender** — the same object the module ships, not a stand-in
+— and assert:
+
+| Property | Assertion |
+| --- | --- |
+| Redirects | Disabled, or every hop validated before credentials are forwarded |
+| `GraphBearer` | Attaches only to the exact cloud-specific Graph authority for that context |
+| `None` | **Never** carries an `Authorization` header — the report-download path |
+| Timeouts | Connection, header, and body boundaries each fire independently |
+| Cancellation | A cancelled token actually aborts an in-flight request |
+| Send count | **One GraphKit attempt equals exactly one handler send** — proves no hidden retry handler |
+| Telemetry | Query strings absent by default; a SAS-style signature never recorded |
+
+A loopback server also covers what a mock cannot reproduce: duplicate headers, content encoding,
+empty bodies, malformed header values, and mid-response connection closure.
+
+### Token isolation must be tested across contexts
+
+The authentication gate proves one Ivy24 acquisition. That does not prove isolation, which is the
+entire reason the SDK transport was rejected. Required:
+
+- Two contexts for **different tenants**, used concurrently, each receiving only its own token.
+- Concurrent acquisitions for the **same** cache key collapse to a single token-endpoint call
+  (single-flight), asserted by counting calls against a stub authority.
+- A `401` force-refresh on one context does **not** invalidate or refresh another's token.
+- A fixed bearer source reports `CanRefresh = false` and fails immediately on `401` rather than
+  retrying.
 
 ### Concurrency tests need real runspaces
 
@@ -1057,6 +1136,37 @@ minimum count**, and failed tests.
 
 Publishing runs once from a tested package artifact; the publish job must not rebuild
 independently.
+
+**Each matrix row installs and asserts its exact PowerShell version** rather than trusting the
+runner image. A row labelled 7.4 that silently ran 7.6 would report coverage the module does not
+have — and 7.4 is the declared floor, so it is the row most likely to drift.
+
+### Build and delivery commands
+
+The phase gates require an exact command per increment; prose conditions are not gates. These are
+canonical:
+
+| Step | Command |
+| --- | --- |
+| Restore dependencies | `./build.ps1 -ResolveDependency -Tasks noop` |
+| Build | `./build.ps1 -Tasks build` |
+| Deterministic tests | `./build.ps1 -Tasks test` |
+| Package | `./build.ps1 -Tasks pack` |
+| Register a temporary local repo | `Register-PSResourceRepository -Name GraphKitLocal -Uri <path> -Trusted` |
+| Install the exact package | `Install-PSResource GraphKit -Version <exact> -Repository GraphKitLocal -TrustRepository` |
+| Installed-package smoke | fresh `pwsh`, `Import-Module GraphKit`, assert operation data and default views |
+| Publish | `Publish-PSResource -Path <packaged> -Repository GraphKitPrivate` |
+| Pin in IHA | `RequiredModules = @(@{ModuleName='GraphKit'; RequiredVersion='<exact>'})` |
+
+**Gates test the installed package, never loose `output/` files.** A module that imports from
+`output/` can still fail once packaged — missing `CopyPaths` assets and unregistered
+`FormatsToProcess` are precisely the failures that only appear after install.
+
+The private channel needs to be decided before the cutover gate, not during it: repository URI and
+authentication, version source (GitVersion via Sampler), retention, and an integrity check —
+publish the exact tested bytes and verify the installed package hash matches what CI tested.
+**`RequiredVersion`, not `ModuleVersion`**, in IHA's manifest: a minimum-version pin would let an
+untested GraphKit satisfy it.
 
 ## Phases
 
