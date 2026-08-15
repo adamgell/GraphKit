@@ -10,3 +10,4 @@ output/
 # Local Pester/coverage artifacts
 *.coverage.xml
 testResults/
+docs/
