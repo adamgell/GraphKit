@@ -139,6 +139,24 @@ $script:CollectionDefaultStrategy = {
     return $result
 }
 
+$script:SingletonDefaultStrategy = {
+    param($Context, $Descriptor, $Parameters, $Transport)
+
+    # A singleton resource returns the object itself, not a collection envelope. The
+    # distinction matters: Collection.Default unwraps a 'value' array, and doing that to a
+    # singleton would either strip nothing (harmless) or, for a singleton that happens to
+    # carry a 'value' PROPERTY of its own, silently replace the object with that property.
+    # Endpoints like /policies/authenticationMethodsPolicy and /deviceManagement/settings are
+    # exactly this shape, which is why they need their own handler rather than a Collection
+    # descriptor with paging turned off.
+    $baseUri = [uri] ('{0}/{1}' -f $Context.GraphBaseUri.AbsoluteUri.TrimEnd('/'), $Descriptor.ApiVersion)
+    $uri = Resolve-GraphUri -Descriptor $Descriptor -Parameters $Parameters -BaseUri $baseUri
+
+    $headers = Get-GraphRequestHeaders -Descriptor $Descriptor -Parameters $Parameters
+
+    return & $Transport -Uri $uri -Method $Descriptor.Method -Headers $headers -Body $null -CancellationToken ([System.Threading.CancellationToken]::None)
+}
+
 $script:ActionDefaultStrategy = {
     param($Context, $Descriptor, $Parameters, $Transport)
 
@@ -282,6 +300,7 @@ function Ensure-GraphV1StrategiesRegistered {
     }
 
     Register-GraphHandlerStrategy -Id 'Collection.Default' -Handler $script:CollectionDefaultStrategy
+    Register-GraphHandlerStrategy -Id 'Singleton.Default' -Handler $script:SingletonDefaultStrategy
     Register-GraphHandlerStrategy -Id 'Action.Default' -Handler $script:ActionDefaultStrategy
     Register-GraphHandlerStrategy -Id 'Reconciliation.StableExternalKey' -Handler $script:ReconciliationStableExternalKeyStrategy
     Register-GraphHandlerStrategy -Id 'LongRunningJob.PollStatus' -Handler $script:LongRunningJobPollStatusStrategy

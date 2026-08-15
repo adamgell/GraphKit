@@ -14,6 +14,7 @@
 # private module code (slice 5); descriptors may only reference IDs in this set.
 $script:GraphKnownHandlerStrategyIds = @(
     'Collection.Default'
+    'Singleton.Default'
     'Action.Default'
     'Reconciliation.StableExternalKey'
     'LongRunningJob.PollStatus'
@@ -25,6 +26,7 @@ $script:GraphKnownHandlerStrategyIds = @(
 # Collection), so it maps to ReplayPolicy rather than an OperationKind.
 $script:GraphHandlerStrategyKindConstraints = @{
     'Collection'     = @{ OperationKind = 'Collection' }
+    'Singleton'      = @{ OperationKind = 'Singleton' }
     'Action'         = @{ OperationKind = 'Action' }
     'Reconciliation' = @{ ReplayPolicy = 'Reconciliable' }
     'LongRunningJob' = @{ OperationKind = 'LongRunningJob' }

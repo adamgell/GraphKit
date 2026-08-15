@@ -230,3 +230,80 @@ Describe 'Get-GraphRequestHeaders' {
         $headers['X-Custom'] | Should -Be 'y'
     }
 }
+
+Describe 'Singleton.Default strategy' {
+
+    BeforeAll {
+        $script:SingletonDescriptor = @{
+            Type              = 'ManagedDeviceSetting'
+            Operation         = 'Get'
+            OperationKind     = 'Singleton'
+            HandlerStrategyId = 'Singleton.Default'
+            ApiVersion        = 'beta'
+            Method            = 'GET'
+            PathTemplate      = '/deviceManagement/settings'
+            PagingStrategy    = 'None'
+            ResponseKind      = 'Json'
+            CredentialPolicy  = 'GraphBearer'
+            AdvancedQuery     = @{ Supported = $false }
+            Concurrency       = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+        }
+    }
+
+    It 'is a known v1 strategy' {
+        InModuleScope GraphKit {
+            { Resolve-GraphHandlerStrategy -Id 'Singleton.Default' } | Should -Not -Throw
+        }
+    }
+
+    It 'returns the response object without unwrapping a value property' {
+        # This is the entire reason Singleton.Default exists rather than reusing
+        # Collection.Default with paging off. A singleton that happens to carry its own
+        # 'value' property would be silently replaced by that property under the collection
+        # handler - the object would be swapped for one of its fields, with no error.
+        $transport = {
+            param([uri] $Uri, [string] $Method, [hashtable] $Headers, $Body, [System.Threading.CancellationToken] $CancellationToken)
+            [PSCustomObject]@{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @{ 'value' = 'this is a scalar property, not a collection'; 'secureByDefault' = $true }
+                Outcome    = 'Succeeded'
+                Certainty  = 'Known'
+                Telemetry  = @()
+                Provenance = @{}
+            }
+        }
+
+        $result = InModuleScope GraphKit -Parameters @{ D = $script:SingletonDescriptor; C = $script:Context; T = $transport } {
+            Invoke-GraphHandlerStrategy -Context $C -Descriptor $D -Parameters @{} -Transport $T
+        }
+
+        $result.Outcome | Should -Be 'Succeeded'
+        $result.Data | Should -BeOfType [System.Collections.IDictionary]
+        $result.Data['secureByDefault'] | Should -BeTrue
+        $result.Data['value'] | Should -Be 'this is a scalar property, not a collection'
+    }
+
+    It 'issues exactly one request and does not page' {
+        $calls = [System.Collections.Generic.List[object]]::new()
+        $transport = {
+            param([uri] $Uri, [string] $Method, [hashtable] $Headers, $Body, [System.Threading.CancellationToken] $CancellationToken)
+            $calls.Add($Uri.AbsoluteUri)
+            [PSCustomObject]@{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @{ '@odata.nextLink' = 'https://graph.microsoft.com/beta/deviceManagement/settings?page=2' }
+                Outcome    = 'Succeeded'
+                Certainty  = 'Known'
+                Telemetry  = @()
+                Provenance = @{}
+            }
+        }.GetNewClosure()
+
+        $null = InModuleScope GraphKit -Parameters @{ D = $script:SingletonDescriptor; C = $script:Context; T = $transport } {
+            Invoke-GraphHandlerStrategy -Context $C -Descriptor $D -Parameters @{} -Transport $T
+        }
+
+        # A nextLink in a singleton response must not trigger paging.
+        $calls.Count | Should -Be 1
+        $calls[0] | Should -Be 'https://graph.microsoft.com/beta/deviceManagement/settings'
+    }
+}
