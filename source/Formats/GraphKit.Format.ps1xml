@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Default display views for GraphKit result types.
+
+    Registered via FormatsToProcess in GraphKit.psd1 and packaged via CopyPaths in
+    build.yaml. Both are required: CopyPaths alone packages the file without
+    registering it, and the views then silently never apply.
+
+    Views are added as GraphKit.<Type> objects are introduced. The GraphKit.OperationResult
+    view below is the envelope returned by Invoke-GraphRequest and Invoke-GraphBatch.
+-->
+<Configuration>
+    <ViewDefinitions>
+        <View>
+            <Name>GraphKit.OperationResult</Name>
+            <ViewSelectedBy>
+                <TypeName>GraphKit.OperationResult</TypeName>
+            </ViewSelectedBy>
+            <TableControl>
+                <TableHeaders>
+                    <TableColumnHeader>
+                        <Label>Outcome</Label>
+                        <Width>14</Width>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Certainty</Label>
+                        <Width>14</Width>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Count</Label>
+                        <Width>8</Width>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Tenant</Label>
+                    </TableColumnHeader>
+                </TableHeaders>
+                <TableRowEntries>
+                    <TableRowEntry>
+                        <TableColumnItems>
+                            <TableColumnItem>
+                                <PropertyName>Outcome</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Certainty</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>@($_.Data).Count</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>$_.Provenance.Tenant</ScriptBlock>
+                            </TableColumnItem>
+                        </TableColumnItems>
+                    </TableRowEntry>
+                </TableRowEntries>
+            </TableControl>
+        </View>
+    </ViewDefinitions>
+</Configuration>

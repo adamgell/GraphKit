@@ -1,0 +1,6 @@
+# Sampler build output - generated, never committed
+output/
+
+# Local Pester/coverage artifacts
+*.coverage.xml
+testResults/
