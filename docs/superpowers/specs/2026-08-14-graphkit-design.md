@@ -315,8 +315,9 @@ Caching remains in IntuneHealthAutomation throughout.
 
 ## Out of scope
 
-- Porting all ~175 scripts. Phase 1 targets Ivy24; the rest are catalogued as `type: script`
-  vault pages and migrated opportunistically when next touched.
+- Porting all ~175 scripts. Phase 1 validates the module against the Ivy24 tenant; it does not
+  migrate a script backlog. Existing scripts are catalogued as `type: script` vault pages and
+  ported opportunistically when next touched.
 - The vendored IntuneManagement trees. Never ported; only the object-type table is lifted.
 - Extracting IntuneHealthAutomation's caching layer.
 - Publishing to the PowerShell Gallery.
