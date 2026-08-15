@@ -57,6 +57,22 @@ public sealed class GraphThrottleScopeState
         }
     }
 
+    // Non-throwing admission attempt. Wait-GraphThrottleGate polls this so a caller
+    // that finds every slot busy WAITS rather than failing: admission control that
+    // throws when concurrency is squeezed to the floor fails precisely when it is
+    // doing its job.
+    public bool TryAcquire()
+    {
+        lock (_sync)
+        {
+            if (_inFlight >= _maxConcurrent) return false;
+            _inFlight++;
+            return true;
+        }
+    }
+
+    // Retained for callers that have already established a free slot. Prefer
+    // TryAcquire; this throws when the caller was wrong.
     public void Acquire()
     {
         lock (_sync)
@@ -124,11 +140,18 @@ public sealed class GraphThrottleCoordinator
         new ConcurrentDictionary<string, GraphThrottleScopeState>();
 
     private const int Floor = 1;
+    private const int InitialConcurrency = 2;   // unused pending the tuning decision above
     private const int Cap = 8;
     private const int StreakThreshold = 5;
 
     private GraphThrottleScopeState GetOrCreate(string scopeKey)
     {
+        // NOTE (2026-08-15 review): this starts at Cap, so the first burst runs at full
+        // concurrency. The spec says "begin conservatively ... restore concurrency
+        // gradually after successful requests", which argues for starting at
+        // InitialConcurrency instead. Left as-is deliberately: it is a tuning decision,
+        // not a demonstrated defect, and changing it moves the baseline that several
+        // existing tests use for untouched state. Raised as an open question, not fixed here.
         return _states.GetOrAdd(scopeKey, key => new GraphThrottleScopeState(Cap, Floor, Cap, StreakThreshold));
     }
 
@@ -139,6 +162,7 @@ public sealed class GraphThrottleCoordinator
     }
 
     public void AcquireAdmission(string scopeKey) { GetOrCreate(scopeKey).Acquire(); }
+    public bool TryAcquireAdmission(string scopeKey) { return GetOrCreate(scopeKey).TryAcquire(); }
     public void ReleaseAdmission(string scopeKey, bool success) { GetOrCreate(scopeKey).Release(success); }
     public void ApplyCooldown(string scopeKey, int retryAfterSeconds, DateTime utcNow) { GetOrCreate(scopeKey).ApplyCooldown(retryAfterSeconds, utcNow); }
     public void RecordThrottle(string scopeKey, bool qualified, int retryAfterSeconds, DateTime utcNow) { GetOrCreate(scopeKey).RecordThrottle(qualified, retryAfterSeconds, utcNow); }

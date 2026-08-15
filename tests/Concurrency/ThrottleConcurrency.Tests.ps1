@@ -92,7 +92,13 @@ Describe 'Scoped throttle under real runspaces' {
                 param($Coordinator, $Scope, $Barrier, $Results)
                 try {
                     [void] $Barrier.SignalAndWait(10000)
-                    $null = Wait-GraphThrottleGate -Scope $Scope -Coordinator $Coordinator -UtcNow ([datetime]::UtcNow)
+                    # Admission now WAITS for a free slot rather than throwing on
+                    # contention (see the 2026-08-15 review: throwing turned
+                    # back-pressure into an InvalidOperationException in the request
+                    # path). No runspace here ever releases, so the excess must time
+                    # out - bounded tightly so the property is proven in seconds.
+                    $null = Wait-GraphThrottleGate -Scope $Scope -Coordinator $Coordinator `
+                        -UtcNow ([datetime]::UtcNow) -AdmissionTimeoutSeconds 2
                     $Results.Add(@{ Outcome = 'Acquired' })
                 }
                 catch {
@@ -111,7 +117,7 @@ Describe 'Scoped throttle under real runspaces' {
         ($results | Where-Object { $_.Outcome -eq 'Acquired' }).Count | Should -Be 3
         ($results | Where-Object { $_.Outcome -eq 'Denied' }).Count | Should -Be 5
         ($results | Where-Object { $_.Outcome -eq 'Denied' }) |
-            ForEach-Object { $_.Error | Should -Match 'Throttle admission denied' }
+            ForEach-Object { $_.Error | Should -Match 'admission timed out' }
         $coordinator.GetInFlight($scope.LeafKey) | Should -Be 3
     }
 

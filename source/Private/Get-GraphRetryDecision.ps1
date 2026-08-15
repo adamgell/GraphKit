@@ -185,7 +185,13 @@ function Get-GraphRetryDecision {
     }
 
     # ---- Ambiguous / MayHaveCommitted: the commit state is unknown. ----
-    $safe = $isRead -or $replayPolicy -eq 'Safe'
+    # The descriptor is authoritative. An earlier form read
+    #   $safe = $isRead -or $replayPolicy -eq 'Safe'
+    # which let the HTTP verb override an explicit NeverReplay on a GET - honouring
+    # the descriptor on the Rejected path but ignoring it here, on the path where the
+    # commit state is unknown. ReplayPolicy exists precisely so safety is not inferred
+    # from the verb (a one-shot export download is a GET that must not be replayed).
+    $safe = $replayPolicy -eq 'Safe' -or ($isRead -and $replayPolicy -ne 'NeverReplay')
 
     if ($safe) {
         # Reads and Safe operations can always replay: replay cannot change state.

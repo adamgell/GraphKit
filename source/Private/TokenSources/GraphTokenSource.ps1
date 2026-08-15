@@ -17,6 +17,10 @@
 class GraphTokenResult {
     [string] $AccessToken
     [System.DateTimeOffset] $ExpiresOnUtc
+    # When the token was received. Refresh skew is a percentage of LIFETIME, so the
+    # issue time must be recorded; deriving it from the JWT is not permitted (Graph
+    # access tokens are resource-owned and clients must not parse them).
+    [System.DateTimeOffset] $ReceivedOnUtc
     [string] $TokenType
     [string[]] $Scopes
     [string] $VerifiedTenantId
@@ -39,8 +43,49 @@ class GraphTokenSourceBase {
         throw [System.NotImplementedException]::new('GraphTokenSourceBase.Acquire must be overridden by a concrete token source.')
     }
 
+    # Adaptive refresh skew, per spec: min(5 min, max(60 s, 10% of lifetime)).
+    #
+    # Without this a token expiring in milliseconds is served as valid, the request
+    # goes out, Graph answers 401, and the single permitted force-refresh is spent on
+    # an entirely predictable failure - mid-pagination, that costs the page.
+    #
+    # The spread is derived from the token fingerprint rather than a random number.
+    # It is therefore deterministic per token (tests stay reproducible) while still
+    # differing across tokens, so fifteen contexts connected in bulk do not all
+    # reacquire at the same instant. Spread is 0-10% of the skew, and only ever
+    # refreshes EARLIER, never later.
+    hidden [double] RefreshSkewSeconds([GraphTokenResult]$result) {
+        $lifetime = 0.0
+        if ($result.ReceivedOnUtc -gt [System.DateTimeOffset]::MinValue) {
+            $lifetime = ($result.ExpiresOnUtc - $result.ReceivedOnUtc).TotalSeconds
+        }
+
+        $skew = [Math]::Min(300.0, [Math]::Max(60.0, $lifetime * 0.1))
+
+        $spread = 0.0
+        $fingerprint = [string] $result.TokenFingerprint
+        if (-not [string]::IsNullOrEmpty($fingerprint)) {
+            # First byte of the hex digest -> 0..255 -> 0..10% of the skew.
+            $bucket = [Convert]::ToInt32($fingerprint.Substring(0, 2), 16)
+            $spread = $skew * 0.1 * ($bucket / 255.0)
+        }
+
+        return $skew + $spread
+    }
+
     hidden [bool] HasValidCachedToken() {
-        return $null -ne $this.CachedResult -and $this.CachedResult.ExpiresOnUtc -gt [System.DateTimeOffset]::UtcNow
+        if ($null -eq $this.CachedResult) {
+            return $false
+        }
+
+        $expires = $this.CachedResult.ExpiresOnUtc
+        if ($expires -le [System.DateTimeOffset]::MinValue) {
+            # No expiry is known (a fixed bearer): never treat it as skew-valid.
+            return $false
+        }
+
+        $refreshAt = $expires.AddSeconds(-1.0 * $this.RefreshSkewSeconds($this.CachedResult))
+        return $refreshAt -gt [System.DateTimeOffset]::UtcNow
     }
 
     hidden [void] CacheResult([GraphTokenResult]$result) {
@@ -82,6 +127,7 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
         $result = [GraphTokenResult]::new()
         $result.AccessToken = $authResult.AccessToken
         $result.ExpiresOnUtc = [System.DateTimeOffset] $authResult.ExpiresOn
+        $result.ReceivedOnUtc = [System.DateTimeOffset]::UtcNow
         $result.TokenType = 'Bearer'
         $result.Scopes = $scopes
         $result.VerifiedTenantId = $null
@@ -125,6 +171,7 @@ class ManagedIdentityTokenSource : GraphTokenSourceBase {
         $result = [GraphTokenResult]::new()
         $result.AccessToken = $authResult.AccessToken
         $result.ExpiresOnUtc = [System.DateTimeOffset] $authResult.ExpiresOn
+        $result.ReceivedOnUtc = [System.DateTimeOffset]::UtcNow
         $result.TokenType = 'Bearer'
         $result.Scopes = [string[]]@($scope)
         $result.VerifiedTenantId = $null
@@ -187,6 +234,7 @@ class ProviderTokenSource : GraphTokenSourceBase {
         $result = [GraphTokenResult]::new()
         $result.AccessToken = [string]$token
         $result.ExpiresOnUtc = $expires
+        $result.ReceivedOnUtc = [System.DateTimeOffset]::UtcNow
         $result.TokenType = 'Bearer'
         $result.Scopes = [string[]]@("$($this.Audience)/.default")
         $result.VerifiedTenantId = $null
@@ -222,7 +270,8 @@ class FixedBearerTokenSource : GraphTokenSourceBase {
             $result = [GraphTokenResult]::new()
             $result.AccessToken = $this.Bearer
             $result.ExpiresOnUtc = [System.DateTimeOffset]::MinValue
-            $result.TokenType = 'Bearer'
+            $result.ReceivedOnUtc = [System.DateTimeOffset]::UtcNow
+        $result.TokenType = 'Bearer'
             $result.Scopes = [string[]]@("$($this.Audience)/.default")
             $result.VerifiedTenantId = $null
             $result.TokenFingerprint = Get-GraphFingerprint -Value $this.Bearer
