@@ -1294,13 +1294,13 @@ artifact, and an observable pass condition before the next begins.
 | # | Increment | Gate |
 | --- | --- | --- |
 | 1.1 | Sampler scaffold and packaging | **Complete 2026-08-15** — committed scaffold plus `tests/QA/BuiltModule.tests.ps1`, which imports the built package in a clean `pwsh` and asserts views, CopyPaths assets, and dependency declarations |
-| 1.2 | Descriptor schema, loader, validator, strategy registry, minimal Ivy24 descriptors | Invalid descriptors rejected with actionable errors; cross-field rules enforced; catalog round-trips |
-| 1.3 | Immutable context and `IGraphTokenSource` interfaces | Contexts resolve without any network call; token-source contract covers all four auth modes |
-| 1.4 | Normalized transport (`GraphTransportResult`), deadlines, retry engine | Deterministic virtual-clock tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one GraphKit attempt equals one physical send |
-| 1.5 | Paging and URI security | Authority validation active under `-Raw`; redirects disabled or per-hop validated; `None` policy never carries authorization; query stripped from telemetry |
-| 1.6 | Authentication and vault providers | Ivy24 token acquired from a vault-stored credential; concurrent contexts receive only their own tokens; acquisitions collapse to one call per cache key; `401` force-refresh stays context-local |
-| 1.7 | Scoped throttle state and AIMD admission control | Real-runspace tests: Tenant B unblocked while Tenant A throttled |
-| 1.8 | Protected Ivy24 smoke workflow | Live read + mutation with cleanup guaranteed even on assertion failure, bound to the package digest, separated from deterministic CI |
+| 1.2 | Descriptor schema, loader, validator, strategy registry, minimal Ivy24 descriptors | **Complete 2026-08-15** — invalid descriptors rejected with actionable errors; cross-field rules enforced; catalog round-trips |
+| 1.3 | Immutable context and `IGraphTokenSource` interfaces | **Complete 2026-08-15** — contexts resolve without any network call; token-source contract covers all four auth modes |
+| 1.4 | Normalized transport (`GraphTransportResult`), deadlines, retry engine | **Complete 2026-08-15** — deterministic virtual-clock + loopback tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one GraphKit attempt equals one physical send |
+| 1.5 | Paging and URI security | **Complete 2026-08-15** — authority validation active under `-Raw`; redirects disabled or per-hop validated; `None` policy never carries authorization; query stripped from telemetry |
+| 1.6 | Authentication and vault providers | **Complete 2026-08-15** (deterministic parts) — vault credential resolution for all persisted shapes, tenant-proof binding cached per token fingerprint/generation, single-flight acquisition, MSAL import guard, import-order matrix; the live vault-backed Ivy24 acquisition runs in the protected environment only |
+| 1.7 | Scoped throttle state and AIMD admission control | **Complete 2026-08-15** — real-runspace tests: Tenant B unblocked while Tenant A throttled |
+| 1.8 | Protected Ivy24 smoke workflow | **Committed 2026-08-15** — `scripts/Invoke-GraphKitSmoke.ps1`: digest-bound, read + mutation + finally-guaranteed cleanup, `-DryRun` stub mode; live execution requires the protected environment and is not part of deterministic CI |
 
 **Ordering rationale.** The previous sequence contradicted its own rule that contracts precede
 consumers: retry (then 1.2) came before descriptors (1.3) although retry safety is descriptor
@@ -1308,11 +1308,11 @@ metadata, URI and cloud policy came before contexts, and gate 1.1 asserted opera
 before a loader existed. Descriptors and context/token contracts now come first, and every gate
 tests the **installed package**, not loose files in `output/`.
 
-**2. Operations.** Expand the descriptor catalog; add `Get-GraphObject` and tab completion.
+**2. Operations.** **Complete 2026-08-15** — six-descriptor catalog, `Get-GraphObject` with provenance stamping, tab completion, per-type format views.
 
-**3. Permissions.** Consume the established catalog; implement the four-state analysis.
+**3. Permissions.** **Complete 2026-08-15** — four-state analysis with tri-state `Configured`, bootstrap-trap error, session-scoped appRoles cache, idempotent `Grant-GraphAppPermission`.
 
-**4. Export.** `Export-GraphResult` and vault evidence.
+**4. Export.** **Complete 2026-08-15** — `Export-GraphResult` (Csv/Json/Markdown/VaultEvidence), envelope-preserving Json, `-Force`-gated indeterminate export, summary-DTO allowlist evidence, verified path containment.
 
 **5. Cutover and secret retirement — one reversible, overlapping gate.**
 

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / PowerShell ${{ matrix.pwsh-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        pwsh-version: ['7.4.19', '7.6.5']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Each row installs its exact PowerShell version rather than trusting the
+      # runner image, then asserts the running version matches before doing work.
+      # Pinned release tags + direct GitHub release assets: no third-party action,
+      # no secrets, fork-safe.
+      - name: Install PowerShell ${{ matrix.pwsh-version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ matrix.pwsh-version }}'
+          $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
+
+          if ($IsWindows) {
+              $asset = "PowerShell-$version-win-$arch.zip"
+          } elseif ($IsLinux) {
+              $asset = "powershell-$version-linux-$arch.tar.gz"
+          } elseif ($IsMacOS) {
+              $asset = "powershell-$version-osx-$arch.tar.gz"
+          } else {
+              throw 'Unsupported runner OS.'
+          }
+
+          $installDir = Join-Path $env:RUNNER_TOOL_CACHE "pwsh-$version"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+
+          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+          Write-Host "Downloading $asset"
+          Invoke-WebRequest -Uri "https://github.com/PowerShell/PowerShell/releases/download/v$version/$asset" -OutFile $archive
+
+          if ($IsWindows) {
+              Expand-Archive -Path $archive -DestinationPath $installDir -Force
+          } else {
+              tar -xzf $archive -C $installDir
+          }
+
+          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          Write-Host "Installed PowerShell $version to $installDir"
+
+      - name: Assert PowerShell version
+        shell: pwsh
+        run: |
+          $expected = '${{ matrix.pwsh-version }}'
+          $actual = $PSVersionTable.PSVersion
+          $expectedMajorMinor = (($expected -split '\.')[0..1] -join '.')
+          $actualMajorMinor = "$($actual.Major).$($actual.Minor)"
+          if ($actualMajorMinor -ne $expectedMajorMinor) {
+              throw "PowerShell version mismatch: expected $expectedMajorMinor.x, got $actual"
+          }
+          Write-Host "PowerShell version asserted: $actual"
+
+      - name: Resolve build dependencies
+        shell: pwsh
+        run: pwsh -File ./build.ps1 -ResolveDependency -Tasks noop
+
+      - name: Build
+        shell: pwsh
+        run: pwsh -File ./build.ps1 -Tasks build
+
+      - name: Test
+        shell: pwsh
+        run: pwsh -File ./build.ps1 -Tasks test
+
+      - name: Gate on whole Pester result
+        shell: pwsh
+        run: |
+          $resultFiles = @(Get-ChildItem -Path 'output/testResults/NUnitXml_*.xml' -ErrorAction SilentlyContinue)
+          if ($resultFiles.Count -eq 0) {
+              throw 'No NUnit result file produced at output/testResults/NUnitXml_*.xml'
+          }
+          if ($resultFiles.Count -gt 1) {
+              throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
+          }
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 500
