@@ -71,6 +71,28 @@ names to Graph endpoints. The table is worth lifting; the 9,186 lines of WPF UI 
 not. The local copy carries no LICENSE file, so vendoring requires pulling the upstream MIT
 text into `THIRD-PARTY-NOTICES.md`.
 
+### External prior art
+
+Surveyed 2026-08-14. None of these removes the need for GraphKit's plumbing layer, but several
+constrain or inform it.
+
+| Project | Relevance |
+| --- | --- |
+| **Microsoft.Graph SDK** | Already ships a retry handler tunable via `Set-MgRequestContext -MaxRetry -RetryDelay -RetriesTimeLimit`. Its documented failure mode — "more than 3 retries encountered" when bulk-registering ~60–70 Autopilot devices — is the benchmark GraphKit's retry must beat. Validates owning retry rather than delegating it. |
+| **Maester** (`maester365/maester`) | Pester-based M365/Entra security test framework: 40+ EIDSCA tests, CIS and CISA/SCuBA baselines, multi-tenant assessment, HTML reports, CI/CD integration. Overlaps IntuneHealthAutomation's *reporting* purpose, not GraphKit's plumbing. Worth evaluating before building further health-check reports by hand. |
+| **IntuneAssignmentChecker** (Ugur Koc) | v3 was a single script; v4 is a module with assignment simulation, reverse lookup, and a read-only MCP server. Overlaps IHA's assignment analysis, and its script→module evolution is the same path taken here. |
+| **Microsoft365DSC** | Configuration-as-code across the full M365 surface with drift detection. Broader and heavier than this work; known gaps in Intune configuration-profile export. |
+| **EntraExporter** | Entra configuration to versioned JSON. Supersedes the deprecated AzureADExporter. Excludes several object classes unless `-All` is passed. |
+| **IntuneBackupAndRestore**, **IntuneManagement** | Policy backup/copy/migrate between tenants. |
+| **Sampler** (gaelcolas) | The community-standard module scaffolder — InvokeBuild tasks for build/test/pack/publish, cross-platform, no admin rights required, ModuleFast dependency resolution. An open question against the hand-rolled layout below. |
+
+Two Microsoft guidance points materially changed this design: batch envelopes returning 200 OK
+while inner requests are throttled, and the `x-ms-retry-after-ms` header variant. Both are
+captured in the request-core section.
+
+Name check: `GraphKit` is available on the PowerShell Gallery. `GraphTools` (Kevin Blumenfeld)
+and `PSGraphKit` (Martin Welen) are taken.
+
 ### pliving/Graph.ps1
 
 293 lines with the right bones — config validation, `Join-GraphUri`,
@@ -203,13 +225,32 @@ resolution, and token-expiry detection. Adds `ConsistencyLevel: eventual` automa
 
 `Invoke-GraphBatch` wraps `/$batch` at the 20-request limit.
 
+**Batch throttling is not the same as request throttling.** Per Microsoft's throttling guidance,
+each request inside a JSON batch is evaluated individually against limits — an inner request can
+fail with 429 while **the batch envelope itself still returns 200 OK**. Treating the envelope
+status as success silently drops data. `Invoke-GraphBatch` must therefore:
+
+1. Inspect every inner response status, not just the envelope.
+2. Retry failed inner requests using the `Retry-After` value from the **inner** JSON body.
+3. Re-issue all failed inner requests as a new batch after the longest inner retry-after.
+
+This is a correctness requirement, not an optimization.
+
 ### Throttling
 
 The headline gap fix.
 
-- Honor `Retry-After` in **both** forms — delay-seconds and HTTP-date.
-- Exponential backoff with jitter when the header is absent.
+- Honor `Retry-After` in **all three** forms — delay-seconds, HTTP-date, and the
+  `x-ms-retry-after-ms` variant that some Intune and Entra endpoints return instead of, or
+  alongside, the standard header. Reading only `Retry-After` misses throttling signals on
+  exactly the endpoints this module targets most.
+- Exponential backoff with jitter when no header is present. Microsoft's guidance notes some
+  resources return **no** `Retry-After` at all on 429, so backoff is a required fallback path,
+  not a rare one.
 - Retry on 429, 503, 504, and transient socket errors. Default 5 attempts, configurable.
+- Throttling limits **cannot be raised** by request — Microsoft has confirmed this publicly.
+  Backoff and batching are the only mitigations; for genuinely bulk extraction the documented
+  answer is Graph Data Connect, which is out of scope here.
 - **Cross-runspace backoff.** `Invoke-ParallelGraphRequest` uses separate runspaces, so a 429
   in one thread must back off the others. This requires a synchronized throttle-state object
   passed via `$using:`, holding a `NotBefore` timestamp each runspace checks before issuing
