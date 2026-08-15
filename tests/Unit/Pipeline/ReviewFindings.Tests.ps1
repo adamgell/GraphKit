@@ -251,3 +251,39 @@ Describe 'Review finding: the per-call connect timeout is honoured' {
         }
     }
 }
+
+Describe 'Review finding: truncated paging is carried by the envelope' {
+    # Hitting the page cap returned Outcome 'Succeeded' + Certainty 'Known' with only a
+    # Write-Warning. Warnings are not part of the result contract and vanish under
+    # $WarningPreference = 'SilentlyContinue', so a programmatic consumer could not
+    # tell the collection was cut off.
+
+    It 'marks a capped collection Indeterminate and flags it' {
+        $result = InModuleScope GraphKit {
+            $pageNumber = 0
+            $factory = { param($Uri, $Descriptor) @{ Uri = $Uri } }
+            $sender = {
+                param($Request)
+                $script:pageNumber++
+                # Always returns another nextLink, so the cap is always reached.
+                [pscustomobject] @{
+                    Outcome   = 'Succeeded'
+                    Data      = @{ value = @(@{ id = "row-$script:pageNumber" }); '@odata.nextLink' = 'https://graph.microsoft.com/v1.0/next' }
+                    Telemetry = @()
+                }
+            }
+
+            Invoke-GraphPaging `
+                -Context ([pscustomobject] @{ GraphBaseUri = [uri] 'https://graph.microsoft.com'; Cloud = 'Global' }) `
+                -Descriptor @{ PagingStrategy = 'NextLink'; DeduplicationKey = 'id' } `
+                -FirstPageUri ([uri] 'https://graph.microsoft.com/v1.0/first') `
+                -RequestFactoryScript $factory `
+                -TransportScript $sender `
+                -MaxPages 3
+        }
+
+        $result.Truncated | Should -BeTrue
+        $result.Certainty | Should -Be 'Indeterminate' -Because 'the pages fetched are good, but completeness is not known'
+        $result.PageCount | Should -Be 3
+    }
+}

@@ -143,7 +143,16 @@ function Invoke-GraphPaging {
         }
     }
 
-    if ($pageCount -ge $MaxPages -and $nextLink) {
+    # A page cap that is hit must be carried BY THE ENVELOPE, not only by a warning.
+    # This previously returned Outcome 'Succeeded' + Certainty 'Known' with a
+    # Write-Warning, so a programmatic consumer - the entire reason the envelope
+    # exists - could not tell the collection was truncated, and the warning
+    # disappears entirely under $WarningPreference = 'SilentlyContinue' or when the
+    # pipeline is captured. Silent truncation reads as "covered everything" when it
+    # did not, and Certainty exists precisely to say otherwise.
+    $truncated = ($pageCount -ge $MaxPages -and $null -ne $nextLink)
+
+    if ($truncated) {
         Write-Warning "Paging reached the page cap ($MaxPages); remaining pages were not fetched."
     }
 
@@ -151,7 +160,11 @@ function Invoke-GraphPaging {
         PSTypeName = 'GraphKit.OperationResult'
         Data       = @($allData)
         Outcome    = 'Succeeded'
-        Certainty  = 'Known'
+        # The pages that were fetched are known-good; what is NOT known is whether the
+        # collection is complete, which is what Indeterminate records here.
+        Certainty  = $(if ($truncated) { 'Indeterminate' } else { 'Known' })
+        Truncated  = $truncated
+        PageCount  = $pageCount
         Telemetry  = @($allTelemetry)
         Provenance = $null
     }
