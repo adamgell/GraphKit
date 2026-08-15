@@ -132,7 +132,12 @@ Describe 'Scoped throttle under real runspaces' {
         }
         $coordinator.ApplyCooldown($scope.LeafKey, 30, [datetime]::UtcNow)
 
+        # This test isolates COOLDOWN observation, so give it enough admission slots for
+        # every runspace. Scopes now start at a conservative initial concurrency and ramp,
+        # so without this the excess runspaces would serialize behind admission and the
+        # test would be measuring admission rather than the cooldown it names.
         $runspaceCount = 5
+        $coordinator.SetMaxConcurrent($scope.LeafKey, $runspaceCount)
         $barrier = [System.Threading.Barrier]::new($runspaceCount)
         $delays = [System.Collections.Concurrent.ConcurrentBag[long]]::new()
 

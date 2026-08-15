@@ -92,10 +92,20 @@ Describe 'Review finding: admission control waits rather than throwing' {
         } | Should -Throw -ExpectedMessage '*admission timed out*'
     }
 
-    # NOTE: "begins conservatively" is deliberately NOT asserted. The coordinator starts
-    # at the cap, which the spec's AIMD guidance argues against, but that is a tuning
-    # decision rather than a demonstrated defect - it is recorded as an open question in
-    # GraphThrottleCoordinator.ps1 instead of being changed under a bug-fix commit.
+    It 'begins conservatively rather than at the concurrency cap' {
+        # A cold scope is coldest exactly when a run starts, i.e. when a burst is most
+        # likely, so starting at Cap ran the first burst at full concurrency.
+        $coordinator = New-Object -TypeName GraphThrottleCoordinator
+        $null = $coordinator.TryAcquireAdmission('leaf-initial')
+        $coordinator.GetMaxConcurrent('leaf-initial') | Should -Be 2
+    }
+
+    It 'still ramps to the cap on sustained success' {
+        $coordinator = New-Object -TypeName GraphThrottleCoordinator
+        $null = $coordinator.TryAcquireAdmission('leaf-ramp')
+        1..60 | ForEach-Object { $coordinator.RecordSuccess('leaf-ramp') }
+        $coordinator.GetMaxConcurrent('leaf-ramp') | Should -Be 8
+    }
 }
 
 Describe 'Review finding: cached tokens carry an adaptive refresh skew' {

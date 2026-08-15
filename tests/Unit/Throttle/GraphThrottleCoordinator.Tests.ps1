@@ -30,7 +30,8 @@ Describe 'GraphThrottleCoordinator — AIMD admission control' {
 
         $coordinator.RecordThrottle('coarse', $false, 30, $script:utcNow)
 
-        $coordinator.GetMaxConcurrent('coarse') | Should -Be 8
+        # Untouched scopes start at the conservative initial concurrency, not the cap.
+        $coordinator.GetMaxConcurrent('coarse') | Should -Be 2
         $coordinator.GetCooldownUntilUtc('coarse') | Should -Be $script:utcNow.AddSeconds(30)
     }
 
@@ -95,6 +96,6 @@ Describe 'GraphThrottleCoordinator — AIMD admission control' {
 
         $coordinator.AcquireAdmission('tenantB')
         $coordinator.GetInFlight('tenantB') | Should -Be 1
-        $coordinator.GetMaxConcurrent('tenantB') | Should -Be 8
+        $coordinator.GetMaxConcurrent('tenantB') | Should -Be 2
     }
 }

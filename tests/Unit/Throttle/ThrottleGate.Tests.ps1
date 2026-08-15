@@ -41,7 +41,7 @@ Describe 'Update-GraphThrottleState' {
                 -StatusCode 429 -Coordinator $coordinator -UtcNow $UtcNow
 
             $coordinator.GetCooldownUntilUtc($scope.CoarseKey) | Should -Be $UtcNow.AddSeconds(30)
-            $coordinator.GetMaxConcurrent($scope.CoarseKey) | Should -Be 8
+            $coordinator.GetMaxConcurrent($scope.CoarseKey) | Should -Be 2
             $coordinator.ContainsKey($scope.LeafKey) | Should -BeFalse
         }
     }
@@ -81,7 +81,7 @@ Describe 'Update-GraphThrottleState' {
                 -StatusCode 200 -Coordinator $coordinator -UtcNow $UtcNow
 
             $coordinator.GetCooldownUntilUtc($scope.LeafKey) | Should -Be $UtcNow.AddSeconds(15)
-            $coordinator.GetMaxConcurrent($scope.LeafKey) | Should -Be 8
+            $coordinator.GetMaxConcurrent($scope.LeafKey) | Should -Be 2
         }
     }
 

@@ -140,19 +140,19 @@ public sealed class GraphThrottleCoordinator
         new ConcurrentDictionary<string, GraphThrottleScopeState>();
 
     private const int Floor = 1;
-    private const int InitialConcurrency = 2;   // unused pending the tuning decision above
+    private const int InitialConcurrency = 2;
     private const int Cap = 8;
     private const int StreakThreshold = 5;
 
     private GraphThrottleScopeState GetOrCreate(string scopeKey)
     {
-        // NOTE (2026-08-15 review): this starts at Cap, so the first burst runs at full
-        // concurrency. The spec says "begin conservatively ... restore concurrency
-        // gradually after successful requests", which argues for starting at
-        // InitialConcurrency instead. Left as-is deliberately: it is a tuning decision,
-        // not a demonstrated defect, and changing it moves the baseline that several
-        // existing tests use for untouched state. Raised as an open question, not fixed here.
-        return _states.GetOrAdd(scopeKey, key => new GraphThrottleScopeState(Cap, Floor, Cap, StreakThreshold));
+        // Begin conservatively and ramp, per the spec's AIMD guidance: "begin
+        // conservatively ... restore concurrency gradually after successful requests".
+        // Starting at Cap meant the very first burst against a cold scope ran at full
+        // concurrency, which is the throttle wave admission control exists to avoid -
+        // and the scope is coldest exactly when a run starts, i.e. when a burst is most
+        // likely. Sustained success still reaches Cap via AdditiveIncrease.
+        return _states.GetOrAdd(scopeKey, key => new GraphThrottleScopeState(InitialConcurrency, Floor, Cap, StreakThreshold));
     }
 
     public long GetWaitMilliseconds(string scopeKey, DateTime utcNow)
