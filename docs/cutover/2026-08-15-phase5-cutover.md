@@ -184,18 +184,25 @@ the owner's own working tree: `config/secrets.example.json` previously carried t
 `tenantId` and the `clientId` of the very app whose secret is in git history, and both are now
 placeholders with `bearerTokens` emptied.
 
-Two things in step 8 remain, and neither is a judgement call about effort:
+Two things in step 8 remain. `scripts/Complete-GraphKitCutover.ps1` performs the second one
+as a single gated command on the execution host: it imports the legacy profiles, verifies the
+repoint **read-only** against a named tenant with the flag enabled for that run only, and
+refuses retirement unless that verification passed *in the same run* — a previously green run
+does not count, because the thing being deleted is the fallback. Retirement is done with
+`git rm` on a branch, so it is a reviewable diff and recoverable from history.
+
+Neither remaining item is a judgement call about effort:
 
 - **Purging the deleted lab app** — permanently deleting directory data is an operator action
   by policy, not an automated one. It carries the 30-day deadline noted above, after which the
   committed secret expires on its own.
-- **Deleting the old IHA authentication layer** — this one is genuinely *ordering*, not
-  caution. The repoint is default-off and verified against the lab tenant only. Deleting the
-  legacy path before the flag is enabled and verified on the two customer tenants would remove
-  the fallback that makes the repoint reversible, and would leave IHA with no working data
-  plane at all. The spec's own rule is that no caller path may be deleted while a working
-  caller depends on it; that rule is not yet satisfied, and satisfying it needs authorisation
-  to run against customer tenants.
+- **Deleting the old IHA authentication layer** — blocked by a platform fact, not caution.
+  Both customer profiles are certificate-**store** profiles, so their private keys live in the
+  Windows certificate store. Verified on this machine: `IsWindows` is false, the `Cert:` drive
+  does not exist, and `Register-GraphTenant` refuses with *"Certificate store lookup is
+  Windows-only; this platform is Unix."* The customer tenants cannot be reached from a
+  development Mac at all, so the verification that must precede retirement is impossible here
+  rather than merely unauthorised. Run `Complete-GraphKitCutover.ps1` on the execution host.
 
 ## The recommended next moves
 
