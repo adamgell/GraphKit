@@ -222,7 +222,16 @@ switch ($Channel) {
 
 # --- Pin record -------------------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($PinPath)) {
-    $PinPath = Join-Path $repoRoot 'output/graphkit.pin.json'
+    # NOT output/: the 'pack' task begins with Clean, so a pin written there is deleted by
+    # the next build - and the pin is the contract a consumer installs against, so losing it
+    # silently breaks every downstream host. For a file-system channel the pin belongs beside
+    # the package it describes, which also means it travels with the channel automatically.
+    $PinPath = if ($Channel -eq 'FileSystem') {
+        Join-Path $Destination 'graphkit.pin.json'
+    }
+    else {
+        Join-Path $repoRoot 'graphkit.pin.json'
+    }
 }
 
 $pin = [ordered]@{

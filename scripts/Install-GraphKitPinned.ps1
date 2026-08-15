@@ -46,6 +46,13 @@ param(
 
     [string] $RestoreRecordPath,
 
+    # Overrides the channel directory recorded in the pin. A pin's job is to name the exact
+    # BYTES, not a path: the publisher's directory layout is deployment detail and does not
+    # survive a move to another host. The sha256 check below is unchanged and still gates the
+    # install, so relocating the channel cannot weaken the guarantee - it only stops an
+    # absolute path from being mistaken for one.
+    [string] $Source,
+
     [switch] $SkipDependencies
 )
 
@@ -66,7 +73,7 @@ foreach ($required in @('moduleName', 'version', 'sha256', 'channel', 'source'))
 Write-Host ''
 Write-Host "  pin     : $($pin.moduleName) $($pin.version)" -ForegroundColor Cyan
 Write-Host "  sha256  : $($pin.sha256)" -ForegroundColor Cyan
-Write-Host "  channel : $($pin.channel) -> $($pin.source)" -ForegroundColor Cyan
+Write-Host "  channel : $($pin.channel) -> $(if ([string]::IsNullOrWhiteSpace($Source)) { $pin.source } else { $Source })" -ForegroundColor Cyan
 Write-Host ''
 
 # --- 1. Record what is here NOW, before anything changes --------------------------------
@@ -105,19 +112,26 @@ if ($pin.channel -ne 'FileSystem') {
     throw "Automated install currently supports the FileSystem channel only; this pin names '$($pin.channel)'. For a GitHub release, download the asset to a directory and re-pin against it, or extend this script once that channel is in use."
 }
 
-if (-not (Test-Path -LiteralPath $pin.source -PathType Container)) {
-    throw "Channel source '$($pin.source)' is not reachable from this host. On a different machine than the publisher, point the pin at a path this host can read."
+$channelSource = if (-not [string]::IsNullOrWhiteSpace($Source)) { $Source } else { [string] $pin.source }
+
+if (-not (Test-Path -LiteralPath $channelSource -PathType Container)) {
+    throw "Channel source '$channelSource' is not reachable from this host. The pin records the publisher's path; on another machine pass -Source pointing at a directory this host can read. The digest check is unaffected."
+}
+
+if ($channelSource -ne [string] $pin.source) {
+    Write-Host "  source override: $channelSource" -ForegroundColor DarkGray
+    Write-Host "    (pin recorded $($pin.source); the sha256 check still decides)" -ForegroundColor DarkGray
 }
 
 $existingRepo = Get-PSResourceRepository -Name $repoName -ErrorAction SilentlyContinue
 if ($PSCmdlet.ShouldProcess($repoName, 'Register private PSResource repository')) {
     if ($null -eq $existingRepo) {
-        Register-PSResourceRepository -Name $repoName -Uri $pin.source -Trusted
-        Write-Host "  Registered repository '$repoName' -> $($pin.source)" -ForegroundColor Green
+        Register-PSResourceRepository -Name $repoName -Uri $channelSource -Trusted
+        Write-Host "  Registered repository '$repoName' -> $channelSource" -ForegroundColor Green
     }
-    elseif ($existingRepo.Uri.LocalPath -ne $pin.source -and $existingRepo.Uri.AbsoluteUri -ne $pin.source) {
-        Set-PSResourceRepository -Name $repoName -Uri $pin.source -Trusted
-        Write-Host "  Repointed repository '$repoName' -> $($pin.source)" -ForegroundColor Green
+    elseif ($existingRepo.Uri.LocalPath -ne $channelSource -and $existingRepo.Uri.AbsoluteUri -ne $channelSource) {
+        Set-PSResourceRepository -Name $repoName -Uri $channelSource -Trusted
+        Write-Host "  Repointed repository '$repoName' -> $channelSource" -ForegroundColor Green
     }
 }
 
@@ -176,7 +190,7 @@ if ($null -eq $installed) {
     throw "$($pin.moduleName) $($pin.version) is not present after install."
 }
 
-$channelPackage = Join-Path $pin.source $pin.packageName
+$channelPackage = Join-Path $channelSource $pin.packageName
 if (Test-Path -LiteralPath $channelPackage -PathType Leaf) {
     $actual = (Get-FileHash -LiteralPath $channelPackage -Algorithm SHA256).Hash
     if (-not [string]::Equals($actual, $pin.sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
