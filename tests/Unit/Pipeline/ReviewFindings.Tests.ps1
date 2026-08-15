@@ -372,3 +372,39 @@ Describe 'Review finding: directory reads follow nextLink' {
         } | Should -Throw -ExpectedMessage '*must not be treated as complete*'
     }
 }
+
+Describe 'Review finding: an exhausted job poll budget is not completion' {
+    # The LongRunningJob strategy fell out of its poll loop and returned the last
+    # in-progress status as though it were the result, so a caller received a
+    # job-status object instead of a report with no signal the job never finished.
+
+    It 'reports DeadlineExpired + Indeterminate when the job never reaches a terminal status' {
+        $result = InModuleScope GraphKit {
+            $transport = {
+                param($Uri, $Method, $Headers, $Body, $CancellationToken)
+                # Submit returns an id; every poll stays 'inprogress' forever.
+                if ($Method -eq 'POST') {
+                    return [pscustomobject] @{ Outcome = 'Succeeded'; Data = @{ id = 'job-1' }; Telemetry = @() }
+                }
+                return [pscustomobject] @{ Outcome = 'Succeeded'; Certainty = 'Known'; Data = @{ status = 'inprogress' }; Telemetry = @() }
+            }
+
+            $context = [pscustomobject] @{
+                GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                Cloud        = 'Global'
+                TenantId     = [guid]::Empty
+            }
+            $descriptor = @{
+                Type = 'DeviceReport'; Operation = 'Export'; Method = 'POST'
+                ApiVersion = 'v1.0'; PagingStrategy = 'None'
+                PathTemplate = '/deviceManagement/reports/exportJobs'
+                AdvancedQuery = @{ Supported = $false }
+            }
+
+            & $script:LongRunningJobPollStatusStrategy $context $descriptor @{} $transport 3>$null
+        }
+
+        $result.Outcome | Should -Be 'DeadlineExpired' -Because 'an exhausted poll budget is not a completed job'
+        $result.Certainty | Should -Be 'Indeterminate' -Because 'the job may still be running server-side'
+    }
+}

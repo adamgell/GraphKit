@@ -221,6 +221,8 @@ $script:LongRunningJobPollStatusStrategy = {
     $maxPolls = 100
     $pollCount = 0
     $lastResult = $submitResult
+    $reachedTerminal = $false
+    $lastStatus = $null
 
     while ($pollCount -lt $maxPolls) {
         $pollCount++
@@ -239,9 +241,29 @@ $script:LongRunningJobPollStatusStrategy = {
             $status = [string] $pollData.status
         }
 
+        $lastStatus = $status
+
         if ($status -in @('completed', 'succeeded', 'failed', 'unknown', 'cancelled')) {
+            $reachedTerminal = $true
             break
         }
+    }
+
+    # Exhausting the poll budget is NOT completion. This previously fell out of the
+    # loop and returned the last in-progress status as though it were the operation's
+    # result, so a caller received a job-status object instead of a report with no
+    # signal that the job never finished - the same "bounded work reported as
+    # complete" failure as a truncated page set. Outcome becomes DeadlineExpired and
+    # certainty Indeterminate: the job may well still be running server-side, which is
+    # precisely an unknown outcome rather than a failure.
+    if (-not $reachedTerminal) {
+        $lastResult.Outcome = 'DeadlineExpired'
+        $lastResult.Certainty = 'Indeterminate'
+
+        Write-Warning (
+            "Long-running job '{0}/{1}' did not reach a terminal status within {2} polls (last status: '{3}'). " -f
+                $Descriptor.Type, $Descriptor.Operation, $maxPolls, ([string] $lastStatus)
+        )
     }
 
     return $lastResult
