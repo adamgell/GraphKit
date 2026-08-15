@@ -103,11 +103,25 @@ Describe 'Get-GraphRetryDelay' {
     }
 
     Context 'clamping' {
-        It 'clamps negative values to zero' {
+        It 'never yields a negative delay, and does not retry instantly on a negative value' {
+            # The spec's "clamp negative values" exists so a malformed header cannot
+            # produce a negative sleep. It was previously implemented as clamp-to-zero,
+            # which meant a malformed 'Retry-After: -5' retried IMMEDIATELY against an
+            # endpoint that had just refused the request. A negative (or zero) value is
+            # not a usable server directive, so it now falls through to jittered
+            # exponential backoff: still never negative, but no longer instant.
             $r = InModuleScope GraphKit {
                 Get-GraphRetryDelay -RetryAfterValues '-5' -UtcNow ([datetime] '2026-01-01T00:00:00Z') -Attempt 1 -Jitter { 1.0 }
             }
-            $r.DelaySeconds | Should -Be 0
+            $r.DelaySeconds | Should -BeGreaterThan 0
+            $r.Source | Should -Be 'ExponentialBackoff'
+        }
+
+        It 'does not retry instantly when the server sends a literal zero' {
+            $r = InModuleScope GraphKit {
+                Get-GraphRetryDelay -RetryAfterValues '0' -UtcNow ([datetime] '2026-01-01T00:00:00Z') -Attempt 1 -Jitter { 1.0 }
+            }
+            $r.DelaySeconds | Should -BeGreaterThan 0
         }
 
         It 'clamps excessive values to the configured maximum' {

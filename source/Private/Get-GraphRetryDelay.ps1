@@ -57,14 +57,11 @@ function Get-GraphRetryDelay {
 
     $reference = if ($ResponseDate -is [datetime]) { ([datetime] $ResponseDate).ToUniversalTime() } else { $UtcNow.ToUniversalTime() }
 
+    # @() unrolls a collection and wraps a scalar, so both cases are handled identically.
+    # An earlier form branched on IEnumerable with two identical arms.
     $values = @()
     if ($null -ne $RetryAfterValues) {
-        if ($RetryAfterValues -is [System.Collections.IEnumerable] -and $RetryAfterValues -isnot [string]) {
-            $values = @($RetryAfterValues)
-        }
-        else {
-            $values = @($RetryAfterValues)
-        }
+        $values = @($RetryAfterValues)
     }
 
     foreach ($raw in $values) {
@@ -129,15 +126,19 @@ function Get-GraphRetryDelay {
     $delaySeconds = 0.0
     $source = 'ExponentialBackoff'
 
-    if ($candidates.Count -gt 0) {
-        # 6. Conservative maximum of candidates.
-        $maxCandidate = $null
-        foreach ($c in $candidates) {
-            if ($null -eq $maxCandidate -or $c.Seconds -gt $maxCandidate.Seconds) {
-                $maxCandidate = $c
-            }
+    # 6. Conservative maximum of candidates. A candidate of zero is NOT a usable
+    #    delay: an HTTP-date already in the past (clock skew) or a literal 0 would
+    #    otherwise suppress backoff entirely and retry immediately against an
+    #    endpoint that just refused us. Zero-valued candidates therefore fall
+    #    through to jittered exponential backoff.
+    $maxCandidate = $null
+    foreach ($c in $candidates) {
+        if ($null -eq $maxCandidate -or $c.Seconds -gt $maxCandidate.Seconds) {
+            $maxCandidate = $c
         }
+    }
 
+    if ($null -ne $maxCandidate -and $maxCandidate.Seconds -gt 0) {
         $delaySeconds = $maxCandidate.Seconds
         $source = $maxCandidate.Source
     }

@@ -146,13 +146,43 @@ function Get-GraphSubrequestRetryAfter {
         $raw = $Headers.'Retry-After'
     }
 
-    $seconds = 0
-    if ($null -ne $raw) {
-        $parsed = 0
-        if ([int]::TryParse([string] $raw, [ref] $parsed) -and $parsed -gt 0) {
-            $seconds = $parsed
+    $xmsRaw = $null
+    if ($Headers -is [System.Collections.IDictionary] -and $Headers.ContainsKey('x-ms-retry-after-ms')) {
+        $xmsRaw = $Headers['x-ms-retry-after-ms']
+    } elseif ($null -ne $Headers -and $Headers.PSObject.Properties['x-ms-retry-after-ms']) {
+        $xmsRaw = $Headers.'x-ms-retry-after-ms'
+    }
+
+    $dateRaw = $null
+    if ($Headers -is [System.Collections.IDictionary] -and $Headers.ContainsKey('Date')) {
+        $dateRaw = $Headers['Date']
+    } elseif ($null -ne $Headers -and $Headers.PSObject.Properties['Date']) {
+        $dateRaw = $Headers.'Date'
+    }
+
+    if ($null -eq $raw -and $null -eq $xmsRaw) {
+        return 0
+    }
+
+    # Route through the same hostile parser the outer response uses. An earlier form
+    # here was a bare [int]::TryParse, so an inner subrequest carrying an HTTP-date,
+    # the malformed "30,120" comma form, or x-ms-retry-after-ms yielded 0 seconds -
+    # i.e. no delay at all before the failed subrequest was retried. Graph's own
+    # guidance is that batch throttling is read from the INNER response, which makes
+    # this the one place the parser must not be weaker.
+    $responseDate = $null
+    if ($null -ne $dateRaw) {
+        $parsedDate = [datetime]::MinValue
+        if ([datetime]::TryParse(
+                [string] $dateRaw,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                [ref] $parsedDate)) {
+            $responseDate = $parsedDate
         }
     }
 
-    return $seconds
+    $delay = Get-GraphRetryDelay -RetryAfterValues $raw -XmsRetryAfterMs $xmsRaw -ResponseDate $responseDate
+
+    return [int] [Math]::Ceiling([double] $delay.DelaySeconds)
 }

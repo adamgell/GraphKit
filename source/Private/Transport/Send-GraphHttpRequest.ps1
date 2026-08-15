@@ -19,19 +19,24 @@
 
 # Module/session-scoped transport. Created lazily and shared across all sends so
 # connection pooling survives between requests; disposed on module removal.
-$script:GraphKitHttpHandler = $null
-$script:GraphKitHttpClient = $null
+# Keyed by connect-timeout seconds. ConnectTimeout is a handler-level property
+# fixed when the handler is constructed, so a single shared client would silently
+# honour only the FIRST caller's -TimeoutConnectionSeconds and ignore every later
+# value - an API that accepts a per-call, range-validated parameter it does not
+# apply. One client per distinct timeout keeps the parameter honest while
+# preserving connection pooling within each timeout class (in practice one or two).
+$script:GraphKitHttpClients = @{}
 
 function Get-GraphHttpClient {
     param([int] $ConnectTimeoutSeconds = 10)
 
-    if ($null -eq $script:GraphKitHttpClient) {
+    $key = [string] $ConnectTimeoutSeconds
+
+    if (-not $script:GraphKitHttpClients.ContainsKey($key)) {
         $handler = [System.Net.Http.SocketsHttpHandler]::new()
         $handler.AllowAutoRedirect = $false
         $handler.UseCookies = $false
         $handler.PooledConnectionLifetime = [TimeSpan]::FromMinutes(5)
-        # ConnectTimeout is a handler-level setting fixed before the first send;
-        # the first send's -TimeoutConnectionSeconds value is what sticks.
         $handler.ConnectTimeout = [TimeSpan]::FromSeconds($ConnectTimeoutSeconds)
 
         # No handler is chained and no DelegatingHandler wraps this client, so
@@ -41,11 +46,13 @@ function Get-GraphHttpClient {
         # 100s wall-clock cap so it cannot fire before a configured phase timeout.
         $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
 
-        $script:GraphKitHttpHandler = $handler
-        $script:GraphKitHttpClient = $client
+        $script:GraphKitHttpClients[$key] = [pscustomobject] @{
+            Handler = $handler
+            Client  = $client
+        }
     }
 
-    return $script:GraphKitHttpClient
+    return $script:GraphKitHttpClients[$key].Client
 }
 
 function Send-GraphHttpRequest {
@@ -112,7 +119,7 @@ function Send-GraphHttpRequest {
         if (-not ($schemeMatches -and $authorityMatches)) {
             throw (
                 'Credential boundary violated: refusing to send a Graph bearer token to ' +
-                "'{0}'; expected the cloud authority '{1}'." -f $Uri.AbsoluteUri, $ExpectedAuthority.AbsoluteUri
+                "'{0}'; expected the cloud authority '{1}'." -f ([string] $Uri.OriginalString), ([string] $ExpectedAuthority.OriginalString)
             )
         }
 

@@ -145,3 +145,109 @@ Describe 'Review finding: cached tokens carry an adaptive refresh skew' {
         $script:Source.RefreshSkewSeconds($r) | Should -Be $script:Source.RefreshSkewSeconds($r)
     }
 }
+
+Describe 'Review finding: descriptor PathTemplate must be host-relative and rooted' {
+    # Resolve-GraphUri concatenates base + path, so a template missing its leading
+    # '/' produces 'https://graph.microsoft.comdeviceManagement' - a different host,
+    # which trips the authority guard far from the actual cause.
+
+    BeforeAll {
+        $script:RepoRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
+        $script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "gkdesc-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $script:TempDir -Force | Out-Null
+
+        function New-DescriptorFile {
+            param([string] $PathTemplate)
+            $file = Join-Path $script:TempDir "d-$([guid]::NewGuid().ToString('N')).psd1"
+            Set-Content -LiteralPath $file -Value @"
+@{
+    SchemaVersion = 1
+    Type = 'Probe'; Operation = 'List'; OperationKind = 'Collection'
+    HandlerStrategyId = 'Collection.Default'
+    ApiVersion = 'v1.0'; Stability = 'Stable'; BetaReason = `$null
+    Method = 'GET'; PathTemplate = '$PathTemplate'
+    ResponseKind = 'Collection'; PagingStrategy = 'NextLink'
+    RequestBodyKind = `$null; RequiredPagingHeaders = @()
+    DeduplicationKey = 'id'; SupportsAll = `$true; SupportsDelta = `$false
+    ReplayPolicy = 'Safe'; Condition = `$null; Reconciliation = `$null
+    AdvancedQuery = @{ Supported = `$false }
+    Concurrency = @{ Mode = 'None'; Header = `$null; Required = `$false; AllowWildcard = `$false }
+    CredentialPolicy = 'GraphBearer'; AllowedHosts = @()
+    RedirectPolicy = 'None'; IdentityRequirement = 'Verified'
+    ResourceFamily = 'Probe.Family'; ThrottleClass = 'Read'
+    SupportedAuthModes = @('Certificate')
+    RequiredPermissions = @(@{ Type = 'Application'; Value = 'X.Read.All' })
+    RequiredLicense = @(); SupportedClouds = @('Global')
+}
+"@
+            return $file
+        }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'accepts a rooted host-relative template' {
+        $file = New-DescriptorFile -PathTemplate '/deviceManagement/probes'
+        { InModuleScope GraphKit -Parameters @{ P = $file } { param($P) Import-GraphOperationDescriptor -Path $P } } |
+            Should -Not -Throw
+    }
+
+    It 'rejects <Why>' -ForEach @(
+        @{ Why = 'a template with no leading slash'; Template = 'deviceManagement/probes'; Match = '*must start with*' }
+        @{ Why = 'an absolute URL';                  Template = 'https://evil.example/x';   Match = '*host-relative*' }
+    ) {
+        $file = New-DescriptorFile -PathTemplate $Template
+        { InModuleScope GraphKit -Parameters @{ P = $file } { param($P) Import-GraphOperationDescriptor -Path $P } } |
+            Should -Throw -ExpectedMessage $Match
+    }
+}
+
+Describe 'Review finding: evidence allowlist reaches past depth 1' {
+    # The allowlist constrained top-level field NAMES only, and the credential regex
+    # inspected names never values - so Counts/Notes were unconstrained escape hatches.
+
+    It 'refuses a non-numeric Counts entry (a row in disguise)' {
+        { InModuleScope GraphKit {
+            New-GraphEvidenceSummary -Fields @{ ProfileId = 'ivy24'; Counts = @{ deviceName = 'LAPTOP-01' } }
+        } } | Should -Throw -ExpectedMessage '*must be numeric*'
+    }
+
+    It 'accepts a numeric Counts rollup' {
+        { InModuleScope GraphKit {
+            New-GraphEvidenceSummary -Fields @{ ProfileId = 'ivy24'; Counts = @{ NonCompliant = 12 } }
+        } } | Should -Not -Throw
+    }
+
+    It 'refuses a bearer token pasted into a note' {
+        { InModuleScope GraphKit {
+            New-GraphEvidenceSummary -Fields @{
+                ProfileId = 'ivy24'
+                Notes     = @('context: eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9abcdefghij')
+            }
+        } } | Should -Throw -ExpectedMessage '*bearer token*'
+    }
+
+    It 'accepts an ordinary summary note' {
+        { InModuleScope GraphKit {
+            New-GraphEvidenceSummary -Fields @{ ProfileId = 'ivy24'; Notes = @('12 of 40 devices were non-compliant.') }
+        } } | Should -Not -Throw
+    }
+}
+
+Describe 'Review finding: the per-call connect timeout is honoured' {
+    # ConnectTimeout is fixed when the handler is built, so one shared client silently
+    # honoured only the FIRST caller's value while still accepting the parameter.
+
+    It 'builds a distinct client per connect-timeout so the parameter is not ignored' {
+        InModuleScope GraphKit {
+            $a = Get-GraphHttpClient -ConnectTimeoutSeconds 10
+            $b = Get-GraphHttpClient -ConnectTimeoutSeconds 30
+            $again = Get-GraphHttpClient -ConnectTimeoutSeconds 10
+
+            [object]::ReferenceEquals($a, $b) | Should -BeFalse -Because 'a different connect timeout needs a different handler'
+            [object]::ReferenceEquals($a, $again) | Should -BeTrue -Because 'the same timeout must reuse its client so pooling survives'
+        }
+    }
+}

@@ -40,7 +40,10 @@ function Test-GraphCredentialPolicy {
 
         'None' {
             if ($null -eq $Uri -or -not $Uri.IsAbsoluteUri -or $Uri.Scheme -ne 'https') {
-                throw "Credential policy 'None' requires an HTTPS URI; refusing to send credentials-free to '{0}'." -f $Uri.AbsoluteUri
+                # OriginalString, not AbsoluteUri: AbsoluteUri throws InvalidOperationException
+                # on a relative URI - the exact input this branch exists to reject - which
+                # would mask this message with a framework error.
+                throw "Credential policy 'None' requires an absolute HTTPS URI; refusing to send credentials-free to '{0}'." -f ([string] $Uri.OriginalString)
             }
 
             # The loader enforces a non-empty allowlist; re-check here so -Raw synthesized

@@ -191,6 +191,25 @@ function Import-GraphOperationDescriptor {
     }
 
     # --- Cross-field rules ---------------------------------------------------
+    # PathTemplate must be host-relative and rooted. Resolve-GraphUri concatenates
+    # base + path, so a template missing its leading '/' yields
+    # 'https://graph.microsoft.comdeviceManagement' - a DIFFERENT host, which then
+    # trips the authority guard with an error far from its cause.
+    if ($descriptor.ContainsKey('PathTemplate')) {
+        $pathTemplate = [string] $descriptor['PathTemplate']
+        if (-not [string]::IsNullOrWhiteSpace($pathTemplate)) {
+            if (-not $pathTemplate.StartsWith('/')) {
+                $violations.Add("Field 'PathTemplate' must start with '/', got '$pathTemplate'.")
+            }
+            if ($pathTemplate -match '^https?://') {
+                $violations.Add("Field 'PathTemplate' must be host-relative, not absolute; got '$pathTemplate'.")
+            }
+            if ($pathTemplate.Contains('..')) {
+                $violations.Add("Field 'PathTemplate' must not contain '..'; got '$pathTemplate'.")
+            }
+        }
+    }
+
     if ($descriptor.ContainsKey('CredentialPolicy') -and $descriptor['CredentialPolicy'] -eq 'None') {
         $allowedHosts = $descriptor['AllowedHosts']
         if (-not $descriptor.ContainsKey('AllowedHosts') -or $null -eq $allowedHosts -or @($allowedHosts).Count -eq 0) {
