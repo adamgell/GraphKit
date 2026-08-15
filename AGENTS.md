@@ -4,7 +4,24 @@
 
 GraphKit is planned as an app-only, multi-tenant Microsoft Graph execution and analysis layer with explicit Intune and Entra operation semantics. It is not a generic Graph SDK or an OAuth implementation. Its core value is reliable request execution: immutable tenant contexts, operation metadata, semantics-aware retry/throttling, permission analysis, and evidence export.
 
-**Repository status:** design-approved, scaffolded, and implemented through phase 4 of the v1 plan. Phase 1 (Core) is complete: descriptor catalog and strategy registry, immutable contexts and profile store, four token sources with single-flight acquisition, owned transport with tenant-proof binding, semantics-aware retry, scoped throttle with AIMD admission, URI security, paging, batch, vault credential resolution, and the MSAL import guard. Phases 2-4 ship `Get-GraphObject` with tab completion, four-state permission analysis, and `Export-GraphResult` with evidence DTO allowlist. The protected Ivy24 smoke workflow (gate 1.8) is committed in `scripts/Invoke-GraphKitSmoke.ps1`; its live run requires the protected environment. Deterministic CI (`.github/workflows/ci.yml`) gates on the whole Pester result across PowerShell 7.4/7.6 on Windows/Ubuntu/macOS. 510 deterministic tests are green under `./build.ps1 -Tasks test`; `tests/QA/Assert-GateResult.ps1` enforces the expected-minimum-count gate. Remaining per spec: the phase-5 cutover, which is deliberately not started until a private package channel is decided.
+**Repository status:** design-approved, scaffolded, and implemented through phase 4 of the v1 plan, with phase 1 verified against a live tenant on 2026-08-15.
+
+Phase 1 (Core): descriptor catalog and strategy registry, immutable contexts and locked atomic profile store, four token sources with single-flight, owned transport with tenant-proof binding, semantics-aware retry, scoped throttle with AIMD admission (starting conservatively and ramping to the cap), URI security, paging, batch, vault credential resolution, and the MSAL import guard. Phases 2-4 ship `Get-GraphObject` with tab completion, four-state permission analysis, and `Export-GraphResult` with an evidence DTO allowlist.
+
+**Gate 1.8 passed live against the Ivy24 lab tenant on 2026-08-15**: package digest verified, profile resolved SecretStore -> PFX -> MSAL, token acquired, 13 managed devices / 75 mobile apps / 15 device configurations read, and an app assignment applied to a test group and reverted (revert confirmed independently, not from the script's own report).
+
+**A correction worth carrying forward.** This file previously recorded phases 1-4 as complete while `New-GraphTokenSource` defaulted every auth method to a scriptblock that threw "MSAL confidential-client resolution is not wired". GraphKit could not acquire a token by any means, and the entire suite passed because every test injects a factory. Setting up a vault and running the smoke test for real is what exposed it. **Treat "implemented" and "verified against a live tenant" as different claims in this file, and say which one you mean.**
+
+Live-verification status by auth mode:
+
+- `Certificate` - PROVEN end to end against Ivy24.
+- `ClientSecret` - wired, not yet proven live.
+- `BearerToken` (vault-resolved) - wired, not yet proven live.
+- `ManagedIdentity` - wired, and cannot be proven from a workstation; it needs an Azure compute identity.
+
+Deterministic CI (`.github/workflows/ci.yml`) gates on the whole Pester result across PowerShell 7.4/7.6 on Windows/Ubuntu/macOS. 557 deterministic tests are green under `./build.ps1 -Tasks test`; `tests/QA/Assert-GateResult.ps1` enforces the expected-minimum-count gate. Test suites now include `tests/Adapter/LoopbackSender.Tests.ps1` (the real HttpClient against an in-process HttpListener) and `tests/Concurrency/TokenIsolation.Tests.ps1`.
+
+Remaining per spec: the phase-5 cutover, deliberately not started until a private package channel is decided.
 
 Two exceptions are real and runnable today, copied from IntuneHealthAutomation:
 

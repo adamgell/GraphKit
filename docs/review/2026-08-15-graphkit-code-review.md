@@ -2,16 +2,17 @@
 
 - **Scope:** all 7,907 lines of `source/`, after phases 1–4
 - **Baseline:** 510 deterministic tests green
-- **Result:** 14 defects found and fixed; 541 tests green
+- **Result:** 16 defects found and fixed; 557 tests green
 - **Commits:** `81cfe0a`, `7bad06a`, `795c427`, `6c682df`, `f92cf54`, `50f829e`
 
-Every finding was reproduced before being fixed. **None of the 14 was caught by the existing
+Every finding was reproduced before being fixed. **None of the 16 was caught by the existing
 510-test suite**, which is the most useful signal in this review: the suite tested the paths the
-code takes, not the paths it refuses to take.
+code takes, not the paths it refuses to take - and, in two cases, the paths it had never
+implemented at all.
 
 ## The dominant failure mode
 
-Nine of the fourteen are one shape: **bounded or partial work reported as complete.**
+Nine of the sixteen are one shape: **bounded or partial work reported as complete.**
 
 | Where | Reported | Actually |
 | --- | --- | --- |
@@ -74,11 +75,12 @@ distinction the implementation did not always draw.
 
 ### Deliberately not changed
 
-**The throttle coordinator starts at the concurrency cap**, so the first burst runs at full
-concurrency — the throttle wave AIMD exists to avoid. The spec argues for starting conservatively,
-but this is a tuning decision rather than a demonstrated defect, and it moves a baseline several
-existing tests rely on. Recorded in `GraphThrottleCoordinator.ps1`. **Open question for the
-owner.**
+**RESOLVED 2026-08-15.** The throttle coordinator previously started at the concurrency cap, so
+the first burst against a cold scope ran at full concurrency - the throttle wave AIMD exists to
+avoid, and a scope is coldest exactly when a run starts. It was left alone during the review
+because it is a tuning decision rather than a demonstrated defect, and changing it moves a
+baseline several tests rely on. The owner subsequently took the decision: it now starts at
+`InitialConcurrency` (2) and ramps to the cap, with four baseline assertions updated.
 
 **Negative service-principal caching.** `Get-GraphServicePrincipalObject` caches `$null` when the
 SP does not exist, so an SP created later in the same session still reads as missing. Cleared by a
@@ -114,6 +116,30 @@ right: delta-seconds, then HTTP-date, and only then a comma split, never splitti
 binding is cached by fingerprint + generation and never trusts a provider's claim. Batch is
 read-only by default behind a `Safe`-descriptor gate. `Grant-GraphAppPermission` is diff-based and
 idempotent under `ShouldProcess`. Permission `Configured` is genuinely tri-state.
+
+## Found later, by running for real
+
+Two further defects surfaced only when the module was pointed at a live tenant, after the
+static review was complete. Both are recorded here because they say something the review
+itself could not: **a passing suite proved less than it appeared to.**
+
+15. **Every auth method was a stub.** `New-GraphTokenSource` defaulted Certificate,
+    ClientSecret, ManagedIdentity and BearerToken to scriptblocks that threw "MSAL
+    confidential-client resolution is not wired ... pass -MsalFactory". GraphKit could not
+    acquire a token by any means. All 557 tests passed because **every one injects a
+    factory**, and `AGENTS.md` recorded phase 1 as complete. Fixed by
+    `source/Private/TokenSources/New-GraphMsalApplication.ps1`.
+
+16. **Every paged read failed.** `Invoke-GraphPaging` invoked its transport delegate without
+    `-CancellationToken`, binding `$null` to a parameter typed
+    `[System.Threading.CancellationToken]`, which cannot accept null. Injected test
+    transports do not type that parameter strictly, so only a real paged read against a live
+    tenant could expose it.
+
+The generalisable lesson, and the reason the loopback and live gates matter more than their
+test count suggests: **the suite tested the seams it was built around.** Wherever a test
+injects a dependency, the real implementation of that dependency is unverified by
+construction - and in two cases here it did not exist at all.
 
 ## Residual risk
 
