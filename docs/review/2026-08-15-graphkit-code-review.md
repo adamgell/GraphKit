@@ -3,7 +3,7 @@
 - **Scope:** all 7,907 lines of `source/`, after phases 1–4
 - **Baseline:** 510 deterministic tests green
 - **Result:** 17 defects found and fixed; 559 tests green
-- **Commits:** `81cfe0a`, `7bad06a`, `795c427`, `6c682df`, `f92cf54`, `50f829e`
+- **Commits:** `81cfe0a`, `7bad06a`, `795c427`, `6c682df`, `f92cf54`, `50f829e`, `527ca3d`
 
 Every finding was reproduced before being fixed. **None of the 17 was caught by the existing
 510-test suite**, which is the most useful signal in this review: the suite tested the paths the
@@ -121,8 +121,8 @@ idempotent under `ShouldProcess`. Permission `Configured` is genuinely tri-state
 
 Three further defects surfaced only when the module was run for real - two against a live
 tenant, and one on a machine that had never run it before - all after the static review was
-complete. Both are recorded here because they say something the review
-itself could not: **a passing suite proved less than it appeared to.**
+complete. All three are recorded here because they say something the review itself could
+not: **a passing suite proved less than it appeared to.**
 
 15. **Every auth method was a stub.** `New-GraphTokenSource` defaulted Certificate,
     ClientSecret, ManagedIdentity and BearerToken to scriptblocks that threw "MSAL
