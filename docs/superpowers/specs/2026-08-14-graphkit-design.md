@@ -560,6 +560,27 @@ missing.
 states Graph access tokens are resource-owned and clients must not depend on their internal
 format. Token claims are optional diagnostic evidence, not the authorization inventory.
 
+`Get-GraphTokenPermission` is therefore **not** part of the public surface. Claim inspection
+survives only as an internal diagnostic helper, and its output is labelled as evidence rather
+than as a grant.
+
+**Accepted consequences of this choice** — deliberate, since correct beats fast here:
+
+1. **Analysis costs directory round-trips**, not a free local JWT decode: resolve the customer
+   service principal by `appId`, read its `appRoleAssignments`, and resolve each `appRoleId`
+   against the Microsoft Graph service principal's `appRoles`. Those calls are themselves subject
+   to throttling and must go through the normal request pipeline, not around it.
+2. **The analyzer needs its own permissions, which creates a bootstrap problem.** Reading
+   service-principal role assignments requires `Application.Read.All` or `Directory.Read.All` in
+   the customer tenant. An app registration that lacks them **cannot analyze itself** — the very
+   situation where an operator most wants an answer. This must fail with a specific, actionable
+   error naming the missing permission and the fact that it is the analyzer's own prerequisite,
+   never a bare 403, and never a silent fallback to reading the token's claims. A documented
+   escape is to run the analysis under a separate read-only app registration.
+3. **Graph service-principal `appRoles` should be cached per tenant for the session.** It is
+   large, effectively static within a run, and resolving it once per assignment would be the
+   dominant cost. This is a session-scoped read cache, unrelated to the credential cache.
+
 ### Output and evidence export
 
 Results are `PSCustomObject` with `PSTypeName` `GraphKit.<Type>` plus `_Tenant`,
