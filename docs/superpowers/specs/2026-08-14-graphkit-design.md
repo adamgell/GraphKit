@@ -4,6 +4,12 @@
 - **Status:** Approved for planning
 - **Author:** Adam Gell
 
+**Product definition.** GraphKit is an app-only, multi-tenant Microsoft Graph execution and
+analysis layer with explicit Intune/Entra operation semantics. It is not a generic Graph SDK and
+not another OAuth library. That boundary is what keeps it from collapsing into the two traps
+prior projects hit repeatedly: rebuilding the identity client, and pretending Graph's endpoint
+behavior is more uniform than it is.
+
 ## Problem
 
 Microsoft Graph code is spread across ~175 PowerShell files in 16 repos, with no shared
@@ -26,10 +32,6 @@ Current fragmentation, measured:
 | `Az.Accounts` token borrowing | 19 |
 | references a `secret.json` | 117 |
 
-Given the decision below to delegate authentication to the Graph SDK, the 61 `Connect-MgGraph`
-files are already aligned with the target and need the least porting. The 44 raw
-`client_credentials` scripts are the ones that change.
-
 ### Security findings (pre-existing, not introduced by this work)
 
 - Four live customer client secrets sit in plaintext in
@@ -45,157 +47,114 @@ Retiring both is a design requirement, not a side effect.
 
 ### IntuneHealthAutomation (`github.com/adamgell/IntuneHealthAutomation`, private)
 
-Already implements roughly 70% of the intended core. It is a PowerShell module
-(`src/healthcheck.psd1` v0.2.0) with:
-
-- Multi-tenant configuration, per-tenant output directories, tenant management menu
-- Certificate-based authentication (`Get-CBAToken`), bearer token, and MgGraph SDK paths
-- `Invoke-IntuneGraphRequest` (594 lines): `@odata.nextLink` paging, `$batch`, proactive
-  token-expiry detection; plus `Invoke-ParallelGraphRequest` (318 lines)
-- 17 JSON report definitions governed by a JSON schema, with VS Code templates
-- API response caching, endpoint caching, and checkpoint/resume for large collections
+A PowerShell module (`src/healthcheck.psd1` v0.2.0) implementing much of the intended core:
+multi-tenant configuration with per-tenant output, certificate-based auth (`Get-CBAToken`),
+bearer token and MgGraph SDK paths, `Invoke-IntuneGraphRequest` (594 lines: `@odata.nextLink`
+paging, `$batch`, proactive token-expiry detection), `Invoke-ParallelGraphRequest` (318 lines),
+17 schema-governed JSON report definitions, API/endpoint caching, and checkpoint/resume.
 
 **Gaps identified:**
 
-1. **No throttling handling.** `Invoke-IntuneGraphRequest` contains zero references to
-   `429`, `503`, `Retry-After`, `TooManyRequests`, or backoff. The parallel request path
-   makes throttling more likely, not less.
+1. **No throttling handling.** Zero references to `429`, `503`, `Retry-After`,
+   `TooManyRequests`, or backoff. The parallel path makes throttling likelier, not less.
 2. **No tests.** `.github/workflows/pester-tests.yml` runs on every push, but zero
    `*.Tests.ps1` files are tracked. CI passes because it tests nothing.
-3. **No `ConsistencyLevel` handling** for `$count` / `$search` / advanced `$filter`.
-4. **Declares PowerShell 7.2**, which is past end of support.
+3. **No `ConsistencyLevel` handling.**
+4. **Declares PowerShell 7.2**, past end of support.
 
-It is also an *application*, not a *library*: ~25 module-scope `$script:` variables, coupled
-to `ImportExcel` and the reporting pipeline. It is not something to import for a one-liner.
-
-### IntuneManagement (Micke-K, MIT)
-
-`Extensions/EndpointManager.psm1` registers **108 object types** mapping Intune/Entra object
-names to Graph endpoints. The table is worth lifting; the 9,186 lines of WPF UI around it is
-not. The local copy carries no LICENSE file, so vendoring requires pulling the upstream MIT
-text into `THIRD-PARTY-NOTICES.md`.
+It is an *application*, not a *library*: ~25 module-scope `$script:` variables, coupled to
+`ImportExcel` and the reporting pipeline.
 
 ### External prior art
 
-Surveyed 2026-08-14. None of these removes the need for GraphKit's plumbing layer, but several
-constrain or inform it.
+Surveyed 2026-08-14; module versions verified against PSGallery the same day.
 
-| Project | Relevance |
-| --- | --- |
-| **Microsoft.Graph SDK** | **Adopted for authentication.** Ships MSAL token caching, refresh, CA claims challenges, sovereign clouds, managed identity, and an outer-response retry handler tunable via `Set-MgRequestContext -MaxRetry -RetryDelay -RetriesTimeLimit`. The widely-cited failure at ~60–70 Autopilot devices ("more than 3 retries encountered") is `-MaxRetry` at its default of 3 — a configuration miss, not an architectural limit. |
-| **Maester** (`maester365/maester`) | Pester-based M365/Entra security test framework: 40+ EIDSCA tests, CIS and CISA/SCuBA baselines, multi-tenant assessment, HTML reports, CI/CD integration. Overlaps IntuneHealthAutomation's *reporting* purpose, not GraphKit's plumbing. Worth evaluating before building further health-check reports by hand. |
+| Project | Version / date | Bearing on GraphKit |
+| --- | --- | --- |
+| **MgGraphCommunity** | 1.5.0, 2026-07-28 | Closest competitor. Pure PowerShell, direct Graph calls, **multiple simultaneous live contexts**, cert/secret/bearer, sovereign clouds, paging, batch, 429/503/504 retry. **Disqualifier for consulting use: a *global* `/beta` default** — verified in source, relative URIs go to beta and `-V1` is the opt-*down* ("Default to /beta (more surface area)"). The problem is not beta, which is where much of Intune's production surface genuinely lives; it is that the choice is process-wide and blind, so operations with a perfectly good v1.0 silently ride an interface carrying no breaking-change guarantee. Also brand new, small ecosystem, owns its own delegated PKCE/refresh security code, no SecretManagement profile lifecycle, no permission analysis, no Intune operation semantics. **Compare public API and tests against it; do not adopt.** |
+| **MSGraphRequest** | 2.0.1, 2026-02-20 | By Nickolaj Andersen & Jan Ketil Skanke (MSEndpointMgr) — the most credible authors in this space. Native REST, no SDK/MSAL dependency, six auth flows, automatic paging/throttling/refresh. Exposes a *current connection*, not named immutable contexts. **Strong evidence that raw transport and app-only OAuth are commodity.** Not a replacement: no SecretManagement profiles, no operation catalog, no cross-runspace rate control, no permission analysis, no replay-safety classification. |
+| **mgx** | 1.0.5, 2026-08-14 | **Best current reliability prior art.** Proactive rate limiting, circuit breaking, adaptive write pacing, connection recycling, body-read timeouts, checkpoint/resume, delta, streaming pagination, telemetry. Unusable as a foundation (PS 7.5+, depends on `Microsoft.Graph.Authentication`, compiled components, generic rather than Intune-aware) but **its pipeline architecture should be studied and borrowed**. |
+| **AutoGraphPS / -SDK** | 0.44.0 / 0.32.0, Nov 2024 | The strongest design history for type-driven access: separation of connection / logical graph / type metadata / location context, URI and property completers, permission-name resolution. Its instructive lesson is that **a metadata-driven model still accumulated many special cases**. ~21 months stale; do not inherit its ADAL/MSAL-era auth architecture. |
+| **Microsoft.Graph.Authentication** | 2.38.1 | Adopted for authentication — see below. |
+| **Maester** | current | Pester-based M365/Entra security testing. Overlaps IHA's *reporting* purpose, not GraphKit's plumbing. Evaluate before hand-building more health-check reports. |
+| **IntuneManagement** (Micke-K, MIT) | — | Source of the object-type/endpoint table. The WPF UI around it is not wanted. Local copy has no LICENSE file; vendoring requires the upstream MIT text in `THIRD-PARTY-NOTICES.md`. |
+| **Microsoft365DSC**, **EntraExporter**, **IntuneBackupAndRestore**, **IntuneAssignmentChecker** | — | Config-as-code, Entra export, policy backup, assignment audit respectively. Adjacent, not overlapping. |
 
 #### What Maester's auth confirms
 
-`Connect-Maester.ps1` (495 lines) is broad — 9 services, the full sovereign-cloud matrix with a
-separate enum per service, explicit module import ordering to dodge bundled-DLL conflicts, and
-scope-on-demand switches (`-SendMail`, `-Privileged`) that keep the default least-privilege.
-
-It is also **shallow exactly where the hard problems are**: Graph auth is a pass-through to
-`Connect-MgGraph` with no token acquisition, cache, or refresh of its own; zero
-`client_credentials`; certificate auth only for SharePoint; and zero references to `429`,
-`Retry-After`, or backoff anywhere in the connect path. Its `Invoke-MtGraphRequestCache` is a
+`Connect-Maester.ps1` (495 lines) is broad — 9 services, a separate sovereign-cloud enum per
+service, explicit module import ordering to dodge bundled-DLL conflicts, scope-on-demand
+switches. It is **shallow exactly where the hard problems are**: Graph auth passes straight
+through to `Connect-MgGraph`; zero `client_credentials`; certificate auth only for SharePoint;
+zero references to `429`, `Retry-After`, or backoff. Its `Invoke-MtGraphRequestCache` is a
 hashtable keyed on absolute URI with no TTL, invalidation, or size bound.
 
-Two conclusions, both of which shaped this design. First, a mature and well-staffed project
-reached the same verdict — delegate token lifecycle to the SDK — which is corroboration, not
-coincidence. Second, throttling remains unsolved even there, confirming it as GraphKit's
-actual contribution. Lifted directly: sovereign-cloud enums, existing-session reuse before
-reconnecting, and scope-on-demand as a least-privilege default. Explicitly **not** lifted: the
-unbounded cache.
-| **IntuneAssignmentChecker** (Ugur Koc) | v3 was a single script; v4 is a module with assignment simulation, reverse lookup, and a read-only MCP server. Overlaps IHA's assignment analysis, and its script→module evolution is the same path taken here. |
-| **Microsoft365DSC** | Configuration-as-code across the full M365 surface with drift detection. Broader and heavier than this work; known gaps in Intune configuration-profile export. |
-| **EntraExporter** | Entra configuration to versioned JSON. Supersedes the deprecated AzureADExporter. Excludes several object classes unless `-All` is passed. |
-| **IntuneBackupAndRestore**, **IntuneManagement** | Policy backup/copy/migrate between tenants. |
-| **Sampler** (gaelcolas) | The community-standard module scaffolder — InvokeBuild tasks for build/test/pack/publish, cross-platform, no admin rights required, ModuleFast dependency resolution. An open question against the hand-rolled layout below. |
+Lifted: sovereign-cloud enums, existing-session reuse before reconnecting, scope-on-demand as a
+least-privilege default. **Not** lifted: the unbounded cache.
 
-Two Microsoft guidance points materially changed this design: batch envelopes returning 200 OK
-while inner requests are throttled, and the `x-ms-retry-after-ms` header variant. Both are
-captured in the request-core section.
-
-Name check: `GraphKit` is available on the PowerShell Gallery. `GraphTools` (Kevin Blumenfeld)
-and `PSGraphKit` (Martin Welen) are taken.
-
-### pliving/Graph.ps1
-
-293 lines with the right bones — config validation, `Join-GraphUri`,
-`Invoke-GraphRequest -AllPages`, structured error unwrapping, JWT claim inspection,
-`$count`-with-fallback. Superseded by IntuneHealthAutomation's more developed core, but
-confirms the shape.
+**The consistent finding across all of the above is that authentication and transport are
+commodity, and throttling correctness is not.** That is where GraphKit's value sits.
 
 ## Decision
 
-Extract the plumbing from IntuneHealthAutomation into a standalone `GraphKit` module, in
-stages. Build and prove GraphKit first; cut IntuneHealthAutomation over to it as separate,
-later work.
+Extract the plumbing from IntuneHealthAutomation into a standalone `GraphKit` module, in stages.
+Build and prove GraphKit first; cut IntuneHealthAutomation over to it as separate, later work.
 
-Rejected alternatives:
-
-- **Big-bang refactor** — invasive change to an actively-developed app with no test suite
-  to catch regressions.
-- **Extend IntuneHealthAutomation in place** — a quick-action import would drag `ImportExcel`,
-  caching, and reporting along, and the surface would stay Intune-shaped rather than
-  Graph-shaped.
-- **Greenfield with copy-harvest** — two Graph layers that drift apart permanently.
-
-### Dependency shape
+Rejected: big-bang refactor (invasive change to an app with no test suite), extending IHA in
+place (drags ImportExcel/caching/reporting into every quick action), greenfield copy-harvest
+(two Graph layers that drift).
 
 ```
-GraphKit            plumbing: auth, tenants, request core, permissions
+GraphKit            plumbing: auth, contexts, request pipeline, operations, permissions
    ^
    |
 healthcheck (IHA)   domain: reports, Excel, caching, checkpointing
 ```
 
-IntuneHealthAutomation gains `RequiredModules = @{ModuleName='GraphKit'; ModuleVersion='1.0.0'}`
-and deletes its duplicated layer.
-
-The payoff runs both directions. GraphKit alone stays light — one dependency, no reporting
-stack. Importing both yields a shared tenant context that does not exist today:
-
-```powershell
-Use-GraphTenant ivy24              # authenticate once
-Get-GraphObject CompliancePolicy   # ad-hoc, instant
-Invoke-IntuneHealthCheck           # full IHA run, same tenant, no re-auth
-```
-
-And IntuneHealthAutomation inherits the throttling handling and test suite it currently lacks.
-
 ### Authentication is delegated to the Graph SDK
 
-GraphKit takes a dependency on **`Microsoft.Graph.Authentication`** and acquires tokens through
-`Connect-MgGraph`. It does not implement token acquisition, caching, or refresh.
+GraphKit depends on **`Microsoft.Graph.Authentication`** and acquires tokens through
+`Connect-MgGraph`. It does not implement token acquisition or caching.
 
-This reverses an earlier decision to hand-roll raw REST authentication. Measurement is what
-changed it — `Microsoft.Graph.Authentication` v2.38.1 imports in **96 ms** (38.8 MB on disk),
-so the "heavy dependency" objection does not survive contact with a stopwatch. `Connect-MgGraph`
-natively covers every auth mode in use here: `-ClientSecretCredential`, `-CertificateThumbprint`,
-`-Certificate`, `-CertificateSubjectName`, `-AccessToken`, `-Identity` (managed identity), and
-`-UseDeviceCode`.
+**The justification for this has been corrected.** The original reasoning cited MSAL refresh
+tokens and Conditional Access claims challenges. For the locked v1 auth modes that reasoning is
+largely void: **certificate and client-secret flows are both client-credentials, which return no
+refresh token.** There is no OAuth session to maintain — an expired access token is replaced by
+reacquiring with the source credential. CAE claims challenges are predominantly a delegated-token
+concern.
 
-What delegation buys, all of it genuinely hard to rebuild correctly:
+What the dependency still genuinely buys, for app-only:
 
-- MSAL token cache, refresh, and clock-skew handling
-- **Conditional Access claims challenges.** Graph can answer 401 with a `WWW-Authenticate`
-  claims challenge requiring re-request with a claims parameter. Hand-rolled
-  `client_credentials` implementations typically ignore this. Given the customer tenants this
-  module targets are CA-heavy, that is a correctness issue, not a nicety.
-- All five sovereign clouds via `-Environment`
+- **Certificate client assertions.** Cert-based client credentials require constructing and
+  RS256-signing a JWT assertion with `x5t`, `jti`, and a short validity window. That is
+  security-sensitive cryptography and the strongest single reason not to hand-roll.
+- Sovereign cloud authority and resource endpoints via `-Environment`
 - Managed identity, for later unattended use
+- Not becoming a second OAuth client library — the trap `MgGraphCommunity` walked into by owning
+  its own PKCE and refresh-token code
 
-The earlier argument that the SDK's retry handler is inadequate — citing bulk Autopilot
-registration failing at ~60–70 devices with "more than 3 retries encountered" — was a
-misreading. That is `-MaxRetry` sitting at its default of 3, addressable with
-`Set-MgRequestContext -MaxRetry 10`. It is a configuration miss, not an architectural limit.
+Measurement: v2.38.1 imports in **96 ms** (38.8 MB on disk), so the "heavy dependency" objection
+does not survive a stopwatch. It natively covers `-ClientSecretCredential`,
+`-CertificateThumbprint`, `-Certificate`, `-CertificateSubjectName`, `-AccessToken`, `-Identity`,
+and `-UseDeviceCode`.
 
-**Accepted cost: one global tenant context.** `Get-MgContext` takes no parameters; the SDK holds
-exactly one connection, so two tenants cannot be live simultaneously. `Use-GraphTenant`
-reconnects, which MSAL's cache makes silent for repeat switches. Cross-tenant comparison in a
-single pipeline is therefore **out of scope** — it was never a stated requirement, and
-sequential switching covers the actual workflow.
+Also corrected: the widely-cited SDK retry failure at ~60–70 Autopilot devices ("more than 3
+retries encountered") is `-MaxRetry` at its default of 3 — a configuration miss, not an
+architectural limit.
 
-The request layer stays GraphKit's, because the gaps below are application-level and the SDK
-does not close them regardless of which transport acquires the token.
+**Accepted cost: one live tenant context.** `Get-MgContext` takes no parameters. Cross-tenant
+comparison in a single pipeline is out of scope; sequential switching covers the workflow.
+(`MgGraphCommunity` does support simultaneous contexts, which is the one capability given up
+here.)
+
+**What would flip this decision:** needing simultaneous multi-tenant, or the SDK's import
+behavior regressing. Revisit then, not before.
+
+### Bearer tokens are caller-owned
+
+GraphKit may hold an externally supplied bearer token but must never claim it can refresh one.
+The profile exposes a token provider or SecretManagement reference. A caller-supplied expiry is
+honored; absence of one means "try it, then return a clear authentication failure."
 
 ## Scope
 
@@ -205,36 +164,23 @@ does not close them regardless of which transport acquires the token.
 | --- | --- |
 | Tenants | `Save-/Remove-TenantConfiguration`, `New-TenantConfigurationPrompt`, `Show-TenantManagementMenu`, `Get-SecretsConfiguration` |
 | Request core | `Invoke-IntuneGraphRequest`, `Invoke-ParallelGraphRequest`, `Get-GraphUrl` |
-| Permissions | `Test-GraphPermissions`, `Get-TokenPermissionAnalysis`, `Get-AppRegistrationPermissions`, `Grant-IntuneAppPermissions` (~1,400 lines, generalized off the health check's fixed permission set) |
+| Permissions | `Test-GraphPermissions`, `Get-TokenPermissionAnalysis`, `Get-AppRegistrationPermissions`, `Grant-IntuneAppPermissions` (~1,400 lines, generalized) |
 
 ### Retired, not moved
 
-The decision to delegate authentication (below) means several IntuneHealthAutomation functions
-are deleted rather than extracted:
-
-- `Get-CBAToken` (253 lines) → `Connect-MgGraph -CertificateThumbprint`
-- `Update-AccessToken` (150 lines) → MSAL token cache inside the SDK
+- `Get-CBAToken` (253 lines) → `Connect-MgGraph -CertificateThumbprint` / `-Certificate`
+- `Update-AccessToken` (150 lines) → SDK token cache
 - `Set-GraphEnvironment` (65 lines) → `Connect-MgGraph -Environment`
 
-Bearer-token mode survives natively via `Connect-MgGraph -AccessToken`. Roughly 470 lines of
-token-lifecycle code stop being maintained here.
+Bearer mode survives via `-AccessToken`. ~470 lines of token-lifecycle code stop being
+maintained here.
 
 ### Stays in IntuneHealthAutomation
 
-- 17 report definitions and the reporting/Excel pipeline
-- `src/private/Processing` (28 files of Intune-specific shaping)
-- `Checkpoint-DeviceCollection`, console UI, `Invoke-IntuneHealthCheck`
-- **The entire caching layer** (~1,300 lines). It is entangled with checkpointing and the
-  collection flow; extracting it is the highest-risk piece and is deferred until GraphKit's
-  request core is proven.
-
-### New in GraphKit
-
-- Retry and `Retry-After` handling
-- A committed Pester test suite
-- SecretManagement-backed credential storage
-- `Get-GraphObject` with tab completion over the 108-type table
-- `Export-GraphResult`, including vault-aware evidence output
+Report definitions and the Excel pipeline, `src/private/Processing` (28 files),
+`Checkpoint-DeviceCollection`, console UI, `Invoke-IntuneHealthCheck`, and **the entire caching
+layer** (~1,300 lines, entangled with checkpointing; deferred until GraphKit's pipeline is
+proven).
 
 ## Components
 
@@ -243,236 +189,519 @@ token-lifecycle code stop being maintained here.
 New private repo at `~/repo/GraphKit` → `github.com/adamgell/GraphKit`, scaffolded with
 **Sampler** (`New-SampleModule -ModuleType SimpleModule`).
 
-Sampler supplies InvokeBuild tasks for build/test/pack/publish, ModuleBuilder compilation,
-GitVersion, PSScriptAnalyzer, JaCoCo coverage, and CI templates — replacing the hand-maintained
-`New-IntuneModuleRelease` equivalent. It runs on Windows, Linux, and macOS without admin rights.
-
 Verified against Sampler 0.120.1 on 2026-08-14:
 
-- **Pester 6 is compatible.** Sampler's version gates are lower-bound only (`>= 5.0.0`), and it
+- **Pester 6 is compatible.** Version gates are lower-bound only (`>= 5.0.0`), and Sampler
   references none of the options v6 removed — no `CoverageGutters`, no `UseBreakpoints`, no
-  `FailOnNullOrEmptyForEach`. Coverage is JaCoCo, which v6 retains. Its changelog entry about
-  updating sample tests to Pester 5 concerns Sampler's own samples, not a constraint on ours.
+  `FailOnNullOrEmptyForEach`. Coverage is JaCoCo, which v6 retains.
 - **`New-SampleModule` cannot run non-interactively.** Its Plaster template prompts
-  "Will you use Git for source control?" unconditionally; no parameter suppresses it, and it
-  fails outright in a non-interactive host. Scaffolding is therefore a one-time manual step and
-  cannot be automated in CI. Acceptable, but it must not be scripted.
-- Sampler pins **ModuleBuilder 3.1.8**, because newer versions break its task alias
-  registration. Do not upgrade ModuleBuilder independently.
+  "Will you use Git for source control?" unconditionally and fails outright in a
+  non-interactive host. Scaffolding is a one-time manual step and must not be scripted.
+- Sampler pins **ModuleBuilder 3.1.8**; do not upgrade it independently.
+
+*Recorded dissent:* external review recommended a hand-rolled InvokeBuild pipeline instead,
+on the grounds that Sampler's abstraction cost (Sampler + InvokeBuild + ModuleBuilder + YAML +
+imported task defaults) outweighs its benefit for a single module. Sampler was chosen anyway
+because GraphKit and IntuneHealthAutomation will share release conventions, which is the
+condition under which that review agreed Sampler pays for itself. Revisit if IHA does not adopt it.
 
 ```
 GraphKit/
   source/
     GraphKit.psd1                    # RequiredModules: Microsoft.Graph.Authentication
     Public/
-      Register-GraphTenant, Get-GraphTenant, Use-GraphTenant,
-      Remove-GraphTenant, Test-GraphTenant
+      Register-GraphTenant, Get-GraphTenant, Remove-GraphTenant, Test-GraphTenant
+      Get-GraphContext, Use-GraphTenant
       Invoke-GraphRequest, Invoke-GraphBatch
-      Get-GraphObject, Get-GraphObjectType
-      Test-GraphPermission, Get-GraphTokenPermission,
-      Get-GraphAppRegistrationPermission, Grant-GraphAppPermission
+      Get-GraphObject, Get-GraphOperation
+      Test-GraphPermission, Get-GraphAppRegistrationPermission,
+      Compare-GraphPermission, Grant-GraphAppPermission
       Export-GraphResult
     Private/
-      Invoke-GraphRetry, Resolve-GraphUri,
-      ConvertFrom-JwtPayload, Write-VaultEvidence
-    Data/ObjectTypes.psd1
+      Invoke-GraphRetry, Get-GraphRetryDecision, Get-GraphRetryDelay,
+      Resolve-GraphUri, Test-GraphNextLinkAuthority,
+      Get-GraphThrottleScope, Write-VaultEvidence
+    Data/Operations/*.psd1
     Formats/GraphKit.Format.ps1xml
-  tests/Unit, tests/QA
+  tests/Unit, tests/Adapter, tests/Concurrency, tests/QA
   build.yaml, build.ps1, RequiredModules.psd1
   THIRD-PARTY-NOTICES.md
 ```
 
-**Build note:** ModuleBuilder compiles `Public/` and `Private/` into a single `.psm1` under
-`output/`. Non-code assets — `Data/ObjectTypes.psd1` and `Formats/GraphKit.Format.ps1xml` — are
-not compiled and must be listed in `build.yaml` under `CopyPaths`, or they will be missing from
-the built module while still present in source. This is a common first-build failure.
+**Build note:** ModuleBuilder compiles `Public/` and `Private/` into one `.psm1` under
+`output/`. Non-code assets — `Data/Operations/` and `Formats/GraphKit.Format.ps1xml` — are not
+compiled and **must** be listed in `build.yaml` under `CopyPaths`, or they vanish from the built
+module while looking correct in source. Common first-build failure.
 
-`Get-GraphToken` is absent by design: token acquisition belongs to `Connect-MgGraph`.
+### Profiles and contexts
 
-### Tenant profiles
+A mutable "current profile" must not be the sole source of truth — a profile switch in one
+runspace would silently retarget work in another.
 
-Metadata in `~/.graphkit/profiles.json` (no secrets; safe to commit). Secrets and bearer
-tokens in `Microsoft.PowerShell.SecretManagement` under `GraphKit:<name>`. The backend is
-swappable — SecretStore now, Keychain, 1Password, or Key Vault later — without module changes.
+- **Profile** — persisted non-secret metadata plus SecretManagement references.
+- **Context** — an *immutable* runtime object: resolved tenant, cloud, Graph base URI, client ID,
+  credential fingerprint, cache key.
+- **Current context** — an interactive convenience only.
 
-Each profile carries:
+Every low-level command accepts `-Context` or `-ProfileName`, resolved **before** entering
+parallel work:
+
+```powershell
+$context = Get-GraphContext -Profile ivy24
+Get-GraphObject -Context $context -Type ManagedDevice
+```
+
+Profile metadata in `~/.graphkit/profiles.json`; secrets in
+`Microsoft.PowerShell.SecretManagement` under `GraphKit:<name>`.
 
 | Field | Notes |
 | --- | --- |
 | `Name` | Profile identifier; also the vault customer tag when `Kind = customer` |
 | `Kind` | `customer` \| `lab` \| `internal` |
 | `TenantId`, `ClientId` | |
-| `AuthMethod` | `Certificate` \| `ClientSecret` \| `BearerToken` \| `ManagedIdentity` \| `DeviceCode` — maps directly onto a `Connect-MgGraph` parameter |
-| `Environment` | `Global` \| `China` \| `Germany` \| `USGov` \| `USGovDoD` — passed through to `-Environment` |
+| `AuthMethod` | `Certificate` \| `ClientSecret` \| `BearerToken` \| `ManagedIdentity` |
+| `Environment` | `Global` \| `China` \| `Germany` \| `USGov` \| `USGovDoD` |
+| `CredentialRef` | Vault name + secret name (+ version) |
 
-`Use-GraphTenant` resolves the profile, pulls its secret from SecretManagement, and calls
-`Connect-MgGraph` with the corresponding parameter. Following Maester's pattern, it **checks
-`Get-MgContext` first and skips reconnection when the existing context already matches the
-requested tenant** — which keeps repeat switches instant and preserves sessions established by
-federated credentials or managed identity.
+**`Kind` governs taxonomy validation.** Only `Kind = customer` validates `Name` against the CDW
+KB `SCHEMA.md` customer tag list. `ivy24` is a lab tenant and must not be a customer tag.
 
-**`Kind` governs taxonomy validation.** Only `Kind = customer` validates `Name` against the
-CDW KB `SCHEMA.md` customer tag list. Lab and internal profiles are exempt — `ivy24` is a lab
-tenant and is not, and should not be, a customer tag.
+**Certificate material must not be thumbprint-only** — that is Windows-specific. Support at
+minimum: an injected `X509Certificate2`, a PFX file with a vault-backed password, vault-backed
+certificate material, and Windows cert-store lookup as an optional platform provider.
 
-**Migration is a first-class command.** `Register-GraphTenant -FromLegacyConfig` imports both
-IntuneHealthAutomation's `config/secrets.json` tenant array and the `Start-WithConsole *.cmd`
-launchers, moving secrets into the vault so nothing is retyped and the plaintext copies can be
-deleted.
+`Use-GraphTenant` checks `Get-MgContext` first and skips reconnection when the existing context
+already matches, preserving sessions from federated credentials or managed identity.
 
-### Request core
+**Migration is a first-class command.** `Register-GraphTenant -FromLegacyConfig` imports IHA's
+`config/secrets.json` tenant array and the `Start-WithConsole *.cmd` launchers, moving secrets
+into the vault so the plaintext copies can be deleted.
 
-`Invoke-GraphRequest` wraps **`Invoke-MgGraphRequest`**, inheriting the SDK's transport, auth
-plumbing, and its outer-response retry handler (tuned once at import via
-`Set-MgRequestContext -MaxRetry`). On top of that it adds paging, URI resolution,
-`ConsistencyLevel: eventual` when `$count`, `$search`, or advanced `$filter` appear, a `-Beta`
-switch, and the throttling gaps below.
+### Operation catalog — not a type-to-endpoint table
 
-This is one request path, not two. The SDK is the transport; GraphKit owns the semantics it
-does not implement.
+A flat type→endpoint map is sufficient for basic collection reads and **breaks down everywhere
+else**: actions, assignments, async report jobs, advanced directory queries, ETags, beta-only
+operations, and non-collection responses.
 
-`Invoke-GraphBatch` wraps `/$batch` at the 20-request limit.
+The unit of behavior is **Type + Operation + API version + cloud + auth mode**, not Type.
 
-**Batch throttling is not the same as request throttling.** Per Microsoft's throttling guidance,
-each request inside a JSON batch is evaluated individually against limits — an inner request can
-fail with 429 while **the batch envelope itself still returns 200 OK**. Treating the envelope
-status as success silently drops data. `Invoke-GraphBatch` must therefore:
+```powershell
+@{
+    Type                 = 'MobileApp'
+    Operation            = 'Assign'
+    ApiVersion           = 'v1.0'
+    Method               = 'POST'
+    PathTemplate         = '/deviceAppManagement/mobileApps/{id}/assign'
+    RequestBodyKind      = 'MobileAppAssignmentSet'
+    ResponseKind         = 'NoContent'
+    PagingStrategy       = 'None'
+    RetrySafety          = 'AmbiguousCommit'
+    Reconciliation       = $null
+    AdvancedQuery        = @{ Supported = $false }
+    Concurrency          = @{ Mode = 'None' }
+    RequiredPermissions  = @('DeviceManagementApps.ReadWrite.All')
+    RequiredLicense      = @('Microsoft Intune')
+    SupportedClouds      = @('Global','USGov','USGovDoD')
+    Stability            = 'Stable'
+}
+```
 
-1. Inspect every inner response status, not just the envelope.
-2. Retry failed inner requests using the `Retry-After` value from the **inner** JSON body.
-3. Re-issue all failed inner requests as a new batch after the longest inner retry-after.
+The IntuneManagement type table remains, but only for **discovery and tab completion**. The
+operation descriptor governs behavior.
 
-This is a correctness requirement, not an optimization.
+`Get-GraphObject` stays generic for reads. A universal
+`Set-GraphObject -Type Anything -Properties …` is explicitly **not** built — that is where the
+abstraction starts lying.
 
-### Throttling
+#### Where a generic accessor leaks — all handled by descriptor metadata
 
-The headline gap fix. The SDK's Kiota retry handler covers the **outer** response only, keyed on
-the standard `Retry-After`. Everything below is application-level and remains GraphKit's
-responsibility regardless of transport.
+| Leak | Handling |
+| --- | --- |
+| **Advanced Entra queries** need `ConsistencyLevel: eventual` *and* `$count=true`, vary by entity/property/operator, and are generally incompatible with `$expand`. In batch, the header belongs on the **subrequest**. | `AdvancedQuery` metadata. **`ConsistencyLevel` must never be a sticky global profile header** — it changes consistency semantics. |
+| **Unsupported query options can fail silently** (documented by Microsoft). Directory `$expand` caps at ~20 objects, gives no continuation, and forbids nested filter/select. | Reject query options not known to be supported, rather than passing through optimistically. |
+| **Temporary service workarounds** — e.g. the current Entra `$search` workaround requiring `Prefer: legacySearch=false`. | Operation-specific, versioned, contract-tested, easy to remove. Never a default profile header. |
+| **API version is per operation** — a resource may have stable reads but beta-only assignment config, with different request models. | See **API version is a fact, not a mode** below. |
+| **Assignments are not one model** — app `assign` actions, device-configuration assignment actions, compliance models, beta-only `configureAssignments`, filters, polymorphic targets needing `@odata.type`. | Explicit `AssignmentAction`, `AssignmentBodySchema`, `AssignmentTargetTypes`, `SupportsFilters`, replace/merge semantics. |
+| **Reports are async jobs** — POST export job, poll status, retrieve download URL, fetch CSV, handle expiry. | Operation kinds: `Collection`, `Singleton`, `Action`, `LongRunningJob`, `Binary`, `Scalar`, `NoContent`, `Delta`. Do not force everything into `.value`. |
+| **A GET body is not a PATCH body** — read-only fields, server-generated timestamps, derived properties, expanded relationships, fields where omitted ≠ null. | Writable-property allow-list, body schema, or transform per writable operation. |
+| **ETags / concurrency** — some updates need `If-Match`, others ignore it. A retry must not silently overwrite newer tenant configuration. | `Concurrency = @{ Mode; Header; Required; AllowWildcard }`. |
+| **Paging varies by resource** — page sizes differ, zero-item pages occur, not every relationship pages, custom headers must be repeated per page. | `PagingStrategy`, `RequiredPagingHeaders`, `DeduplicationKey`, `SupportsAll`, `SupportsDelta`. |
+| **National-cloud availability** is per operation, not inferable from hostname. | `SupportedClouds`; completion hides or marks unsupported operations for the active profile. |
+| **`$expand` is a performance trap** — ~1,000 `mobileApps` expanded with assignments exhausted SDK retries where Graph Explorer succeeded. | Query strategy in the descriptor, caller-overridable. Never auto-prefer one-shot `$expand` over paged child reads. |
 
-- Honor `Retry-After` in **all three** forms — delay-seconds, HTTP-date, and the
-  `x-ms-retry-after-ms` variant that some Intune and Entra endpoints return instead of, or
-  alongside, the standard header. Reading only `Retry-After` misses throttling signals on
-  exactly the endpoints this module targets most.
-- Exponential backoff with jitter when no header is present. Microsoft's guidance notes some
-  resources return **no** `Retry-After` at all on 429, so backoff is a required fallback path,
-  not a rare one.
-- Retry on 429, 503, 504, and transient socket errors. Default 5 attempts, configurable.
-- Throttling limits **cannot be raised** by request — Microsoft has confirmed this publicly.
-  Backoff and batching are the only mitigations; for genuinely bulk extraction the documented
-  answer is Graph Data Connect, which is out of scope here.
-- **Cross-runspace backoff.** `Invoke-ParallelGraphRequest` uses separate runspaces, so a 429
-  in one thread must back off the others. This requires a synchronized throttle-state object
-  passed via `$using:`, holding a `NotBefore` timestamp each runspace checks before issuing
-  and updates on 429. Per-thread retry alone would worsen throttling under parallelism — this
-  is the single most important detail in the retry design.
+**Escape hatch:** `Invoke-GraphRequest -Raw` bypasses descriptor validation entirely, so strictness
+never blocks expert use.
 
-### Object accessor
+#### API version is a fact, not a mode
 
-`Data/ObjectTypes.psd1` holds the 108 endpoint mappings lifted from IntuneManagement (MIT;
-upstream license text in `THIRD-PARTY-NOTICES.md`). Each entry records name, API path, beta
-flag, default `$select` / `$expand`, and whether the type supports assignments.
+**In Intune, a large and permanent share of production functionality is beta-only** — much of the
+settings catalog surface, device preparation policies, driver update profiles, report export
+jobs, `configureAssignments`, and much of macOS declarative management. The Intune admin center
+itself calls beta. Any design that treats beta as an exceptional opt-in either cannot do real
+Intune work or pushes every operator to `-Raw`, which defeats the descriptor.
 
-`Get-GraphObject -Type CompliancePolicy -Expand assignments` with an `ArgumentCompleter` on
-`-Type`. **Tab completion is the discovery mechanism** — no catalogue to maintain, which
-resolves problem 3 without new upkeep.
+So version is **not a global mode and not a user decision**. It is a per-operation property that
+the descriptor records because it is true:
+
+| `Stability` | Meaning | Version used |
+| --- | --- | --- |
+| `Stable` | v1.0 exists and is sufficient | `v1.0` |
+| `DualVersion` | Both exist and are equivalent for this operation | `v1.0` — beta gains nothing, and can break |
+| `BetaPreferred` | Both exist, but v1.0 is missing fields or behavior this operation needs | `beta`, with `BetaReason` recorded |
+| `BetaOnly` | No v1.0 equivalent exists | `beta`, without ceremony or warning |
+
+`BetaOnly` operations are used normally. Prompting or warning on them would be noise, since
+there is no alternative to choose.
+
+What the design actually guards against is *silently* riding beta where a stable equivalent
+exists — which is exactly `MgGraphCommunity`'s model: one global default applied blindly to every
+relative URI, including endpoints with a perfectly good v1.0. That is the defect, not beta.
+
+Because beta carries no breaking-change guarantee, `BetaPreferred` and `BetaOnly` operations
+additionally require:
+
+- **`BetaReason`** recorded in the descriptor — so a later v1.0 promotion is a findable one-line
+  change rather than an archaeology exercise.
+- **Response-shape contract tests** pinning the fields the operation actually depends on, so a
+  silent beta change surfaces as a test failure rather than as a broken run in a customer tenant.
+- **Provenance stamped on returned objects** (`_ApiVersion`), so evidence exports record which
+  surface produced a finding.
+- **Warn-once per session, not per call**, when an operation is `BetaPreferred` — enough to be
+  visible, not enough to be ignored.
+
+### Request pipeline
+
+`Invoke-GraphRequest` wraps `Invoke-MgGraphRequest`, inheriting transport, auth plumbing, and the
+SDK's outer-response retry handler (tuned once via `Set-MgRequestContext -MaxRetry`). On top it
+adds paging, URI resolution, descriptor-driven query validation, and everything below. One
+request path, not two.
+
+#### Retry must be semantics-aware, not status-code-driven
+
+**A status code alone is not sufficient to decide a retry.** The decision requires the HTTP
+method, the operation's semantics, and whether the previous attempt may have committed.
+
+**A 2xx response can carry `Retry-After`.** A production report against `sendMail` documented
+`202 Accepted` *with* `Retry-After`; a client that retried on the header's presence sent
+duplicate mail. Therefore:
+
+```
+Retry-After present + 2xx
+    => accept success
+    => update future throttle pacing
+    => NEVER replay
+```
+
+`Get-GraphRetryDelay` computes a delay only *after* `Get-GraphRetryDecision` has permitted a
+retry. It must never itself decide whether to retry.
+
+**A failure response does not prove the write failed.** Microsoft's known-issues list currently
+includes an operation returning `503` even though the object was created — repeating it then
+yields `409 Conflict`.
+
+`RetrySafety` classification per operation:
+
+| Classification | Typical operations | Behavior |
+| --- | --- | --- |
+| `Safe` | GET, HEAD | Retry recognized transient statuses |
+| `ConditionallyIdempotent` | PUT to stable URI, DELETE, selected PATCH | Retry only when the descriptor permits |
+| `RejectedBeforeExecution` | POST/PATCH receiving a normal 429 | Retry using the server delay |
+| `AmbiguousCommit` | POST/PATCH after timeout, reset, 502/503/504 | **Do not replay automatically** |
+| `Reconciliable` | Create with stable external key and reliable lookup | Query for the intended result, then decide |
+| `NeverReplay` | send, retire, wipe, sync, rotate | Surface an indeterminate result |
+
+Default matrix:
+
+| Condition | GET/HEAD | PUT/DELETE | POST/PATCH/action |
+| --- | --- | --- | --- |
+| 429 with usable delay | Yes | Descriptor | Yes (Graph rejected it) |
+| 408 / network timeout | Yes | Descriptor | **No** — commit unknown |
+| 500/502/503/504 | Yes | Descriptor | **No** by default |
+| 409 | No | Known transient inner errors only | Known transient inner errors only |
+| 401 | Reacquire once | Same | Same |
+| 403 / 404 | No | No | No |
+| 2xx + `Retry-After` | Success; pace later | Success; pace later | Success; **never replay** |
+
+A `401` triggers at most **one** forced token acquisition and one replay. A second `401` is an
+audience, tenant, claims, or policy problem — not an invitation to loop.
+
+For Intune imports, app assignments, policy creation, device actions, and Autopilot operations, a
+blanket "retry all 503s" rule is unsafe.
+
+#### `Retry-After` parsing is hostile
+
+Graph has been observed returning malformed values such as `Retry-After: 30,120` (reported 2025
+and again May 2026), which broke SDK parsers expecting a single integer. The parser must:
+
+1. Handle multiple header values supplied as a collection.
+2. Try the whole value as delta-seconds.
+3. Try the whole value as an HTTP date.
+4. *Only then* consider a malformed comma-separated numeric list.
+5. Parse `x-ms-retry-after-ms` separately.
+6. Choose a conservative valid delay (maximum is reasonable policy).
+7. Clamp negative and excessive values, and record that the header was malformed.
+
+**Never split on commas before attempting an HTTP-date parse** — valid HTTP dates contain a
+comma (`Wed, 21 Oct 2015 07:28:00 GMT`).
+
+For HTTP-date delays, compute against the response `Date` header when present. Workstation clock
+skew must not shorten a server-directed delay.
+
+Some resources return **no** retry header at all on 429, so jittered exponential backoff is a
+required path, not a rare fallback. Throttling limits cannot be raised by request; for genuinely
+bulk extraction the documented answer is Graph Data Connect, out of scope here.
+
+#### Throttle state must be scoped, not global
+
+Graph enforces overlapping service, tenant, application, tenant+application, operation, and
+request-type limits, and writes are more constrained than reads. **One process-wide backoff
+timestamp is wrong** — it lets an Intune write throttle in Tenant A freeze Entra reads in
+Tenant B, while failing to coordinate calls that actually share a quota.
+
+State key:
+
+```
+Cloud | TenantId | ClientId | ResourceFamily | Read|Write
+
+Global|tenant-A|app-1|Intune.DeviceConfiguration|Write
+Global|tenant-A|app-1|Entra.Directory|Read
+Global|tenant-B|app-1|Intune.Reporting|Read
+```
+
+*This key structure is an engineering inference.* Microsoft does not publish a universal
+quota-key algorithm; it is closer to the documented limit dimensions than one global state, and
+should be treated as tunable.
+
+**Token acquisition gets its own throttle scope.** Repeated token requests are themselves
+throttled; Microsoft describes "loop detected" errors as the symptom.
+
+#### Backoff alone oscillates — add admission control
+
+Ten runspaces can each take a 429, sleep the same interval, wake together, and cause the next
+throttle wave. Jitter softens this; it does not solve it. Add a **scoped concurrency gate with
+additive-increase/multiplicative-decrease**: start conservative, cut permitted concurrency
+sharply on 429/503, honor the server delay, restore gradually on success, keep separate read and
+write windows, and never hard-code an observed requests-per-second as a universal limit.
+(`mgx` is the current prior art worth studying here.)
+
+**Documented coordination boundary:** runspace-shared state does not coordinate a second `pwsh`
+process, another console, a CI job using the same app registration, or another consultant's
+machine. Acceptable for v1 — but the module must not imply it enforces tenant-wide fairness.
+
+#### Paging is reliability, not response parsing
+
+- Treat `@odata.nextLink` as **opaque**, and **validate its scheme and expected Graph authority
+  before attaching an `Authorization` header** (`Test-GraphNextLinkAuthority`) — a redirected or
+  hostile link would otherwise receive a bearer token.
+- Accept an empty page that still carries a `nextLink`.
+- **Repeat required custom headers on every page** — Microsoft warns `ConsistencyLevel` is not
+  carried forward automatically.
+- Do not expect `@odata.count` after page one.
+- Keep the last successfully consumed link separate from a retry response — Microsoft documents a
+  `DirectoryPageTokenNotFoundException` case where a token returned by a retry must not be used
+  as the continuation point.
+- Optional dedup by stable ID. Microsoft currently documents a service issue (through
+  2026-08-31) where a page returns 200, an empty collection, and a `nextLink` that restarts
+  pagination with duplicates. That issue is meeting-artifact APIs, not Intune, but it disproves
+  "empty means done" and "Graph never duplicates pages" as safe generic assumptions.
+
+#### Batch needs its own state machine
+
+Each subrequest carries its own status, headers, body, and operation ID. Handle failed
+dependencies (`424`), preserve the dependency graph, retry only failed retryable subrequests,
+select the longest applicable delay for the retry set, **never replay successful write
+subrequests**, and never replay a whole batch after an ambiguous transport failure unless every
+subrequest is `Safe`.
+
+**v1 batch support is read-only by default.** Write batching requires operation descriptors
+proving replay or reconciliation behavior.
+
+#### Deadlines and evidence
+
+Every operation carries a maximum attempt count, **maximum total elapsed time**, per-attempt
+connection/header/body timeouts, cancellation support, and a maximum accepted server delay —
+returning a structured result including an explicit "deadline expired while throttled" outcome
+rather than throwing "maximum retries exceeded".
+
+Per attempt, capture for support cases: logical operation ID, client request ID, response request
+ID, response `Date`, `x-ms-ags-diagnostic`, tenant and profile name (**never secrets or bearer
+tokens**), endpoint family, sanitized URI, attempt number, status and Graph inner-error chain,
+calculated delay *and its source*, current concurrency limit, batch subrequest ID, and whether
+the final state is **known, failed, or indeterminate**. Telemetry is a first-class result object,
+not verbose text.
+
+### Permission analysis
+
+The common conceptual error is treating `requiredResourceAccess` as the application's
+permissions. It is only what the *registration requests*. It proves neither consent nor grant.
+
+Four distinct states:
+
+1. **Configured** — `application.requiredResourceAccess` on the home application object.
+2. **Application permissions granted** — locate the customer-tenant service principal by `appId`,
+   inspect its app-role assignments against the Microsoft Graph service principal, resolving
+   `appRoleAssignment.appRoleId` against `graphServicePrincipal.appRoles`.
+3. **Delegated grants** — `oauth2PermissionGrants`, resolving space-delimited scopes, consent
+   type, principal, client and resource service principals. Separate from app-role assignments.
+4. **Runtime effectiveness** — may still fail on Intune licensing, Intune RBAC scope, Entra role
+   requirements, endpoint/cloud restrictions, beta availability, tenant policy, or rollout.
+
+**A Graph permission is necessary but not sufficient.** Do not emit a single `Effective = True`.
+Emit separate findings: `Configured`, `Granted`, `ExcessGranted`, `MissingGrant`,
+`AuthenticationCompatible`, `RuntimePrerequisitesKnown`, `RuntimePrerequisitesSatisfied`,
+`TestedSuccessfully`.
+
+Useful findings: configured but not granted; granted but no longer configured; grant exceeds the
+operation catalog; delegated grant present but profile is app-only; required operation is
+beta-only; application exists only in the home tenant while the customer service principal is
+missing.
+
+**Do not treat the access token's `roles` / `scp` claims as the source of truth.** Microsoft
+states Graph access tokens are resource-owned and clients must not depend on their internal
+format. Token claims are optional diagnostic evidence, not the authorization inventory.
 
 ### Output and evidence export
 
-Results are `PSCustomObject` with a `PSTypeName` of `GraphKit.<Type>` plus `_Tenant`,
-`_RetrievedUtc`, and `_GraphPath`. `Formats/GraphKit.Format.ps1xml` supplies default table
-views.
+Results are `PSCustomObject` with `PSTypeName` `GraphKit.<Type>` plus `_Tenant`,
+`_RetrievedUtc`, `_GraphPath`, and beta provenance where applicable.
+`Formats/GraphKit.Format.ps1xml` supplies default table views.
 
 `Export-GraphResult -As Csv | Json | Markdown | VaultEvidence`.
 
-`VaultEvidence` must obey `SCHEMA.md`, which states that evidence pages are summaries with
-pointers to source paths and must never contain raw exports, credentials, or PII. Therefore:
+`VaultEvidence` must obey `SCHEMA.md`, which requires evidence pages to be summaries with
+pointers to source paths, never raw exports, credentials, or PII:
 
-1. Raw rows are written to `~/repo/report-exports/<name>/` — **outside the vault**.
-2. A summary page is written to `cdw-kb/evidence/<name>/` containing rollups and counts only,
-   with `sources:` pointing at (1), at least two wikilinks, and correct frontmatter
-   (`type: evidence`, `tags: [evidence, graph-api, …]`, `confidence`, `created`, `updated`).
-3. `customers:` is `[<name>]` for `Kind = customer`, and `[]` for lab and internal profiles.
-4. `log.md` is appended and `index.md` updated, per the schema's log and index rules.
-5. A **redaction assertion** runs before any write: no tenantId, clientId, secret, or bearer
-   token may appear in vault output. This is enforced in code and covered by a test.
+1. Raw rows → `~/repo/report-exports/<name>/` — **outside the vault**.
+2. Summary page → `cdw-kb/evidence/<name>/` — rollups and counts only, `sources:` pointing at
+   (1), ≥2 wikilinks, correct frontmatter.
+3. `customers:` is `[<name>]` for `Kind = customer`, `[]` for lab and internal.
+4. `log.md` appended, `index.md` updated.
+5. A **redaction assertion** before any write: no tenantId, clientId, secret, or bearer token may
+   reach vault output. Enforced in code and covered by a test.
 
 ## Versions
 
-**Pester 6.1.0**, **PowerShell 7.4** as the manifest floor, **Sampler 0.120.1** for build, and
-**`Microsoft.Graph.Authentication`** as the sole runtime dependency (ModuleBuilder held at 3.1.8
-per Sampler's pin).
+| | |
+| --- | --- |
+| Manifest floor | **PowerShell 7.4** — a customer-compatibility promise, and the minimum Pester 6 supports |
+| Primary development and release target | **PowerShell 7.6** |
+| Test matrix | 7.4 **and** 7.6, on Windows / Ubuntu / macOS |
+| Test framework | **Pester 6.1.0** (released 2026-08-11) |
+| Build | **Sampler 0.120.1**, ModuleBuilder held at 3.1.8 |
+| Runtime dependency | **`Microsoft.Graph.Authentication`** (sole) |
 
-The floor is a constraint, not a preference: Pester 6 targets Windows PowerShell 5.1 and
-PowerShell 7.4+, having dropped PowerShell 6 and early 7 builds. 7.4 is chosen over 7.5
-because Pester is a test-time dependency only, and customer jump boxes and CI images run LTS;
-requiring 7.5 would risk an import failure elsewhere for no gain. Local development runs 7.5.4.
+**PowerShell 7.4 is a compatibility floor, not a strategic target — it reaches end of support on
+2026-11-10, 88 days from this spec.** PowerShell 7.5 reaches EOL the *same day*, so moving 7.4 →
+7.5 buys nothing. **7.6 is the current LTS** (released 2026-03-18, .NET 10, supported to
+2028-11-14). The local development machine runs 7.5.4 and should move to 7.6.
 
-This also forces a correction during cutover: IntuneHealthAutomation declares 7.2, which is
-past end of support.
+Raising the floor to 7.6 is a planned follow-up once customer environments allow.
 
 ## Testing
 
-Pester 6.1.0, **`Invoke-MgGraphRequest` mocked**, no live Graph calls in CI. Tests are
-**committed** — the current state of zero tracked test files behind a green CI badge is itself a
-defect.
+Pester 6.1.0. Tests are **committed** — zero tracked test files behind a green CI badge is itself
+a defect, and IHA currently has exactly that.
 
-Use the v6 dash-style assertions exclusively, with `Should.DisableV5 = $true`. Both syntaxes
-work by default in v6; pinning prevents drift back to v5 style in a greenfield suite. Mock
-verification uses `Should-Invoke` / `Should-NotInvoke`.
+### Do not unit-test the retry engine by mocking HTTP
 
-Three v6 behaviors are load-bearing here:
+Mocking `Invoke-MgGraphRequest` couples tests to PowerShell's exception shape, `ErrorRecord`
+internals, HTTP cmdlet parsing, and version-specific response objects. Normalize HTTP into an
+internal contract first:
 
-- `Assert-MockCalled` and `Assert-VerifiableMock` are removed, and **mock fall-through to the
-  real command is gone**. In v5 a mis-scoped `Invoke-MgGraphRequest` mock could silently fall
-  through and hit real Graph; in v6 it cannot. Mocking a command from a dependency module
-  requires `-ModuleName GraphKit` scoping.
-- `Run.FailOnNullOrEmptyForEach` now defaults on. The 108-type table is driven through
-  `-ForEach`; if it failed to load, v5 would silently pass zero tests and v6 throws.
-- Discovery is per-file. Each test file imports GraphKit in its own `BeforeAll` rather than
-  relying on another file having done so.
+```powershell
+class GraphTransportResult {
+    [int]       $StatusCode
+    [hashtable] $Headers
+    [object]    $Body
+    [string]    $RequestId
+    [object]    $TransportException
+    [bool]      $ResponseReceived
+}
+```
 
-Also relevant: `-Focus` is removed, `Set-ItResult -Pending` is removed, duplicate `BeforeAll`
-within a block now throws, and coverage is profiler-based by default.
+Inject four dependencies — `Send`, `UtcNow`, `Delay`, `Jitter`. In unit tests `Send` dequeues
+scripted results, `UtcNow` reads a **virtual clock**, `Delay` advances that clock immediately,
+and `Jitter` is deterministic. A five-minute retry scenario then runs in milliseconds while
+asserting attempt counts, exact requested delays, delay-source precedence, deadline termination,
+cancellation, resulting throttle state, no replay after 202, no replay of ambiguous POST, one
+refresh after 401, and correct batch-subrequest selection.
 
-### Coverage targets
+### Narrow adapter tests around the HTTP cmdlet
 
-- `@odata.nextLink` paging, including multi-page and empty-collection cases
-- 429 and `Retry-After` in both delay-seconds and HTTP-date forms
-- Cross-runspace backoff: a 429 in one runspace defers the others
-- Token refresh at expiry, and the expiry-skew boundary
-- Graph error unwrapping into actionable messages
-- Legacy-config migration from both `secrets.json` and the `.cmd` launchers
-- Profile `Kind` validation: `customer` enforces the taxonomy, `lab` and `internal` bypass it
-- Vault redaction: no credential can reach vault output
+Verify conversion into `GraphTransportResult` for: normal JSON, 204 with no body, binary, 429 in
+each `Retry-After` form, malformed `Retry-After`, a 200 batch response, 202 + `Retry-After`, 503
+with JSON error, HTML/plain-text gateway failures, connection reset, and header casing.
+Integration tests run a **loopback HTTP server** for behaviors a mock cannot reproduce —
+duplicate headers, content encoding, empty bodies, malformed header values, connection closure.
 
-### CI
+### Concurrency tests need real runspaces
 
-Windows, Ubuntu, and macOS — development happens on macOS and the module claims
-cross-platform support, so all three are proven. Matrix pinned to PowerShell 7.4 (the declared
-floor) and latest, so a 7.5-only API cannot slip in below the stated minimum.
+Mocks are not a substitute. A dedicated harness creates a genuine shared thread-safe throttle
+object, starts several runspaces with a controlled transport, releases them through barriers, and
+verifies that only the intended number proceed, that all observe the scoped cooldown, and that
+**Tenant B stays unblocked while Tenant A is throttled**. These run serially at the Pester level;
+the test owns its own concurrency.
+
+### Pester 6 specifics
+
+- **Filtered mocks no longer fall through** — the dominant break found in the Pester team's
+  15-repo migration pilot. **Always register an explicit default mock that throws**
+  (`throw "Unexpected live HTTP call: $Uri"`) before adding filtered behaviors.
+- `Assert-MockCalled` / `Assert-VerifiableMock` removed; use `Should-Invoke` / `Should-NotInvoke`.
+  Mocking a dependency module's command requires `-ModuleName GraphKit`.
+- `Run.FailOnNullOrEmptyForEach` defaults on — a descriptor table that failed to load throws
+  rather than silently passing zero tests.
+- Discovery is per-file; each file imports GraphKit in its own `BeforeAll`.
+- `-Focus` and `Set-ItResult -Pending` removed; duplicate `BeforeAll` in a block now throws.
+- Use the dash-style assertions with `Should.DisableV5 = $true` to prevent drift.
+- **Avoid experimental global mocks and Pester parallelism** for stateful retry/cache tests.
+- PowerShell classes are awkward to redefine in-process, which can leave stale types across local
+  runs. Prefer `PSCustomObject` records, a small compiled type, or fresh `pwsh` processes for
+  class-focused tests. Do not create many public classes for internal tidiness.
+
+### CI must gate on the whole Pester result
+
+**Not `FailedCount -eq 0`.** A discovery or container failure prevents tests from running without
+looking like a failed assertion — which is precisely how IHA's CI stayed green with zero tests.
+Gate on: overall result, failed containers, discovery errors, total test count, an **expected
+minimum count**, and failed tests.
+
+Publishing runs once from a tested package artifact; the publish job must not rebuild
+independently.
 
 ## Phases
 
-1. **Core.** Module skeleton, auth, tenant profiles, request core, retry/throttling, test
-   suite, CI. Proven against the **Ivy24 lab tenant** — a lab target means the retry paths and
-   mutating verbs can be exercised without customer exposure. Tenant and client IDs are
-   registered via `Register-GraphTenant`, never written into the repo, consistent with existing
-   Theseus practice of omitting numeric identifiers from documentation.
-2. **Permissions.** Move the permission tooling down and generalize it off the health check's
-   fixed permission set.
-3. **Objects.** `Get-GraphObject`, the 108-type table, and tab completion.
-4. **Export.** `Export-GraphResult` and vault evidence output.
+1. **Core.** Sampler scaffold, profiles/contexts, SDK-delegated auth, request pipeline,
+   semantics-aware retry, scoped throttling with admission control, virtual-clock test harness,
+   CI. Proven against the **Ivy24 lab tenant** — a lab target allows exercising retry paths and
+   mutating verbs without customer exposure. Tenant and client IDs are registered via
+   `Register-GraphTenant`, never committed, consistent with existing Theseus practice.
+2. **Permissions.** Move the permission tooling down; implement the four-state analysis.
+3. **Operations.** Operation descriptors, read operations first, tab completion, `Get-GraphObject`.
+4. **Export.** `Export-GraphResult` and vault evidence.
 5. **Cutover.** Repoint IntuneHealthAutomation at GraphKit and delete its duplicated layer.
    Separate work, only after 1–4 are proven.
 
 Caching remains in IntuneHealthAutomation throughout.
 
-## Out of scope
+## Out of scope for v1
 
-- Porting all ~175 scripts. Phase 1 validates the module against the Ivy24 tenant; it does not
-  migrate a script backlog. Existing scripts are catalogued as `type: script` vault pages and
-  ported opportunistically when next touched.
-- The vendored IntuneManagement trees. Never ported; only the object-type table is lifted.
-- Extracting IntuneHealthAutomation's caching layer.
-- Publishing to the PowerShell Gallery.
+- Interactive and device-code authentication. If added later, use **MSAL.NET directly** as the
+  auth component while keeping requests raw REST — do not hand-build delegated caches, rotating
+  refresh tokens, CAE capability declaration, or claims-challenge machinery, and do not adopt the
+  Graph workload SDK to get them.
+- Delegated refresh-token persistence and CAE claims-challenge implementation.
+- Universal generic create/update/delete.
+- A global beta mode. Version is per-operation; see "API version is a fact, not a mode."
+- Blind POST/PATCH replay on 5xx or network errors.
+- **Persistent app access-token cache.** The source credential is already in SecretManagement,
+  access tokens are short-lived, and persistence adds theft and stale-cache risk for no gain.
+  In-memory only.
+- Cross-process throttle coordination.
+- Simultaneous multi-tenant contexts.
+- Porting all ~175 scripts. Phase 1 validates the module against Ivy24; it does not migrate a
+  backlog. Existing scripts are catalogued as `type: script` vault pages and ported when next
+  touched.
+- The vendored IntuneManagement trees; only the type table is lifted.
+- Extracting IHA's caching layer.
+- PowerShell Gallery publication.
