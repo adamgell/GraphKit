@@ -6,8 +6,11 @@ BeforeAll {
     # safety net everything depended on and had no tests, and it had a real bug.
     #
     # These are AST tests, the pattern already used for New-ClientServicePrincipalCBA: they
-    # assert structural safety properties that cannot be executed here. Each was mutation
-    # checked by hand - break the property in the script and the test fails.
+    # assert structural safety properties that cannot be executed here. They were mutation
+    # tested - each property was broken in the script and the corresponding test confirmed to
+    # fail. That pass was worth running: the finally-block assertion originally only checked
+    # that the block MENTIONED the variable, and a mutation deleting the unset branch survived
+    # it. It is now strict about both directions.
     $script:scriptPath = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'scripts/Complete-GraphKitCutover.ps1'
 
     $tokens = $null
@@ -58,22 +61,47 @@ Describe 'Complete-GraphKitCutover safety properties' {
 
     It 'reaches the failure throw before any retirement code' {
         $throwIndex = $script:text.IndexOf('The legacy layer must stay')
-        $retireIndex = $script:text.IndexOf('$RetireLegacyLayer')
         $throwIndex | Should -BeGreaterThan 0
-        # The -not $RetireLegacyLayer report block and the git rm both live after the throw.
-        $script:text.IndexOf('git rm') | Should -BeGreaterThan $throwIndex
+
+        # Locate the actual INVOCATION via the AST, not the phrase 'git rm' - that also
+        # appears in the .DESCRIPTION near the top of the file, and matching documentation
+        # instead of code is how a structural test passes while proving nothing.
+        $gitRemovals = $script:ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'git' -and
+                $node.Extent.Text -match '\brm\b'
+            }, $true)
+
+        @($gitRemovals).Count | Should -BeGreaterThan 0
+        foreach ($removal in $gitRemovals) {
+            $removal.Extent.StartOffset | Should -BeGreaterThan $throwIndex
+        }
     }
 
-    It 'restores the repoint flag in a finally block' {
+    It 'restores both repoint variables in a finally block, in both directions' {
         # A failed verification must not leave the repoint switched on for the host.
+        #
+        # An earlier version of this test only asserted that the finally block MENTIONED
+        # IHA_GRAPHKIT_REPOINT, and a mutation that deleted the unset branch survived it.
+        # That mutation is the dangerous one: if the variable was not set before the run,
+        # restoring only the assignment branch leaves the repoint switched ON for the host
+        # afterwards. Both directions must be present for both variables.
         $tryStatements = $script:ast.FindAll({
                 param($node) $node -is [System.Management.Automation.Language.TryStatementAst]
             }, $true)
 
-        $restoring = @($tryStatements | Where-Object {
-                $null -ne $_.Finally -and $_.Finally.Extent.Text -match 'IHA_GRAPHKIT_REPOINT'
-            })
-        @($restoring).Count | Should -BeGreaterThan 0 -Because 'the flag must be restored even when verification throws'
+        $finallyBlocks = @($tryStatements | Where-Object { $null -ne $_.Finally } |
+                ForEach-Object { $_.Finally.Extent.Text } |
+                Where-Object { $_ -match 'IHA_GRAPHKIT_REPOINT' })
+
+        @($finallyBlocks).Count | Should -BeGreaterThan 0 -Because 'the flag must be restored even when verification throws'
+
+        $restore = $finallyBlocks -join "`n"
+        foreach ($variable in 'IHA_GRAPHKIT_REPOINT', 'IHA_GRAPHKIT_PROFILE') {
+            $restore | Should -Match "Remove-Item Env:\\$variable" -Because "$variable must be UNSET again when it was unset before the run"
+            $restore | Should -Match "\`$env:$variable\s*=" -Because "$variable must be restored to its prior value when it had one"
+        }
     }
 
     It 'never bare-deletes the legacy files' {
@@ -105,6 +133,8 @@ Describe 'Complete-GraphKitCutover safety properties' {
     It 'declares ShouldProcess so -WhatIf works on a production host' {
         $script:text | Should -Match 'CmdletBinding\(SupportsShouldProcess\)'
         # And the retirement itself is inside a ShouldProcess check.
-        $script:text | Should -Match '\$PSCmdlet\.ShouldProcess\([^)]*Retire'
+        # A character class excluding ')' breaks on the nested $($present.Count), so match
+        # across the whole call instead.
+        $script:text | Should -Match '(?s)\$PSCmdlet\.ShouldProcess\(.{0,120}?Retire'
     }
 }

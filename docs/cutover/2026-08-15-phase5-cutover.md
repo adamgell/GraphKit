@@ -31,6 +31,12 @@ an operator decision.
 certificate-store based. Certificate-store profiles are Windows-only by design, so the import
 must run on the IHA execution host; the dry run works anywhere and was verified on macOS.
 
+**The channel lives at `~/graphkit-channel`.** The owner's decision is local-only: no GitHub
+repository, no external publication. An earlier version of this document described the channel
+as settled while the pin actually pointed at a session scratch directory that would vanish —
+the machinery was proven but the channel instance was not durable. It is now a real directory,
+republished and reinstalled from, with the digest verified against the pin.
+
 **The channel is proven, not merely built.** `pack → test → publish → pin → register →
 install → digest verify → clean-process import → live read` all ran for real. Two things that
 would have shipped silently were caught by making them checkable:
