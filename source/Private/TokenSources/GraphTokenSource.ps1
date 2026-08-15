@@ -503,33 +503,39 @@ function New-GraphTokenSource {
 
     switch ($authMethod) {
         'Certificate' {
+            # -MsalFactory remains injectable for tests; when absent the REAL factory is
+            # used. It previously defaulted to a scriptblock that threw, which meant the
+            # module could not authenticate by any means outside a test.
             $factory = $MsalFactory
             if ($null -eq $factory) {
-                $factory = {
-                    throw 'MSAL confidential-client resolution is not wired for this certificate profile yet; pass -MsalFactory (the auth-resolution phase supplies the real builder).'
-                }
+                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud
             }
             return [ConfidentialClientTokenSource]::new($factory, 'Certificate', $audience, $clientId, $generation)
         }
         'ClientSecret' {
             $factory = $MsalFactory
             if ($null -eq $factory) {
-                $factory = {
-                    throw 'MSAL confidential-client resolution is not wired for this secret profile yet; pass -MsalFactory (the auth-resolution phase supplies the real builder).'
-                }
+                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud
             }
             return [ConfidentialClientTokenSource]::new($factory, 'ClientSecret', $audience, $clientId, $generation)
         }
         'ManagedIdentity' {
-            $factory = {
-                throw 'MSAL managed-identity resolution is not wired for this profile yet; the auth-resolution phase supplies the real ManagedIdentityApplicationBuilder.'
+            $factory = $MsalFactory
+            if ($null -eq $factory) {
+                $factory = New-GraphManagedIdentityFactory -Profile $Profile
             }
             return [ManagedIdentityTokenSource]::new($factory, $audience, $clientId, $generation)
         }
         'BearerToken' {
+            # An inline token (context-only, never persisted) wins; otherwise resolve the
+            # vault reference. Resolution previously threw outright.
             $token = $Profile.Credential.Token
             if ([string]::IsNullOrEmpty([string]$token)) {
-                throw 'Bearer-token resolution from the vault is not available in this phase; the auth-resolution phase supplies the resolved token.'
+                $material = Get-GraphVaultCredential -Credential $Profile.Credential -AuthMethod 'BearerToken'
+                $token = $material.Material
+            }
+            if ([string]::IsNullOrEmpty([string]$token)) {
+                throw "Bearer-token profile for tenant '$($Profile.TenantId)' resolved to an empty token."
             }
             return [FixedBearerTokenSource]::new([string]$token, $audience, $generation)
         }

@@ -93,9 +93,25 @@ function Get-GraphContext {
         }
         $factory = $MsalFactory
         if ($null -eq $factory) {
-            $factory = {
-                throw 'MSAL confidential-client resolution is not wired for an injected certificate yet; pass -MsalFactory (the auth-resolution phase supplies the real builder).'
-            }
+            # An injected X509Certificate2 is context-only and never persisted, so the
+            # resolver simply hands the certificate straight back.
+            $injected = $Certificate
+            $factory = New-GraphMsalApplicationFactory `
+                -Profile @{
+                    TenantId   = $tenantProfile.TenantId
+                    ClientId   = $tenantProfile.ClientId
+                    AuthMethod = 'Certificate'
+                    Credential = @{ Thumbprint = $Certificate.Thumbprint }
+                } `
+                -Cloud $cloud `
+                -CredentialResolver {
+                    # The resolver contract takes a profile, but this implementation
+                    # ignores it: the certificate was supplied directly by the caller and
+                    # is never persisted, so there is nothing to look up.
+                    param($P)
+                    $null = $P
+                    [pscustomobject] @{ AuthMethod = 'Certificate'; Material = $injected }
+                }.GetNewClosure()
         }
         $source = [ConfidentialClientTokenSource]::new($factory, 'Certificate', [string]$cloud.Resource, $tenantProfile.ClientId, $generation)
         $authMode = 'Certificate'

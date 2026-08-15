@@ -31,7 +31,10 @@ function Invoke-GraphPaging {
 
         [Parameter()]
         [ValidateRange(1, 2000)]
-        [int] $MaxPages = 200
+        [int] $MaxPages = 200,
+
+        [Parameter()]
+        [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     $allData = [System.Collections.Generic.List[object]]::new()
@@ -56,11 +59,18 @@ function Invoke-GraphPaging {
         $request = & $RequestFactoryScript -Uri $nextLink -Descriptor $Descriptor
 
         # Execute with retry via the transport delegate.
+        #
+        # -CancellationToken is passed explicitly. Omitting it bound $null to a parameter
+        # typed [System.Threading.CancellationToken], which cannot accept null, so EVERY
+        # paged read failed with "Cannot convert null to type CancellationToken". The unit
+        # suite never caught it because injected test transports do not type that
+        # parameter strictly - only a real paged read against a live tenant does.
         $pageResult = & $TransportScript `
             -Uri $request.Uri `
             -Method $request.Method `
             -Headers $request.Headers `
-            -Body $request.Body
+            -Body $request.Body `
+            -CancellationToken $CancellationToken
 
         if ($null -eq $pageResult) {
             throw "Transport delegate returned null for page $pageCount; expected a GraphKit.OperationResult."
