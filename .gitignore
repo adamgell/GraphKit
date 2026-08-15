@@ -1,6 +1,12 @@
 # Sampler build output - generated, never committed
 output/
-docs/
+# NOTE: 'docs/' was ignored here, which was a trap rather than a policy. Four documents
+# under docs/ are tracked (the design spec, two reviews, the phase 1 plan) because git
+# keeps tracking a file once added, so the ignore only ever applied to NEW documents -
+# and it silently swallowed the phase 5 cutover record, with 'git add -A' reporting
+# nothing to commit. Ignoring a directory whose contents are the project's source of
+# truth cannot be right; if a generated docs artefact appears later, ignore that path
+# specifically.
 # Local Pester/coverage artifacts
 *.coverage.xml
 testResults/
