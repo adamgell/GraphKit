@@ -146,7 +146,7 @@ through the process-global SDK." Those cannot both be true.
 Context retargeting, retry ownership, and the timeout contract are the same problem: **the SDK
 transport carries process-global mutable state GraphKit cannot own.**
 
-- **Retry ownership.** GraphKit promises `AmbiguousCommit` semantics — never auto-replay a POST
+- **Retry ownership.** GraphKit promises no-replay-on-ambiguity — never auto-replay a POST
   that may have committed. If the SDK's handler retries a 503 before GraphKit sees the response,
   that promise is void. `Set-MgRequestContext -MaxRetry 0` is accepted and does disable retries,
   but it is itself process-global state any runspace can change, so it can be requested and never
@@ -167,8 +167,10 @@ state GraphKit does not control.
 Using `ConfidentialClientApplicationBuilder` directly gives:
 
 - **Per-context token acquisition with no global state.** Each GraphKit context owns its own
-  confidential client application and token cache. Two contexts cannot interfere, because there
-  is nothing shared to interfere through.
+  token source, holding its own MSAL application instance and token cache. Two contexts cannot
+  interfere, because there is nothing shared to interfere through. (The context owns an
+  `IGraphTokenSource`, not a confidential client directly — see **Token sources** below. Managed
+  identity uses a different MSAL builder entirely.)
 - **Certificate assertion signing still handled by MSAL** — RS256, `x5t`, `jti`, validity window.
   This was the one genuine reason not to hand-roll, and it is preserved. **GraphKit writes no
   OAuth cryptography.**
@@ -373,7 +375,8 @@ condition under which that review agreed Sampler pays for itself. Revisit if IHA
 ```
 GraphKit/
   source/
-    GraphKit.psd1                    # RequiredModules: Microsoft.Graph.Authentication
+    GraphKit.psd1                    # RequiredModules: Microsoft.Graph.Authentication,
+                                     #                  Microsoft.PowerShell.SecretManagement
     Public/
       Register-GraphTenant, Get-GraphTenant, Remove-GraphTenant, Test-GraphTenant
       Get-GraphContext, Use-GraphTenant
@@ -386,6 +389,8 @@ GraphKit/
       Invoke-GraphRetry, Get-GraphRetryDecision, Get-GraphRetryDelay,
       Resolve-GraphUri, Test-GraphNextLinkAuthority,
       Get-GraphThrottleScope, Write-VaultEvidence
+      TokenSources/  ConfidentialClient, ManagedIdentity, Provider, FixedBearer
+                     (each implements IGraphTokenSource)
     Data/Operations/*.psd1
     Formats/GraphKit.Format.ps1xml
   tests/Unit, tests/Adapter, tests/Concurrency, tests/QA
@@ -418,7 +423,7 @@ Every low-level command accepts `-Context` or `-ProfileName`, resolved **before*
 parallel work:
 
 ```powershell
-$context = Get-GraphContext -Profile ivy24
+$context = Get-GraphContext -ProfileName ivy24
 Get-GraphObject -Context $context -Type ManagedDevice
 ```
 
@@ -427,7 +432,8 @@ Profile metadata in `~/.graphkit/profiles.json`; secrets in
 
 | Field | Notes |
 | --- | --- |
-| `Name` | Profile identifier; also the vault customer tag when `Kind = customer` |
+| `ProfileId` | **Path-safe canonical identifier** — `^[a-z0-9][a-z0-9-]{0,63}$`. The only value ever used to build a filesystem path. |
+| `Name` | Display name and, when `Kind = customer`, the vault customer tag. **Never used as a path segment.** |
 | `Kind` | `customer` \| `lab` \| `internal` |
 | `TenantId`, `ClientId` | |
 | `AuthMethod` | `Certificate` \| `ClientSecret` \| `BearerToken` \| `ManagedIdentity` |
@@ -509,26 +515,64 @@ operations, and non-collection responses.
 
 The unit of behavior is **Type + Operation + API version + cloud + auth mode**, not Type.
 
+This example is **normative**: it carries every field the pipeline reads. An earlier draft omitted
+`OperationKind`, `HandlerStrategyId`, `CredentialPolicy`, `AllowedHosts`, `ResourceFamily`, and the
+throttle class, which meant a loader written from it could not have driven the pipeline that
+references them.
+
 ```powershell
 @{
+    SchemaVersion        = 1
     Type                 = 'MobileApp'
     Operation            = 'Assign'
+    OperationKind        = 'Action'          # Collection|Singleton|Action|LongRunningJob|Binary|Scalar|NoContent|Delta
+    HandlerStrategyId    = 'Action.Default'  # validated strategy id, never a scriptblock
     ApiVersion           = 'v1.0'
+    Stability            = 'Stable'          # Stable|DualVersion|BetaPreferred|BetaOnly
+    BetaReason           = $null             # required when Stability is BetaPreferred or BetaOnly
     Method               = 'POST'
     PathTemplate         = '/deviceAppManagement/mobileApps/{id}/assign'
     RequestBodyKind      = 'MobileAppAssignmentSet'
     ResponseKind         = 'NoContent'
     PagingStrategy       = 'None'
-    RetrySafety          = 'AmbiguousCommit'
+    ReplayPolicy         = 'NeverReplay'     # intrinsic - see below
     Reconciliation       = $null
     AdvancedQuery        = @{ Supported = $false }
     Concurrency          = @{ Mode = 'None' }
-    RequiredPermissions  = @('DeviceManagementApps.ReadWrite.All')
+    CredentialPolicy     = 'GraphBearer'     # GraphBearer|None
+    AllowedHosts         = @()               # required and non-empty when CredentialPolicy = None
+    ResourceFamily       = 'Intune.MobileApps'
+    ThrottleClass        = 'Write'           # Read|Write
+    SupportedAuthModes   = @('Certificate','ClientSecret','ManagedIdentity')
+    RequiredPermissions  = @(
+        @{ Type = 'Application'; Value = 'DeviceManagementApps.ReadWrite.All' }
+    )
     RequiredLicense      = @('Microsoft Intune')
     SupportedClouds      = @('Global','USGov','USGovDoD')
-    Stability            = 'Stable'
 }
 ```
+
+**Cross-field validation** runs in the loader, not at call time: `CredentialPolicy = None`
+requires a non-empty `AllowedHosts`; `BetaPreferred`/`BetaOnly` require a `BetaReason`;
+`ReplayPolicy = Reconciliable` requires a `Reconciliation` block; an `ApiVersion` of `beta`
+requires a matching `Stability`. Descriptors are versioned by `SchemaVersion` so the loader can
+reject or migrate rather than silently misread.
+
+#### Replay policy is intrinsic; certainty is per attempt
+
+The earlier draft stored a single `RetrySafety` value such as `AmbiguousCommit`, which conflated
+two different facts and contradicted the retry matrix below. **The same POST is not always
+ambiguous.** Rejected cleanly with `429` before execution, it is safe to retry; abandoned after a
+socket reset, it may have committed. One static field cannot express both.
+
+- **`ReplayPolicy`** — an intrinsic property of the operation, stored in the descriptor:
+  `Safe`, `Conditional`, `Reconciliable`, `NeverReplay`.
+- **Attempt certainty** — determined at runtime from what actually happened:
+  `Rejected`, `Ambiguous`, `MayHaveCommitted`, `Succeeded`.
+
+The retry decision is a function of both. `Rejected` plus any policy other than `NeverReplay`
+retries; `Ambiguous` retries only under `Safe`, reconciles under `Reconciliable`, and otherwise
+surfaces `Indeterminate`.
 
 The IntuneManagement type table remains, but only for **discovery and tab completion**. The
 operation descriptor governs behavior.
@@ -656,16 +700,31 @@ retry. It must never itself decide whether to retry.
 includes an operation returning `503` even though the object was created — repeating it then
 yields `409 Conflict`.
 
-`RetrySafety` classification per operation:
+This is why replay policy and attempt certainty are **two separate axes**, as defined in the
+operation catalog above. The earlier draft listed both on one `RetrySafety` enum, which mixed a
+fixed property of the operation with a fact discovered at runtime.
 
-| Classification | Typical operations | Behavior |
+`ReplayPolicy` — intrinsic, stored in the descriptor:
+
+| Policy | Typical operations | Meaning |
 | --- | --- | --- |
-| `Safe` | GET, HEAD | Retry recognized transient statuses |
-| `ConditionallyIdempotent` | PUT to stable URI, DELETE, selected PATCH | Retry only when the descriptor permits |
-| `RejectedBeforeExecution` | POST/PATCH receiving a normal 429 | Retry using the server delay |
-| `AmbiguousCommit` | POST/PATCH after timeout, reset, 502/503/504 | **Do not replay automatically** |
-| `Reconciliable` | Create with stable external key and reliable lookup | Query for the intended result, then decide |
-| `NeverReplay` | send, retire, wipe, sync, rotate | Surface an indeterminate result |
+| `Safe` | GET, HEAD | Replaying cannot change state |
+| `Conditional` | PUT to a stable URI, DELETE, selected PATCH | Replayable only where the descriptor says so |
+| `Reconciliable` | Create with a stable external key and a reliable lookup | Query for the intended result, then decide |
+| `NeverReplay` | send, retire, wipe, sync, rotate | Never replay; surface the outcome |
+
+Attempt certainty — determined at runtime:
+
+| Certainty | Arises from |
+| --- | --- |
+| `Succeeded` | A 2xx response was received |
+| `Rejected` | The service refused before executing, e.g. a clean `429` |
+| `Ambiguous` | Timeout, connection reset, or 502/503/504 with no response body |
+| `MayHaveCommitted` | Ambiguous, and a subsequent probe found evidence of partial effect |
+
+The decision is a function of the pair. `Rejected` retries under any policy but `NeverReplay`.
+`Ambiguous` retries only under `Safe`, reconciles under `Reconciliable`, and otherwise returns
+`Failed` + `Indeterminate` without a replay.
 
 Default matrix:
 
@@ -798,12 +857,20 @@ There is exactly one envelope, `GraphKit.OperationResult`:
 | Field | |
 | --- | --- |
 | `Data` | Result rows, or empty |
-| `Outcome` | `Succeeded` \| `Failed` \| `DeadlineExpired` |
+| `Outcome` | `Succeeded` \| `Failed` \| `DeadlineExpired` \| `Cancelled` |
 | `Certainty` | `Known` \| `Indeterminate` — an ambiguous write is `Failed` + `Indeterminate` |
 | `Telemetry` | Per-attempt evidence, as above |
 | `Provenance` | Tenant, API version, endpoint family, retrieval time |
 
-- `Invoke-GraphRequest` and `Invoke-GraphBatch` **always** return envelopes.
+- `Invoke-GraphRequest` **always** returns exactly one envelope.
+- **`Invoke-GraphBatch` returns one ordered envelope per original subrequest**, not one envelope
+  for the batch. A batch routinely mixes outcomes — some subrequests succeed, some are throttled
+  and retried, some fail, and a write that timed out is indeterminate. A single `Outcome` and
+  `Certainty` cannot represent that, and collapsing it would either hide failures behind an
+  overall success or discard the certainty of the writes that did land. Order matches the
+  submitted order, and each envelope carries the subrequest's own telemetry including its
+  `id`. Dependency failures (`424`) are reported against the dependent subrequest, with the
+  blocking `id` recorded.
 - `Get-GraphObject` projects `Data` onto the success stream for pipeline ergonomics, and **throws
   on any non-`Succeeded` outcome** so a failure can never be mistaken for an empty result. The
   envelope is available via `-PassThruResult`.
@@ -882,12 +949,16 @@ Results are `PSCustomObject` with `PSTypeName` `GraphKit.<Type>` plus `_Tenant`,
 `VaultEvidence` must obey `SCHEMA.md`, which requires evidence pages to be summaries with
 pointers to source paths, never raw exports, credentials, or PII:
 
-1. Raw rows → `~/repo/report-exports/<name>/` — **outside the vault**.
-2. Summary page → `cdw-kb/evidence/<name>/` — rollups and counts only, `sources:` pointing at
+1. Raw rows → `~/repo/report-exports/<ProfileId>/` — **outside the vault**.
+2. Summary page → `cdw-kb/evidence/<ProfileId>/` — rollups and counts only, `sources:` pointing at
    (1), ≥2 wikilinks, correct frontmatter.
-3. `customers:` is `[<name>]` for `Kind = customer`, `[]` for lab and internal.
+3. `customers:` is `[<Name>]` for `Kind = customer`, `[]` for lab and internal. This is the
+   display name and vault tag, not the path identifier.
 4. `log.md` appended, `index.md` updated.
-5. A **redaction assertion** before any write: no tenantId, clientId, secret, or bearer token may
+5. **Path containment is verified, not assumed.** Only `ProfileId` builds paths, and both output
+   roots are canonicalized and asserted to remain beneath their configured base before any write.
+   A `Name` is free text and would otherwise let `../` or a separator escape the root.
+6. A **redaction assertion** before any write: no tenantId, clientId, secret, or bearer token may
    reach vault output. Enforced in code and covered by a test.
 
 ## Versions
