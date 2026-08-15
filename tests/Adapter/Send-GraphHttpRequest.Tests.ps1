@@ -337,13 +337,16 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         $port = Get-FreePort
         $server = Start-GraphLoopback -Port $port -Handler {
             param($Context, $Listener, $Captured)
+
+            # Record the request BEFORE closing the response. Closing releases the client,
+            # so the test scope can resume and read $Captured while this runspace has not yet
+            # executed the line after Close() - the assertion then sees $null instead of 1.
+            # That is a genuine happens-before bug in the test, and it failed roughly one run
+            # in three under load.
+            $Captured['Count'] = 1
+
             $Context.Response.StatusCode = 503
             $Context.Response.Close()
-
-            # A second request should never arrive; the probe for one lives in
-            # the test body (below) so no pending listener operation is ever
-            # created inside this runspace scriptblock.
-            $Captured['Count'] = 1
         }
 
         $r = InModuleScope GraphKit -ArgumentList $port {

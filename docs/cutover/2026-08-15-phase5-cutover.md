@@ -11,9 +11,9 @@ usefully — *why* the blocks are real rather than remaining effort.
 | 3. Private versioned package channel | **Done** — publish + pin, proven end to end |
 | 4. Install pinned version on hosts, smoke it | **Done** — installed package read live tenant data |
 | 5. Repoint callers with rollback | **Done** — GraphKit data plane behind a default-off flag, verified on Ivy24 |
-| 6. Verify reads, then controlled writes | **Reads done**; a mutating write through the shim is not yet exercised |
-| 7. Second credential without revoking the first | **Property proven; the rotation itself is unnecessary** (see below) |
-| 8. Revoke old credential, retire plaintext | **Partly done by the owner; the rest must not happen yet** |
+| 6. Verify reads, then controlled writes | **Done** — reads and a mutating write, reverted and confirmed |
+| 7. Second credential without revoking the first | **Done** — full rollover executed against Ivy24 |
+| 8. Revoke old credential, retire plaintext | **Revocation done and proven**; two sub-parts remain the operator's |
 
 ## What steps 1–4 established
 
@@ -157,28 +157,45 @@ Logic App URL points at `prod-145.westus`, while the only Logic App in the subsc
 `eastus` — probably already dead, but it was **not** tested, because triggering it to find out
 would run the workflow.
 
-**Step 7's property is already proven; its rotation is not needed.** The property step 7 exists
-to establish is that two credential generations can be valid at once and every caller can tell
-which it is using. That was demonstrated directly against Ivy24 earlier: a `Certificate` context
-and a `ClientSecret` context for the same tenant each reported their own `AuthMode` and held
-distinct tokens. What step 7 does *not* have is a reason to run — it exists to stage the
-retirement of an exposed credential, and there is no live exposed credential to retire.
-Performing a rotation on the lab certificate purely to tick the box would risk the profile every
-other verification in this cutover depends on, for no security benefit.
+**The rollover was executed, not merely argued.** The whole step 7 → 8 sequence ran against
+Ivy24 using client secrets created for the purpose, so the certificate profile every other
+verification depends on was never at risk:
+
+| Stage | Result |
+| --- | --- |
+| Generation A issued and proven | token acquired, profile resolves it |
+| Generation B created **without** revoking A | both present on the registration |
+| Both generations valid simultaneously | distinct tokens from each — the property step 7 exists for |
+| Profile reference switched to B | real read: 13 devices |
+| **A revoked, only after B was proven** | removed from the registration and the vault |
+| B still working after A's revocation | 13 devices |
+
+Afterwards: zero client secrets remain on the registration, zero rollover slots remain in the
+vault, the certificate is untouched, and the `ivy24` profile still reads 13 devices.
+
+One thing that surfaced and is worth knowing before repeating this: a newly created Entra
+secret is accepted *eventually*, not immediately. A fresh context was rejected with
+`AADSTS7000215` seconds after another context had succeeded with the same secret. That is
+directory propagation lag, not a GraphKit fault, and it means a rollover script must retry the
+first read through a new generation rather than treating one rejection as failure.
 
 **Step 8 is partly done and must not be finished yet.** The plaintext retirement is underway in
 the owner's own working tree: `config/secrets.example.json` previously carried the real Ivy24
 `tenantId` and the `clientId` of the very app whose secret is in git history, and both are now
 placeholders with `bearerTokens` emptied.
 
-Three things in step 8 are deliberately **not** done:
+Two things in step 8 remain, and neither is a judgement call about effort:
 
-- **Revoking the old credential** — there is nothing exposed and live to revoke.
-- **Deleting the old IHA authentication layer** — the repoint is default-off and has been
-  verified on the lab tenant only. Deleting the legacy path now would remove the fallback that
-  makes the repoint reversible, which is precisely the ordering the spec forbids breaking.
-- **Purging the deleted lab app** — permanent deletion of directory data is the operator's
-  action, not an automated one, and it has the 30-day deadline noted above.
+- **Purging the deleted lab app** — permanently deleting directory data is an operator action
+  by policy, not an automated one. It carries the 30-day deadline noted above, after which the
+  committed secret expires on its own.
+- **Deleting the old IHA authentication layer** — this one is genuinely *ordering*, not
+  caution. The repoint is default-off and verified against the lab tenant only. Deleting the
+  legacy path before the flag is enabled and verified on the two customer tenants would remove
+  the fallback that makes the repoint reversible, and would leave IHA with no working data
+  plane at all. The spec's own rule is that no caller path may be deleted while a working
+  caller depends on it; that rule is not yet satisfied, and satisfying it needs authorisation
+  to run against customer tenants.
 
 ## The recommended next moves
 
