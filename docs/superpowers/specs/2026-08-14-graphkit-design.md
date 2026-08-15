@@ -75,7 +75,7 @@ Surveyed 2026-08-14; module versions verified against PSGallery the same day.
 | **MSGraphRequest** | 2.0.1, 2026-02-20 | By Nickolaj Andersen & Jan Ketil Skanke (MSEndpointMgr) — the most credible authors in this space. Native REST, no SDK/MSAL dependency, six auth flows, automatic paging/throttling/refresh. Exposes a *current connection*, not named immutable contexts. **Strong evidence that raw transport and app-only OAuth are commodity.** Not a replacement: no SecretManagement profiles, no operation catalog, no cross-runspace rate control, no permission analysis, no replay-safety classification. |
 | **mgx** | 1.0.5, 2026-08-14 | **Best current reliability prior art.** Proactive rate limiting, circuit breaking, adaptive write pacing, connection recycling, body-read timeouts, checkpoint/resume, delta, streaming pagination, telemetry. Unusable as a foundation (PS 7.5+, depends on `Microsoft.Graph.Authentication`, compiled components, generic rather than Intune-aware) but **its pipeline architecture should be studied and borrowed**. |
 | **AutoGraphPS / -SDK** | 0.44.0 / 0.32.0, Nov 2024 | The strongest design history for type-driven access: separation of connection / logical graph / type metadata / location context, URI and property completers, permission-name resolution. Its instructive lesson is that **a metadata-driven model still accumulated many special cases**. ~21 months stale; do not inherit its ADAL/MSAL-era auth architecture. |
-| **Microsoft.Graph.Authentication** | 2.38.1 | Adopted for authentication — see below. |
+| **Microsoft.Graph.Authentication** | 2.38.1 | **Not** used as transport — its process-global state is shared across runspaces (demonstrated below). Depended on solely to deliver MSAL.NET; `Connect-MgGraph` is never called. |
 | **Maester** | current | Pester-based M365/Entra security testing. Overlaps IHA's *reporting* purpose, not GraphKit's plumbing. Evaluate before hand-building more health-check reports. |
 | **IntuneManagement** (Micke-K, MIT) | — | Source of the object-type/endpoint table. The WPF UI around it is not wanted. Local copy has no LICENSE file; vendoring requires the upstream MIT text in `THIRD-PARTY-NOTICES.md`. |
 | **Microsoft365DSC**, **EntraExporter**, **IntuneBackupAndRestore**, **IntuneAssignmentChecker** | — | Config-as-code, Entra export, policy backup, assignment audit respectively. Adjacent, not overlapping. |
@@ -92,8 +92,10 @@ hashtable keyed on absolute URI with no TTL, invalidation, or size bound.
 Lifted: sovereign-cloud enums, existing-session reuse before reconnecting, scope-on-demand as a
 least-privilege default. **Not** lifted: the unbounded cache.
 
-**The consistent finding across all of the above is that authentication and transport are
-commodity, and throttling correctness is not.** That is where GraphKit's value sits.
+**The consistent finding across all of the above is that token acquisition is commodity, while
+throttling correctness, replay safety, and credential-boundary enforcement are not.** That is
+where GraphKit's value sits — and note that none of these projects, including the official SDK,
+provides a transport whose retry behavior a caller can actually own.
 
 ## Decision
 
@@ -111,44 +113,132 @@ GraphKit            plumbing: auth, contexts, request pipeline, operations, perm
 healthcheck (IHA)   domain: reports, Excel, caching, checkpointing
 ```
 
-### Authentication is delegated to the Graph SDK
+### Tokens from MSAL.NET; transport owned by GraphKit
 
-GraphKit depends on **`Microsoft.Graph.Authentication`** and acquires tokens through
-`Connect-MgGraph`. It does not implement token acquisition or caching.
+**This reverses the earlier decision to route requests through `Connect-MgGraph` /
+`Invoke-MgGraphRequest`.** The SDK is not usable as GraphKit's transport, for a demonstrated
+reason.
 
-**The justification for this has been corrected.** The original reasoning cited MSAL refresh
-tokens and Conditional Access claims challenges. For the locked v1 auth modes that reasoning is
-largely void: **certificate and client-secret flows are both client-credentials, which return no
-refresh token.** There is no OAuth session to maintain — an expired access token is replaced by
-reacquiring with the source credential. CAE claims challenges are predominantly a delegated-token
-concern.
+#### The SDK's state is process-global and shared across runspaces
 
-What the dependency still genuinely buys, for app-only:
+Measured 2026-08-14:
 
-- **Certificate client assertions.** Cert-based client credentials require constructing and
-  RS256-signing a JWT assertion with `x5t`, `jti`, and a short validity window. That is
-  security-sensitive cryptography and the strongest single reason not to hand-roll.
-- Sovereign cloud authority and resource endpoints via `-Environment`
-- Managed identity, for later unattended use
-- Not becoming a second OAuth client library — the trap `MgGraphCommunity` walked into by owning
-  its own PKCE and refresh-token code
+```
+parent runspace     : MaxRetry=7
+child runspace      : MaxRetry=2      # set inside ForEach-Object -Parallel
+parent after child  : MaxRetry=2      # parent mutated by the child
+```
 
-Measurement: v2.38.1 imports in **96 ms** (38.8 MB on disk), so the "heavy dependency" objection
-does not survive a stopwatch. It natively covers `-ClientSecretCredential`,
-`-CertificateThumbprint`, `-Certificate`, `-CertificateSubjectName`, `-AccessToken`, `-Identity`,
-and `-UseDeviceCode`.
+`Set-MgRequestContext` in a child runspace **mutated the parent's configuration**. SDK state
+lives in .NET statics shared across runspaces in the same process. `Get-MgContext` takes no
+parameters because there is exactly one connection, and that connection is equally shared.
 
-Also corrected: the widely-cited SDK retry failure at ~60–70 Autopilot devices ("more than 3
-retries encountered") is `-MaxRetry` at its default of 3 — a configuration miss, not an
-architectural limit.
+The consequence is a correctness failure, not an inconvenience. Runspace A begins paging
+Tenant A; Runspace B calls `Connect-MgGraph` for Tenant B; A's next page is issued with B's
+token while A's results and telemetry still claim Tenant A. **Silent cross-tenant data
+contamination in a consulting tool is the worst failure mode this module could have.**
 
-**Accepted cost: one live tenant context.** `Get-MgContext` takes no parameters. Cross-tenant
-comparison in a single pipeline is out of scope; sequential switching covers the workflow.
-(`MgGraphCommunity` does support simultaneous contexts, which is the one capability given up
-here.)
+The earlier draft asserted both "immutable contexts prevent retargeting" and "every request goes
+through the process-global SDK." Those cannot both be true.
 
-**What would flip this decision:** needing simultaneous multi-tenant, or the SDK's import
-behavior regressing. Revisit then, not before.
+#### Three findings, one root cause
+
+Context retargeting, retry ownership, and the timeout contract are the same problem: **the SDK
+transport carries process-global mutable state GraphKit cannot own.**
+
+- **Retry ownership.** GraphKit promises `AmbiguousCommit` semantics — never auto-replay a POST
+  that may have committed. If the SDK's handler retries a 503 before GraphKit sees the response,
+  that promise is void. `Set-MgRequestContext -MaxRetry 0` is accepted and does disable retries,
+  but it is itself process-global state any runspace can change, so it can be requested and never
+  guaranteed.
+- **Timeouts.** `Invoke-MgGraphRequest` exposes **no** timeout or cancellation parameters;
+  `Set-MgRequestContext` offers only a single SDK-wide `ClientTimeout`. The promised separate
+  connection / header / body timeouts and cancellation cannot be delivered through it. Exposing
+  controls that cannot interrupt the underlying operation would be a lie.
+
+Per-symptom patches — connection leases, `MaxRetry 0`, narrowed timeout promises — all wrap
+state GraphKit does not control.
+
+#### The resolution
+
+**MSAL.NET for token acquisition, a GraphKit-owned `HttpClient` for transport.**
+
+`Microsoft.Identity.Client.dll` v4.82.1 already ships inside `Microsoft.Graph.Authentication`.
+Using `ConfidentialClientApplicationBuilder` directly gives:
+
+- **Per-context token acquisition with no global state.** Each GraphKit context owns its own
+  confidential client application and token cache. Two contexts cannot interfere, because there
+  is nothing shared to interfere through.
+- **Certificate assertion signing still handled by MSAL** — RS256, `x5t`, `jti`, validity window.
+  This was the one genuine reason not to hand-roll, and it is preserved. **GraphKit writes no
+  OAuth cryptography.**
+- Sovereign authorities via `WithAuthority`.
+
+Owning the `HttpClient` then delivers, by construction, what the SDK could not: sole retry
+ownership, real connection/header/body timeouts with cancellation, and a non-bypassable
+credential boundary on every send.
+
+This is not a return to hand-rolled OAuth. MSAL performs the protocol and the crypto; GraphKit
+performs HTTP. It is also the boundary the external reviews independently recommended for
+delegated auth — it turns out to be correct for app-only as well.
+
+**Cost accepted:** GraphKit owns an `HttpClient` and its lifetime. This is bounded and directly
+testable, and the injected-transport / virtual-clock test architecture already assumes it.
+
+#### MSAL sourcing and the assembly-coexistence hazard
+
+Four MSAL versions were found coexisting on the development machine: `Az.Accounts` 4.83.1 and
+4.84.0, `Microsoft.Graph.Authentication` 4.82.1, `Microsoft.PowerShell.PSResourceGet` 4.61.3.
+
+**GraphKit must not bundle a competing copy.** In the default assembly load context the first
+loaded version wins for the process, and PSResourceGet's copy is present in effectively every
+session. Shipping a fifth would create precisely the DLL-ordering pain that Maester documents
+working around.
+
+Therefore:
+
+- Declare `Microsoft.Graph.Authentication` as a required module **solely as MSAL's delivery
+  vehicle**, with a pinned tested minimum version. `Connect-MgGraph` is never called.
+- Bind to MSAL **late** — PowerShell resolves types at runtime, which tolerates version drift so
+  long as usage stays on long-stable surface: `ConfidentialClientApplicationBuilder.Create`,
+  `WithClientSecret`, `WithCertificate`, `WithAuthority`, `AcquireTokenForClient`.
+- **Detect the actually-loaded MSAL version at module import** and fail immediately with an
+  actionable message if it is below the tested minimum or absent. Do not discover this at first
+  token acquisition inside a customer engagement.
+- A QA test asserts GraphKit ships no `Microsoft.Identity.Client.dll` of its own.
+
+**What would flip this decision:** a supported way to obtain per-context isolation from the Graph
+SDK, or MSAL becoming independently installable as a PSGallery module without conflict.
+
+#### Token cache
+
+In-memory, per context, never persisted. Client-credentials flows return no refresh token: an
+expired access token is replaced by reacquiring with the source credential, which is already in
+SecretManagement. Persisting app-only access tokens adds theft and stale-cache risk for no gain.
+
+Single-flight acquisition per cache key: the first caller acquires, others await the same result,
+a failure surfaces to all waiters and is not cached for long. Without this, ten runspaces
+starting together request ten identical tokens and trigger Entra's own throttling — Microsoft
+describes "loop detected" errors as that symptom. **Token acquisition therefore gets its own
+throttle scope,** distinct from Graph request scopes.
+
+Refresh timing uses the token endpoint response (`ReceivedAtUtc + ExpiresIn`), **not** the JWT
+`exp` claim — Microsoft states Graph access tokens are resource-owned and clients must not depend
+on their internal format. Skew is adaptive, `min(5 min, max(60 s, 10% of lifetime))`, with a small
+random spread so fifteen contexts do not all reacquire at the same instant after a bulk connect.
+
+Wall-clock UTC governs token expiry; **monotonic elapsed time governs retry budgets and
+deadlines**, so a clock change mid-session cannot extend a five-minute budget.
+
+#### Contexts and concurrency
+
+Because nothing is process-global, no connection coordinator, lease manager, or session
+generation is required. A context is an immutable value resolved before parallel work begins and
+passed into each runspace. Correctness comes from the absence of shared mutable state rather than
+from locking around it.
+
+Simultaneous multi-tenant contexts are now *structurally* possible. They remain **out of scope
+for v1** as a deliberate scope limit, not a technical one.
 
 ### Bearer tokens are caller-owned
 
@@ -168,11 +258,11 @@ honored; absence of one means "try it, then return a clear authentication failur
 
 ### Retired, not moved
 
-- `Get-CBAToken` (253 lines) → `Connect-MgGraph -CertificateThumbprint` / `-Certificate`
+- `Get-CBAToken` (253 lines) → MSAL `ConfidentialClientApplicationBuilder.WithCertificate`
 - `Update-AccessToken` (150 lines) → SDK token cache
-- `Set-GraphEnvironment` (65 lines) → `Connect-MgGraph -Environment`
+- `Set-GraphEnvironment` (65 lines) → MSAL `WithAuthority` plus per-context cloud metadata
 
-Bearer mode survives via `-AccessToken`. ~470 lines of token-lifecycle code stop being
+Caller-supplied bearer tokens survive as a context-only credential. ~470 lines of token-lifecycle code stop being
 maintained here.
 
 ### Stays in IntuneHealthAutomation
@@ -233,6 +323,12 @@ GraphKit/
 compiled and **must** be listed in `build.yaml` under `CopyPaths`, or they vanish from the built
 module while looking correct in source. Common first-build failure.
 
+`CopyPaths` only *packages* the format file. `GraphKit.Format.ps1xml` must **also** be registered
+via **`FormatsToProcess`** in the manifest, or default views silently never apply. A clean-process
+smoke test imports the built manifest from `output/` and asserts both that operation data loads
+and that default views are registered — catching the packaging-versus-registration gap that
+in-source testing cannot see.
+
 ### Profiles and contexts
 
 A mutable "current profile" must not be the sole source of truth — a profile switch in one
@@ -261,7 +357,25 @@ Profile metadata in `~/.graphkit/profiles.json`; secrets in
 | `TenantId`, `ClientId` | |
 | `AuthMethod` | `Certificate` \| `ClientSecret` \| `BearerToken` \| `ManagedIdentity` |
 | `Environment` | `Global` \| `China` \| `Germany` \| `USGov` \| `USGovDoD` |
-| `CredentialRef` | Vault name + secret name (+ version) |
+| `Credential` | **Discriminated by `AuthMethod`** — see below. A single generic `CredentialRef` cannot express the required variants. |
+
+Persisted credential shapes, one schema per `AuthMethod`:
+
+| `AuthMethod` | Persisted |
+| --- | --- |
+| `ClientSecret` | Vault name, secret name, optional version |
+| `Certificate` (PFX) | PFX path + vault-backed password reference |
+| `Certificate` (vault material) | Vault name, certificate name, optional version |
+| `Certificate` (store) | Store location, store name, lookup by thumbprint or subject — **Windows only, and declared as such** |
+| `BearerToken` | Vault reference only |
+| `ManagedIdentity` | Client ID for user-assigned, or nothing for system-assigned |
+
+**Injected `X509Certificate2` objects and caller-supplied token providers are context-only and
+non-persistable.** They may be passed to `Get-GraphContext` at runtime but never written to
+`profiles.json`, and attempting to register one is an error rather than a silent drop.
+
+Thumbprint-only certificate configuration is Windows-specific and must not be the sole supported
+shape — the development machine is macOS.
 
 **`Kind` governs taxonomy validation.** Only `Kind = customer` validates `Name` against the CDW
 KB `SCHEMA.md` customer tag list. `ivy24` is a lab tenant and must not be a customer tag.
@@ -371,10 +485,43 @@ additionally require:
 
 ### Request pipeline
 
-`Invoke-GraphRequest` wraps `Invoke-MgGraphRequest`, inheriting transport, auth plumbing, and the
-SDK's outer-response retry handler (tuned once via `Set-MgRequestContext -MaxRetry`). On top it
-adds paging, URI resolution, descriptor-driven query validation, and everything below. One
-request path, not two.
+`Invoke-GraphRequest` issues requests through a GraphKit-owned `HttpClient` using a token from
+the context's MSAL client. **GraphKit is the sole retry owner** — there is no underlying handler
+that can retry behind its back, which is what makes the replay guarantees below enforceable
+rather than aspirational.
+
+A contract test asserts that **one GraphKit attempt produces exactly one physical send**.
+
+#### The credential boundary is non-bypassable
+
+Bearer tokens are attached by the transport, and **nothing in the pipeline can opt out of the
+check** — including `-Raw`. Descriptor validation is bypassable; credential policy is not.
+
+Every request carries a `CredentialPolicy`:
+
+| Policy | Meaning |
+| --- | --- |
+| `GraphBearer` | Attach the context's Graph token. Requires HTTPS **and** an exact match against the cloud-specific Graph authority for that context. |
+| `None` | Send with no credential. Used for report downloads and any other external transfer. |
+
+Rules:
+
+- **`-Raw` keeps authority and credential-forwarding checks.** It bypasses descriptor and query
+  validation only. An absolute URI supplied by a caller is untrusted input.
+- **`@odata.nextLink` is opaque but not trusted** — validate scheme and authority before
+  attaching a token.
+- **Report download URLs are `None`.** Intune export jobs return SAS-signed Azure blob URLs on a
+  non-Graph host. Sending them a Graph bearer token would leak it to storage; they carry their
+  own signed authorization. Hosts are allowlisted per operation.
+- **Redirects are disabled by default.** If an operation must follow one, every hop is validated
+  before credentials are forwarded. Automatic redirect-following with a bearer token attached is
+  a token-exfiltration primitive.
+- **Query strings are stripped from telemetry by default.** SAS URLs carry their signature in the
+  query; logging it would persist a live credential into evidence output. Only an allowlist of
+  known-safe OData parameters is retained.
+
+A failure here is a hard error naming the offending authority — never a silent downgrade to an
+unauthenticated request, and never a silent send.
 
 #### Retry must be semantics-aware, not status-code-driven
 
@@ -530,10 +677,43 @@ calculated delay *and its source*, current concurrency limit, batch subrequest I
 the final state is **known, failed, or indeterminate**. Telemetry is a first-class result object,
 not verbose text.
 
+### One canonical result contract
+
+Structured outcomes and plain data rows are two different things, and mixing them on one stream
+corrupts both: an ambiguous POST has **no data row** but must still carry `Indeterminate`, while
+unwrapping envelopes into rows loses reliability state entirely.
+
+There is exactly one envelope, `GraphKit.OperationResult`:
+
+| Field | |
+| --- | --- |
+| `Data` | Result rows, or empty |
+| `Outcome` | `Succeeded` \| `Failed` \| `DeadlineExpired` |
+| `Certainty` | `Known` \| `Indeterminate` — an ambiguous write is `Failed` + `Indeterminate` |
+| `Telemetry` | Per-attempt evidence, as above |
+| `Provenance` | Tenant, API version, endpoint family, retrieval time |
+
+- `Invoke-GraphRequest` and `Invoke-GraphBatch` **always** return envelopes.
+- `Get-GraphObject` projects `Data` onto the success stream for pipeline ergonomics, and **throws
+  on any non-`Succeeded` outcome** so a failure can never be mistaken for an empty result. The
+  envelope is available via `-PassThruResult`.
+- `Export-GraphResult` accepts **either**, unwrapping envelopes itself. It refuses to export an
+  `Indeterminate` result without `-Force`, because filing an uncertain write as evidence is
+  exactly the error the certainty field exists to prevent.
+
 ### Permission analysis
 
 The common conceptual error is treating `requiredResourceAccess` as the application's
 permissions. It is only what the *registration requests*. It proves neither consent nor grant.
+
+**The subject of analysis is not the analyzer.** The app registration being examined is a
+`TargetAppId` in a named customer tenant, modelled separately from the profile doing the
+examining, along with its home tenant and the expected operation baseline. Conflating them is
+what produces the bootstrap trap below.
+
+`Grant-GraphAppPermission` declares `SupportsShouldProcess`, names its target tenant and
+application explicitly, and is **idempotent** — it computes and applies a diff, so re-running
+grants nothing already present.
 
 Four distinct states:
 
@@ -609,7 +789,8 @@ pointers to source paths, never raw exports, credentials, or PII:
 | Test matrix | 7.4 **and** 7.6, on Windows / Ubuntu / macOS |
 | Test framework | **Pester 6.1.0** (released 2026-08-11) |
 | Build | **Sampler 0.120.1**, ModuleBuilder held at 3.1.8 |
-| Runtime dependency | **`Microsoft.Graph.Authentication`** (sole) |
+| Runtime dependencies | **`Microsoft.Graph.Authentication`** (pinned minimum; MSAL delivery only, `Connect-MgGraph` never called) and **`Microsoft.PowerShell.SecretManagement`** (required for every persisted credential) |
+| Operational prerequisite | A **registered SecretManagement vault extension**. Not a module dependency — it is environment state, and its absence must fail at import with an actionable message rather than at first token acquisition. |
 
 **PowerShell 7.4 is a compatibility floor, not a strategic target — it reaches end of support on
 2026-11-10, 88 days from this spec.** PowerShell 7.5 reaches EOL the *same day*, so moving 7.4 →
@@ -625,7 +806,7 @@ a defect, and IHA currently has exactly that.
 
 ### Do not unit-test the retry engine by mocking HTTP
 
-Mocking `Invoke-MgGraphRequest` couples tests to PowerShell's exception shape, `ErrorRecord`
+Mocking the HTTP cmdlet or `HttpClient` directly couples tests to PowerShell's exception shape, `ErrorRecord`
 internals, HTTP cmdlet parsing, and version-specific response objects. Normalize HTTP into an
 internal contract first:
 
@@ -692,18 +873,63 @@ independently.
 
 ## Phases
 
-1. **Core.** Sampler scaffold, profiles/contexts, SDK-delegated auth, request pipeline,
-   semantics-aware retry, scoped throttling with admission control, virtual-clock test harness,
-   CI. Proven against the **Ivy24 lab tenant** — a lab target allows exercising retry paths and
-   mutating verbs without customer exposure. Tenant and client IDs are registered via
-   `Register-GraphTenant`, never committed, consistent with existing Theseus practice.
-2. **Permissions.** Move the permission tooling down; implement the four-state analysis.
-3. **Operations.** Operation descriptors, read operations first, tab completion, `Get-GraphObject`.
-4. **Export.** `Export-GraphResult` and vault evidence.
-5. **Cutover.** Repoint IntuneHealthAutomation at GraphKit and delete its duplicated layer.
-   Separate work, only after 1–4 are proven.
+Two sequencing errors in the previous draft are corrected here. **Descriptors came after the code
+that consumes them** — retry safety, throttle family, API version, response shape, permissions,
+and cloud support all live in descriptor metadata, so building Core and Permissions first would
+have required temporary switches and hard-coded behavior, later thrown away. And **"proven
+against Ivy24" is not an executable acceptance criterion.**
+
+Descriptors are **versioned, data-only `.psd1`** files. Behavioral fields such as reconciliation
+or body transforms reference *validated strategy IDs*, never executable scriptblocks — a data
+file that can execute is a code file with extra steps, and it would defeat the loader's
+validation.
+
+Core is split into independently gated increments. Each needs an exact command, an expected
+artifact, and an observable pass condition before the next begins.
+
+**1. Core**
+
+| # | Increment | Gate |
+| --- | --- | --- |
+| 1.1 | Sampler scaffold, packaging, clean-process artifact import | Built manifest imports in a fresh `pwsh`; default views registered; operation data loads |
+| 1.2 | Normalized transport (`GraphTransportResult`), retry engine, deadlines | Deterministic virtual-clock tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one physical send per attempt |
+| 1.3 | Descriptor schema, loader, validator, handler registry, minimal Ivy24 descriptors | Invalid descriptors rejected with actionable errors; catalog round-trips |
+| 1.4 | Paging and URI security | Authority validation active under `-Raw`; redirect and telemetry rules enforced |
+| 1.5 | Profiles, MSAL-backed auth, vault integration | Ivy24 token acquired from vault-stored credential; MSAL version detection fails correctly when unmet |
+| 1.6 | Scoped throttle state and AIMD admission control | Real-runspace tests: Tenant B unblocked while Tenant A throttled |
+| 1.7 | Protected Ivy24 smoke workflow | Live read + mutation with cleanup and idempotency assertions, separated from deterministic CI |
+
+**2. Operations.** Expand the descriptor catalog; add `Get-GraphObject` and tab completion.
+
+**3. Permissions.** Consume the established catalog; implement the four-state analysis.
+
+**4. Export.** `Export-GraphResult` and vault evidence.
+
+**5. Secret retirement — a completion gate, not a background task.** Four live customer secrets
+are currently plaintext on disk. This phase requires, in order: strict data-only parsing of the
+legacy files, a dry-run inventory, transactional vault import, a successful connection
+verification per profile, explicit operator-confirmed removal of the plaintext copies,
+**rotation of all four secrets** — they have been exposed at rest, so migration alone is
+insufficient — and deletion of the `bearerTokens` example from `secrets.example.json`.
+
+**6. Cutover.** Repoint IntuneHealthAutomation at GraphKit and delete its duplicated layer. A
+**private, versioned package channel must exist first**; Gallery publication remains out of
+scope. Separate work, only after 1–5 are proven.
 
 Caching remains in IntuneHealthAutomation throughout.
+
+### CI separation
+
+Deterministic tests (unit, adapter, concurrency, QA) run on every push across the OS and
+PowerShell matrix. **Live Ivy24 contract tests run only in a protected environment**, never on
+pull requests from forks, and are the only tests permitted to touch a real tenant.
+
+### Portability constraint
+
+CDW taxonomy validation and vault paths sit behind an **injectable adapter**. Hard-coding
+`~/Documents/Obsidian Vault` or the `SCHEMA.md` customer list into Core would make GraphKit
+unable to run on CI or on any other workstation. The default implementation reads the real vault;
+tests and CI inject a stub.
 
 ## Out of scope for v1
 
