@@ -259,7 +259,7 @@ honored; absence of one means "try it, then return a clear authentication failur
 ### Retired, not moved
 
 - `Get-CBAToken` (253 lines) → MSAL `ConfidentialClientApplicationBuilder.WithCertificate`
-- `Update-AccessToken` (150 lines) → SDK token cache
+- `Update-AccessToken` (150 lines) → the per-context MSAL token source (**not** an SDK cache; GraphKit never holds an SDK context)
 - `Set-GraphEnvironment` (65 lines) → MSAL `WithAuthority` plus per-context cloud metadata
 
 Caller-supplied bearer tokens survive as a context-only credential. ~470 lines of token-lifecycle code stop being
@@ -384,8 +384,43 @@ KB `SCHEMA.md` customer tag list. `ivy24` is a lab tenant and must not be a cust
 minimum: an injected `X509Certificate2`, a PFX file with a vault-backed password, vault-backed
 certificate material, and Windows cert-store lookup as an optional platform provider.
 
-`Use-GraphTenant` checks `Get-MgContext` first and skips reconnection when the existing context
-already matches, preserving sessions from federated credentials or managed identity.
+`Use-GraphTenant` **selects an immutable GraphKit context and nothing else.** There is no
+"reconnection", because there is no connection: token acquisition happens per context, on demand,
+through that context's own token source. Any `Get-MgContext` check would consult the
+process-global SDK identity state this design exists to avoid — a leftover from an earlier draft,
+removed here.
+
+### Token sources
+
+A context owns an `IGraphTokenSource`, not a confidential MSAL client directly. The supported
+auth modes do not share one acquisition API — managed identity uses
+`ManagedIdentityApplicationBuilder` / `AcquireTokenForManagedIdentity`, not
+`ConfidentialClientApplicationBuilder` / `AcquireTokenForClient` — and a fixed bearer token cannot
+be refreshed at all.
+
+| Member | |
+| --- | --- |
+| `Acquire(forceRefresh, cancellation)` | |
+| `CanRefresh` | False for fixed bearer tokens |
+| `AuthMode`, `Audience`, `ClientId`, `ExpiresOn` | |
+| `VerifiedTenantId` | The tenant the credential was **proven** to belong to, or null |
+
+Separate implementations for confidential-client, managed-identity, provider, and fixed-bearer.
+The single `401` force-refresh applies only when `CanRefresh`; a fixed bearer token fails
+immediately rather than retrying.
+
+**Bearer tokens must be tenant-bound before they are trusted.** Commercial Graph uses the same
+host for every tenant, so authority validation proves nothing about *which* tenant a token
+addresses. A Tenant B token attached to a Tenant A profile would succeed against B while every
+result, telemetry record, and evidence page was stamped Tenant A — the same silent cross-tenant
+contamination the SDK transport was rejected for. Therefore:
+
+- `Context.VerifiedTenantId` must equal the target tenant immediately before **every write**.
+- Unverified bearer contexts are rejected for permission mutation and for tenant-stamped evidence.
+- Unverifiable fixed bearer tokens are restricted to operations explicitly marked read-only and
+  unverified.
+- **JWT claims are never authoritative identity** — verification comes from a Graph call made with
+  the token, not from decoding it.
 
 **Migration is a first-class command.** `Register-GraphTenant -FromLegacyConfig` imports IHA's
 `config/secrets.json` tenant array and the `Start-WithConsole *.cmd` launchers, moving secrets
@@ -790,7 +825,13 @@ pointers to source paths, never raw exports, credentials, or PII:
 | Test framework | **Pester 6.1.0** (released 2026-08-11) |
 | Build | **Sampler 0.120.1**, ModuleBuilder held at 3.1.8 |
 | Runtime dependencies | **`Microsoft.Graph.Authentication`** (pinned minimum; MSAL delivery only, `Connect-MgGraph` never called) and **`Microsoft.PowerShell.SecretManagement`** (required for every persisted credential) |
-| Operational prerequisite | A **registered SecretManagement vault extension**. Not a module dependency — it is environment state, and its absence must fail at import with an actionable message rather than at first token acquisition. |
+| Operational prerequisite | A **registered SecretManagement vault extension**, validated lazily — see below. |
+
+**Vault validation must not run at module import.** An earlier draft failed import when no vault
+extension was registered, which would break managed identity, injected credentials, `Get-Help`,
+operation-catalog inspection, and every CI job — none of which touch a persisted credential.
+Validate only when actually resolving or mutating a vault-backed credential, and fail there with
+an actionable message.
 
 **PowerShell 7.4 is a compatibility floor, not a strategic target — it reaches end of support on
 2026-11-10, 88 days from this spec.** PowerShell 7.5 reaches EOL the *same day*, so moving 7.4 →
@@ -891,13 +932,20 @@ artifact, and an observable pass condition before the next begins.
 
 | # | Increment | Gate |
 | --- | --- | --- |
-| 1.1 | Sampler scaffold, packaging, clean-process artifact import | Built manifest imports in a fresh `pwsh`; default views registered; operation data loads |
-| 1.2 | Normalized transport (`GraphTransportResult`), retry engine, deadlines | Deterministic virtual-clock tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one physical send per attempt |
-| 1.3 | Descriptor schema, loader, validator, handler registry, minimal Ivy24 descriptors | Invalid descriptors rejected with actionable errors; catalog round-trips |
-| 1.4 | Paging and URI security | Authority validation active under `-Raw`; redirect and telemetry rules enforced |
-| 1.5 | Profiles, MSAL-backed auth, vault integration | Ivy24 token acquired from vault-stored credential; MSAL version detection fails correctly when unmet |
-| 1.6 | Scoped throttle state and AIMD admission control | Real-runspace tests: Tenant B unblocked while Tenant A throttled |
-| 1.7 | Protected Ivy24 smoke workflow | Live read + mutation with cleanup and idempotency assertions, separated from deterministic CI |
+| 1.1 | Sampler scaffold and packaging | Distributable package **installed from a temporary repository** imports in a fresh `pwsh`; default views registered; non-code assets present |
+| 1.2 | Descriptor schema, loader, validator, strategy registry, minimal Ivy24 descriptors | Invalid descriptors rejected with actionable errors; cross-field rules enforced; catalog round-trips |
+| 1.3 | Immutable context and `IGraphTokenSource` interfaces | Contexts resolve without any network call; token-source contract covers all four auth modes |
+| 1.4 | Normalized transport (`GraphTransportResult`), deadlines, retry engine | Deterministic virtual-clock tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one GraphKit attempt equals one physical send |
+| 1.5 | Paging and URI security | Authority validation active under `-Raw`; redirects disabled or per-hop validated; `None` policy never carries authorization; query stripped from telemetry |
+| 1.6 | Authentication and vault providers | Ivy24 token acquired from a vault-stored credential; concurrent contexts receive only their own tokens; acquisitions collapse to one call per cache key; `401` force-refresh stays context-local |
+| 1.7 | Scoped throttle state and AIMD admission control | Real-runspace tests: Tenant B unblocked while Tenant A throttled |
+| 1.8 | Protected Ivy24 smoke workflow | Live read + mutation with cleanup guaranteed even on assertion failure, bound to the package digest, separated from deterministic CI |
+
+**Ordering rationale.** The previous sequence contradicted its own rule that contracts precede
+consumers: retry (then 1.2) came before descriptors (1.3) although retry safety is descriptor
+metadata, URI and cloud policy came before contexts, and gate 1.1 asserted operation data loads
+before a loader existed. Descriptors and context/token contracts now come first, and every gate
+tests the **installed package**, not loose files in `output/`.
 
 **2. Operations.** Expand the descriptor catalog; add `Get-GraphObject` and tab completion.
 
@@ -905,16 +953,28 @@ artifact, and an observable pass condition before the next begins.
 
 **4. Export.** `Export-GraphResult` and vault evidence.
 
-**5. Secret retirement — a completion gate, not a background task.** Four live customer secrets
-are currently plaintext on disk. This phase requires, in order: strict data-only parsing of the
-legacy files, a dry-run inventory, transactional vault import, a successful connection
-verification per profile, explicit operator-confirmed removal of the plaintext copies,
-**rotation of all four secrets** — they have been exposed at rest, so migration alone is
-insufficient — and deletion of the `bearerTokens` example from `secrets.example.json`.
+**5. Cutover and secret retirement — one ordered gate, not two phases.**
 
-**6. Cutover.** Repoint IntuneHealthAutomation at GraphKit and delete its duplicated layer. A
-**private, versioned package channel must exist first**; Gallery publication remains out of
-scope. Separate work, only after 1–5 are proven.
+An earlier draft rotated the exposed secrets in phase 5 and repointed IntuneHealthAutomation in
+phase 6. That ordering invalidates credentials still in use by the `Start-WithConsole` launchers
+and by IHA's own duplicated authentication layer, breaking working tooling midway through the
+migration. Rotation must come *after* every caller is repointed and verified:
+
+1. Inventory legacy callers — the launchers, IHA's authentication layer, any script holding a copy.
+2. Import profiles into SecretManagement (strict data-only parsing of the legacy files, dry-run
+   inventory, then transactional import) and verify each profile connects.
+3. Publish GraphKit to a **private, versioned package channel** and pin it. Gallery publication
+   stays out of scope, but the channel must exist before anything depends on it.
+4. Repoint every caller at GraphKit and delete IHA's duplicated layer.
+5. Verify reads, then controlled writes, through the repointed callers.
+6. **Only now** rotate the four exposed secrets.
+7. Remove the plaintext sources, with explicit operator confirmation, and delete the
+   `bearerTokens` example from `secrets.example.json`.
+8. Reverify every caller against the rotated credentials.
+
+If the full cutover cannot be completed in one pass, the acceptable alternative is to move legacy
+callers onto SecretManagement first and rotate afterwards. What is not acceptable is rotating
+while any caller still depends on the old secret.
 
 Caching remains in IntuneHealthAutomation throughout.
 
