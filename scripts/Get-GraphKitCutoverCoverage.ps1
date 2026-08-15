@@ -121,7 +121,13 @@ foreach ($property in $declared.PSObject.Properties) {
 }
 
 $rows = foreach ($entry in ($found.Values | Sort-Object Collection)) {
-    $match = $catalogPaths | Where-Object { $_.Comparable -eq $entry.Comparable } | Select-Object -First 1
+    # A path can now be served by more than one descriptor - a v1.0 operation and its beta
+    # sibling share a PathTemplate and differ only by ApiVersion. Taking the first match would
+    # report a version gap that does not exist, so prefer the descriptor whose ApiVersion is
+    # the one IHA actually calls.
+    $candidates = @($catalogPaths | Where-Object { $_.Comparable -eq $entry.Comparable })
+    $match = $candidates | Where-Object { $_.ApiVersion -eq $entry.ApiVersion } | Select-Object -First 1
+    if ($null -eq $match) { $match = $candidates | Select-Object -First 1 }
 
     # A path match is not coverage on its own. GraphKit pins API version per operation, so a
     # v1.0 descriptor does not serve a caller reading beta - and IHA reads beta for most of

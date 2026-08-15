@@ -307,3 +307,74 @@ Describe 'Singleton.Default strategy' {
         $calls[0] | Should -Be 'https://graph.microsoft.com/beta/deviceManagement/settings'
     }
 }
+
+Describe 'Descriptor-declared ResponseKind' {
+
+    BeforeAll {
+        # Intune's report endpoints return a JSON document under 'application/octet-stream'.
+        # The transport classifies by Content-Type and correctly calls that binary, so the
+        # caller got a byte dump where the descriptor promised Json. The descriptor is the
+        # authority on operation behaviour, so it wins - but only ever to upgrade bytes that
+        # actually sniff as JSON.
+        $script:JsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"TotalRowCount":80,"Values":[]}')
+
+        function New-ResultWithData {
+            param($Data)
+            [PSCustomObject]@{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = $Data
+                Outcome    = 'Succeeded'
+                Certainty  = 'Known'
+                Telemetry  = @()
+                Provenance = @{}
+            }
+        }
+    }
+
+    It 'parses a byte[] body when the descriptor declares Json' {
+        $out = InModuleScope GraphKit -Parameters @{ B = $script:JsonBytes } {
+            ConvertTo-GraphDeclaredResponseKind -Result ([PSCustomObject]@{ Data = $B }) -Descriptor @{ ResponseKind = 'Json' }
+        }
+        $out.Data['TotalRowCount'] | Should -Be 80
+    }
+
+    It 'parses an Object[] of bytes, which is how the body actually arrives' {
+        # Regression: the first version of this check tested only for [byte[]] and silently
+        # missed every real response, because PowerShell unrolls an array returned through
+        # the pipeline into Object[].
+        # Built explicitly as object[]; piping an array to Should -BeOfType would unroll it
+        # and assert on its first element instead of the array.
+        [object[]] $asObjectArray = @($script:JsonBytes | ForEach-Object { $_ })
+        ($asObjectArray -is [object[]]) | Should -BeTrue -Because 'the fixture must reproduce the unrolled shape'
+
+        $out = InModuleScope GraphKit -Parameters @{ B = $asObjectArray } {
+            ConvertTo-GraphDeclaredResponseKind -Result ([PSCustomObject]@{ Data = $B }) -Descriptor @{ ResponseKind = 'Json' }
+        }
+        $out.Data['TotalRowCount'] | Should -Be 80
+    }
+
+    It 'leaves a Binary descriptor untouched' {
+        # DeviceReport.Export downloads a file. Sniffing globally would corrupt it.
+        $out = InModuleScope GraphKit -Parameters @{ B = $script:JsonBytes } {
+            ConvertTo-GraphDeclaredResponseKind -Result ([PSCustomObject]@{ Data = $B }) -Descriptor @{ ResponseKind = 'Binary' }
+        }
+        ($out.Data -is [byte[]]) | Should -BeTrue
+    }
+
+    It 'leaves non-JSON bytes alone even when the descriptor declares Json' {
+        # Declared Json but the payload is not JSON: guessing further would replace a
+        # recoverable payload with a wrong one.
+        $notJson = [System.Text.Encoding]::UTF8.GetBytes('PK<binary zip content>')
+        $out = InModuleScope GraphKit -Parameters @{ B = $notJson } {
+            ConvertTo-GraphDeclaredResponseKind -Result ([PSCustomObject]@{ Data = $B }) -Descriptor @{ ResponseKind = 'Json' }
+        }
+        ($out.Data -is [byte[]]) | Should -BeTrue
+    }
+
+    It 'leaves an already-parsed body alone' {
+        $out = InModuleScope GraphKit {
+            ConvertTo-GraphDeclaredResponseKind -Result ([PSCustomObject]@{ Data = @{ already = 'parsed' } }) -Descriptor @{ ResponseKind = 'Json' }
+        }
+        $out.Data['already'] | Should -Be 'parsed'
+    }
+}

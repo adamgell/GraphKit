@@ -36,11 +36,16 @@ function Invoke-GraphHandlerStrategy {
 
     $handler = Resolve-GraphHandlerStrategy -Id $Descriptor.HandlerStrategyId
 
+    # Applied once here rather than in each strategy, so every operation gets the descriptor's
+    # declared response kind honoured regardless of which handler served it.
     if ($PSBoundParameters.ContainsKey('IntendedState')) {
-        return & $handler -Context $Context -Descriptor $Descriptor -Parameters $Parameters -Transport $Transport -IntendedState $IntendedState
+        $result = & $handler -Context $Context -Descriptor $Descriptor -Parameters $Parameters -Transport $Transport -IntendedState $IntendedState
+    }
+    else {
+        $result = & $handler -Context $Context -Descriptor $Descriptor -Parameters $Parameters -Transport $Transport
     }
 
-    return & $handler -Context $Context -Descriptor $Descriptor -Parameters $Parameters -Transport $Transport
+    return ConvertTo-GraphDeclaredResponseKind -Result $result -Descriptor $Descriptor
 }
 
 <#
@@ -95,6 +100,70 @@ function Get-GraphRequestHeaders {
 }
 
 # --- v1 handler strategies ---------------------------------------------------
+
+<#
+    Apply the descriptor's declared ResponseKind to a transport result.
+
+    The transport decides how to decode a body from the Content-Type header, which is right
+    for the general case and wrong whenever a service mislabels its own response. Intune's
+    report endpoints do exactly that: POST /deviceManagement/reports/* returns a JSON document
+    under 'application/octet-stream', so the transport correctly classifies it as binary and
+    the caller receives a byte[] where the descriptor promised Json.
+
+    The descriptor is the authority on operation behaviour, so it wins here. This only ever
+    upgrades bytes to parsed JSON when the descriptor asked for Json AND the payload actually
+    sniffs as JSON; a descriptor declaring Binary is never touched, so DeviceReport.Export
+    still gets its bytes. If the descriptor says Json and the payload is not JSON, the bytes
+    are left alone rather than being mangled into a wrong shape.
+#>
+function ConvertTo-GraphDeclaredResponseKind {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        $Result,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Descriptor
+    )
+
+    if ($null -eq $Result) { return $Result }
+    if ([string] $Descriptor.ResponseKind -ne 'Json') { return $Result }
+
+    $data = $Result.Data
+    if ($null -eq $data) { return $Result }
+
+    # The body may arrive as a genuine byte[] or as an Object[] of bytes: PowerShell unrolls
+    # an array returned through the pipeline, so the strongly-typed check alone silently
+    # misses the common case. Accept both, and nothing else.
+    [byte[]] $bytes = $null
+    if ($data -is [byte[]]) {
+        $bytes = $data
+    }
+    elseif ($data -is [System.Array] -and $data.Count -gt 0 -and $data[0] -is [byte]) {
+        $bytes = [byte[]] $data
+    }
+    else {
+        return $Result
+    }
+
+    if ($bytes.Length -eq 0) { return $Result }
+
+    try {
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes).Trim()
+        if ($text.Length -eq 0) { return $Result }
+        if ($text[0] -ne '{' -and $text[0] -ne '[') { return $Result }
+
+        $Result.Data = ConvertFrom-Json -InputObject $text -AsHashtable -ErrorAction Stop
+    }
+    catch {
+        # Declared Json, did not parse. Leave the bytes intact: guessing further would
+        # replace a recoverable payload with a wrong one.
+        Write-Verbose ('Declared-Json body did not parse; leaving raw bytes: {0}' -f $_.Exception.Message)
+    }
+
+    return $Result
+}
 
 $script:CollectionDefaultStrategy = {
     param($Context, $Descriptor, $Parameters, $Transport)
