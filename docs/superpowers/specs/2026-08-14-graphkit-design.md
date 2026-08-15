@@ -184,8 +184,7 @@ This is not a return to hand-rolled OAuth. MSAL performs the protocol and the cr
 performs HTTP. It is also the boundary the external reviews independently recommended for
 delegated auth — it turns out to be correct for app-only as well.
 
-**Cost accepted:** GraphKit owns an `HttpClient` and its lifetime. This is bounded and directly
-testable, and the injected-transport / virtual-clock test architecture already assumes it.
+**Cost accepted:** GraphKit owns one module/session-scoped `HttpClient` backed by a `SocketsHttpHandler`. The handler disables automatic redirects and cookies, uses a finite `PooledConnectionLifetime`, and never stores authorization in default headers. Contexts are immutable, non-owning values that share this transport; caller-injected certificates and token providers are never disposed by GraphKit. Module teardown disposes the shared transport after in-flight operations finish. The transport remains directly testable through the injected sender used by the virtual-clock tests.
 
 #### MSAL sourcing and the assembly-coexistence hazard
 
@@ -235,22 +234,34 @@ accommodate it now rather than being retrofitted.
 
 A small compiled adapter owns the MSAL boundary outright:
 
-- References an **explicit `Microsoft.Identity.Client` package version**, resolved at build time
-  rather than discovered at runtime.
+`GraphKit.Auth` is the much-later end-state boundary, not a v1 dependency. In v1, the transitive
+MSAL delivery contract above remains in force; the isolated adapter below is recorded for the
+future migration only.
+
+The end-state adapter:
+
+- References an **explicit `Microsoft.Identity.Client` package version**, resolved at build time.
 - Loads that MSAL into an **isolated `AssemblyLoadContext`**, so GraphKit's version is unaffected
   by whatever `Az.Accounts`, the Graph SDK, or PSResourceGet loaded first, and GraphKit does not
-  perturb theirs. This is the pattern `Az.Accounts` already uses for its own dependency isolation.
-- Exposes **only GraphKit-owned request and result types**. No MSAL type crosses the boundary,
-  which is what keeps the ALC isolation intact — types leaking across contexts is the standard way
-  this pattern fails.
-- Removes `Microsoft.Graph.Authentication` as a runtime dependency entirely.
+  perturb theirs.
+- Exposes **only GraphKit-owned request and result types**. No MSAL type crosses the boundary.
+- Removes `Microsoft.Graph.Authentication` as a runtime dependency only after the v1 migration
+  gate succeeds.
 
 #### Contract
 
 ```text
-GraphTokenRequest    Authority, ClientId, Resource/Scopes, Credential, ForceRefresh, Cancellation
-GraphTokenResult     AccessToken, ExpiresOnUtc, TokenType, Scopes, VerifiedTenantId
+GraphTokenRequest    Environment, TenantId, Authority, GraphResource/.default,
+                     ClientId, AuthMode, Credential, CredentialGeneration,
+                     ForceRefresh, Cancellation
+GraphTokenResult     AccessToken, ExpiresOnUtc, TokenType, Scopes,
+                     VerifiedTenantId, TokenFingerprint, CredentialGeneration
 ```
+
+`TokenFingerprint` is a non-exported, collision-resistant fingerprint of the exact bearer
+value. It is used only to bind verification and cache generations; it is never logged, exported,
+or used as a credential substitute. `CredentialGeneration` changes when a vault version,
+certificate, provider generation, or fixed bearer value changes.
 
 `Credential` is a discriminated shape mirroring the profile schema: certificate (as
 `X509Certificate2`, a framework type available in both contexts), client secret, managed identity
@@ -290,19 +301,25 @@ MSAL. Any of those turns the interim from tolerable into broken.
 #### Token cache
 
 In-memory, per context, never persisted. Client-credentials flows return no refresh token: an
-expired access token is replaced by reacquiring with the source credential, which is already in
+expired token is replaced by reacquiring with the source credential, which is already in
 SecretManagement. Persisting app-only access tokens adds theft and stale-cache risk for no gain.
 
-Single-flight acquisition per cache key: the first caller acquires, others await the same result,
-a failure surfaces to all waiters and is not cached for long. Without this, ten runspaces
-starting together request ten identical tokens and trigger Entra's own throttling — Microsoft
-describes "loop detected" errors as that symptom. **Token acquisition therefore gets its own
-throttle scope,** distinct from Graph request scopes.
+Single-flight acquisition per **canonical acquisition tuple**: the first caller acquires, others
+await the same result, a failure surfaces to all waiters and is not cached for long. The tuple is
+`Environment | TenantId | Authority | GraphResource/.default | ClientId | AuthMode |
+ManagedIdentitySelectorOrProviderIdentity | CredentialGeneration`. Normalize GUIDs, hosts,
+resource/scope ordering, and case before keying. A change in any component creates a new cache
+generation; no token may cross tuple boundaries.
 
-Refresh timing uses the token endpoint response (`ReceivedAtUtc + ExpiresIn`), **not** the JWT
-`exp` claim — Microsoft states Graph access tokens are resource-owned and clients must not depend
-on their internal format. Skew is adaptive, `min(5 min, max(60 s, 10% of lifetime))`, with a small
-random spread so fifteen contexts do not all reacquire at the same instant after a bulk connect.
+Without single-flight, ten runspaces starting together request ten identical tokens and trigger
+Entra's own throttling — Microsoft describes "loop detected" errors as that symptom. Token
+acquisition therefore gets its own throttle scope, distinct from Graph request scopes.
+
+Refresh timing uses the supported MSAL `AuthenticationResult.ExpiresOn` value, not a raw
+`expires_in` field and never the JWT `exp` claim. Provider sources return their own explicit
+`ExpiresOnUtc` when available. Acquisition start/completion timestamps may add conservative
+skew, `min(5 min, max(60 s, 10% of lifetime))`, with a small random spread so fifteen contexts
+do not all reacquire at the same instant after a bulk connect.
 
 Wall-clock UTC governs token expiry; **monotonic elapsed time governs retry budgets and
 deadlines**, so a clock change mid-session cannot extend a five-minute budget.
@@ -311,17 +328,22 @@ deadlines**, so a clock change mid-session cannot extend a five-minute budget.
 
 Because nothing is process-global, no connection coordinator, lease manager, or session
 generation is required. A context is an immutable value resolved before parallel work begins and
-passed into each runspace. Correctness comes from the absence of shared mutable state rather than
-from locking around it.
+passed into each runspace. Correctness comes from the absence of shared mutable identity state
+rather than from locking around a singleton connection.
 
-Simultaneous multi-tenant contexts are now *structurally* possible. They remain **out of scope
-for v1** as a deliberate scope limit, not a technical one.
+**Simultaneous low-level contexts for different tenants are supported in v1.** Each context has
+its own token source, acquisition tuple, verification state, and cache generation; concurrent
+requests must not share bearer values or tenant provenance. High-level cross-tenant comparison
+and orchestration commands remain out of scope for v1.
 
 ### Bearer tokens are caller-owned
 
-GraphKit may hold an externally supplied bearer token but must never claim it can refresh one.
-The profile exposes a token provider or SecretManagement reference. A caller-supplied expiry is
-honored; absence of one means "try it, then return a clear authentication failure."
+GraphKit may hold an externally supplied bearer token or provider but must never claim a fixed
+token can refresh. A provider may refresh only through its explicit `Acquire` contract; every
+replacement is treated as a new token generation and reverified before any operation that needs
+tenant-bound identity. A caller-supplied expiry is honored; absence of one means an unverified
+read can be attempted only when its descriptor explicitly permits it, followed by a clear
+authentication failure for any operation requiring verified identity.
 
 ## Scope
 
@@ -354,16 +376,25 @@ proven).
 ### Repository
 
 New private repo at `~/repo/GraphKit` → `github.com/adamgell/GraphKit`, scaffolded with
-**Sampler** (`New-SampleModule -ModuleType SimpleModule`).
+**Sampler**. Scaffolding ran 2026-08-15 by invoking the underlying Plaster template directly
+with its full parameter set, into a temp directory that was then merged, because the repo
+already contained `docs/`, `scripts/`, and tests.
 
 Verified against Sampler 0.120.1 on 2026-08-14:
 
 - **Pester 6 is compatible.** Version gates are lower-bound only (`>= 5.0.0`), and Sampler
   references none of the options v6 removed — no `CoverageGutters`, no `UseBreakpoints`, no
   `FailOnNullOrEmptyForEach`. Coverage is JaCoCo, which v6 retains.
-- **`New-SampleModule` cannot run non-interactively.** Its Plaster template prompts
-  "Will you use Git for source control?" unconditionally and fails outright in a
-  non-interactive host. Scaffolding is a one-time manual step and must not be scripted.
+- **`New-SampleModule` itself cannot run non-interactively.** The prompt that blocks it
+  ("Will you use Git for source control?") comes from a `UseGit` Plaster template parameter
+  the wrapper never exposes. Invoking the Plaster template directly with the full parameter
+  set scaffolds unattended, so the earlier claim that scaffolding "must not be scripted" was
+  wrong; it was corrected at scaffold time.
+- The scaffold was aligned with this design rather than left at template defaults:
+  `SourceDirectory = 'source'` (not `src`), PowerShell 7.4 floor (not 5.0), both runtime
+  modules declared in `RequiredModules`, `build.yaml` `CopyPaths` covering `Data/` and
+  `Formats/`, and `FormatsToProcess` registering `GraphKit.Format.ps1xml`. The license was
+  left unset rather than asserting one on a private repo.
 - Sampler pins **ModuleBuilder 3.1.8**; do not upgrade it independently.
 
 *Recorded dissent:* external review recommended a hand-rolled InvokeBuild pipeline instead,
@@ -415,30 +446,49 @@ A mutable "current profile" must not be the sole source of truth — a profile s
 runspace would silently retarget work in another.
 
 - **Profile** — persisted non-secret metadata plus SecretManagement references.
-- **Context** — an *immutable* runtime object: resolved tenant, cloud, Graph base URI, client ID,
-  credential fingerprint, cache key.
-- **Current context** — an interactive convenience only.
+- **Context** — an immutable runtime value resolved before asynchronous work. It owns an
+  `IGraphTokenSource` reference but never stores a bearer token in the profile metadata.
+- **Current context** — an interactive convenience only; it is never consulted by low-level work
+  after a context has been resolved.
 
-Every low-level command accepts `-Context` or `-ProfileName`, resolved **before** entering
-parallel work:
+Formal Context contract:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `ProfileId` | string | Canonical profile identity |
+| `TenantId` | GUID | Target tenant, normalized |
+| `Cloud` | enum | `Global`, `China`, `Germany`, `USGov`, `USGovDoD` |
+| `GraphBaseUri` | URI | Derived only from the cloud table |
+| `ClientId` | GUID? | Null for fixed bearer or system-assigned managed identity when no client ID exists |
+| `TokenSource` | `IGraphTokenSource` | Per-context source; owns cache/single-flight state |
+| `CredentialFingerprint` | string | Non-secret credential-generation identifier, distinct from bearer fingerprint |
+| `AcquisitionCacheKey` | string | Canonical tuple key; never caller-supplied |
+| `IdentityState` | enum | `VerifiedForToken`, `Unverified`, or `NotAcquired` |
+
+`IdentityState` is a summary only. Authorization decisions use the `GraphTokenResult` returned by
+the current acquisition, including its `TokenFingerprint`, `CredentialGeneration`, and
+`VerifiedTenantId`; verification is never treated as an immutable context fact.
+
+Every low-level command accepts `-Context` or `-ProfileId`, resolved before entering parallel
+work. `-ProfileId` accepts the canonical `ProfileId` only; display `Name` is never a selector.
 
 ```powershell
-$context = Get-GraphContext -ProfileName ivy24
+$context = Get-GraphContext -ProfileId ivy24
 Get-GraphObject -Context $context -Type ManagedDevice
 ```
 
-Profile metadata in `~/.graphkit/profiles.json`; secrets in
-`Microsoft.PowerShell.SecretManagement` under `GraphKit:<name>`.
+Profile metadata in `~/.graphkit/profiles.json`; secrets are keyed by `GraphKit:<ProfileId>` plus
+credential slot/version under `Microsoft.PowerShell.SecretManagement`.
 
 | Field | Notes |
 | --- | --- |
-| `ProfileId` | **Path-safe canonical identifier** — `^[a-z0-9][a-z0-9-]{0,63}$`. The only value ever used to build a filesystem path. |
-| `Name` | Display name and, when `Kind = customer`, the vault customer tag. **Never used as a path segment.** |
+| `ProfileId` | **Path-safe canonical identifier** — `^[a-z0-9][a-z0-9-]{0,63}$`. The only value ever used to build a filesystem path or select a profile. |
+| `Name` | Display name and, when `Kind = customer`, the vault customer tag. **Never used as a selector or path segment.** |
 | `Kind` | `customer` \| `lab` \| `internal` |
-| `TenantId`, `ClientId` | |
+| `TenantId`, `ClientId` | Canonical GUIDs; `ClientId` may be null for fixed bearer or system-assigned managed identity. |
 | `AuthMethod` | `Certificate` \| `ClientSecret` \| `BearerToken` \| `ManagedIdentity` |
 | `Environment` | `Global` \| `China` \| `Germany` \| `USGov` \| `USGovDoD` |
-| `Credential` | **Discriminated by `AuthMethod`** — see below. A single generic `CredentialRef` cannot express the required variants. |
+| `Credential` | **Discriminated by `AuthMethod`** — see the persisted shapes below. |
 
 Persisted credential shapes, one schema per `AuthMethod`:
 
@@ -479,12 +529,16 @@ auth modes do not share one acquisition API — managed identity uses
 `ConfidentialClientApplicationBuilder` / `AcquireTokenForClient` — and a fixed bearer token cannot
 be refreshed at all.
 
-| Member | |
+| Member | Contract |
 | --- | --- |
-| `Acquire(forceRefresh, cancellation)` | |
-| `CanRefresh` | False for fixed bearer tokens |
-| `AuthMode`, `Audience`, `ClientId`, `ExpiresOn` | |
-| `VerifiedTenantId` | The tenant the credential was **proven** to belong to, or null |
+| `Acquire(forceRefresh, cancellation)` | Returns a `GraphTokenResult`; `forceRefresh` bypasses the access-token cache for refreshable sources |
+| `CanRefresh` | `False` for fixed bearer tokens |
+| `AuthMode`, `Audience`, `ClientId`, `ExpiresOn` | Source metadata; `Audience` is the cloud-specific Graph resource with `/.default` for app-only acquisition |
+| `VerifiedTenantId` | Tenant proven for the current token, or null; not valid without the current result fingerprint |
+| `CredentialGeneration` | Changes whenever the underlying credential, vault version, certificate, or provider generation changes |
+
+The token source is non-owning for caller-injected certificates and providers. GraphKit disposes
+only resources it created while resolving persisted credentials.
 
 Separate implementations for confidential-client, managed-identity, provider, and fixed-bearer.
 The single `401` force-refresh applies only when `CanRefresh`; a fixed bearer token fails
@@ -496,12 +550,22 @@ addresses. A Tenant B token attached to a Tenant A profile would succeed against
 result, telemetry record, and evidence page was stamped Tenant A — the same silent cross-tenant
 contamination the SDK transport was rejected for. Therefore:
 
-- `Context.VerifiedTenantId` must equal the target tenant immediately before **every write**.
-- Unverified bearer contexts are rejected for permission mutation and for tenant-stamped evidence.
+- Tenant proof is bound to the **current `GraphTokenResult`**, not merely to the immutable context.
+  GraphKit performs the proof call and associates `VerifiedTenantId` with that result's
+  `TokenFingerprint` and `CredentialGeneration`. A refresh returning a different token invalidates
+  the prior proof before any send.
+- The transport acquires or receives the current result immediately before a mutating send and
+  requires `GraphTokenResult.VerifiedTenantId == TargetTenantId`; it also requires the same proof
+  before stamping target-tenant provenance or writing tenant-scoped evidence. A provider's claim
+  that a token is valid is never proof.
+- Unverified bearer contexts are rejected for permission mutation and tenant-stamped evidence.
 - Unverifiable fixed bearer tokens are restricted to operations explicitly marked read-only and
-  unverified.
+  unverified; such results carry `IdentityState = Unverified`, `ActualTenantId = $null`, and cannot
+  be exported as tenant-attributed evidence.
 - **JWT claims are never authoritative identity** — verification comes from a Graph call made with
   the token, not from decoding it.
+- Verification is cached only for the exact token fingerprint/generation. A different bearer,
+  credential generation, tenant, audience, or cloud invalidates it.
 
 **Migration is a first-class command.** `Register-GraphTenant -FromLegacyConfig` imports IHA's
 `config/secrets.json` tenant array and the `Start-WithConsole *.cmd` launchers, moving secrets
@@ -556,12 +620,19 @@ references them.
     RequestBodyKind      = 'MobileAppAssignmentSet'
     ResponseKind         = 'NoContent'
     PagingStrategy       = 'None'
+    RequiredPagingHeaders = @()
+    DeduplicationKey     = $null
+    SupportsAll          = $false
+    SupportsDelta        = $false
     ReplayPolicy         = 'NeverReplay'     # intrinsic - see below
+    Condition            = $null             # required for Conditional
     Reconciliation       = $null
     AdvancedQuery        = @{ Supported = $false }
-    Concurrency          = @{ Mode = 'None' }
+    Concurrency          = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
     CredentialPolicy     = 'GraphBearer'     # GraphBearer|None
     AllowedHosts         = @()               # required and non-empty when CredentialPolicy = None
+    RedirectPolicy       = 'None'            # None|SafeGetOnly
+    IdentityRequirement  = 'Verified'        # Verified|AllowUnverifiedRead
     ResourceFamily       = 'Intune.MobileApps'
     ThrottleClass        = 'Write'           # Read|Write
     SupportedAuthModes   = @('Certificate','ClientSecret','ManagedIdentity')
@@ -574,12 +645,30 @@ references them.
 ```
 
 **Cross-field validation** runs in the loader, not at call time: `CredentialPolicy = None`
-requires a non-empty `AllowedHosts`; `BetaPreferred`/`BetaOnly` require a `BetaReason`;
-`ReplayPolicy = Reconciliable` requires a `Reconciliation` block; an `ApiVersion` of `beta`
-requires a matching `Stability`. Descriptors are versioned by `SchemaVersion` so the loader can
-reject or migrate rather than silently misread.
+requires a non-empty `AllowedHosts` and HTTPS-only production URLs; `BetaPreferred`/`BetaOnly`
+require a `BetaReason`; `ReplayPolicy = Reconciliable` requires a `Reconciliation` block;
+`ReplayPolicy = Conditional` requires a `Condition` block naming the permitted method,
+precondition, and response/transport cases; an `ApiVersion` of `beta` requires a matching
+`Stability`. `IdentityRequirement = AllowUnverifiedRead` requires `ThrottleClass = Read`,
+`ReplayPolicy = Safe`, `CredentialPolicy = GraphBearer`, and no tenant-attributed evidence.
+Descriptors are versioned by `SchemaVersion` so the loader can reject or migrate rather than
+silently misread.
 
-#### Replay policy is intrinsic; certainty is per attempt
+`PagingStrategy = NextLink` additionally requires `RequiredPagingHeaders`, `DeduplicationKey`,
+`SupportsAll`, and `SupportsDelta`; `Concurrency` always has `Mode`, `Header`, `Required`, and
+`AllowWildcard` keys, using null/false values when `Mode = None`. The full field shapes are part
+of the schema even when a descriptor does not use them.
+
+#### Handler strategy registry
+
+Strategy IDs follow `<OperationKind>.<StrategyName>`, for example `Collection.Default`,
+`Action.Default`, and `LongRunningJob.PollStatus`. The loader resolves every ID against a closed
+v1 registry before accepting a descriptor. Strategies are registered by private module code, never
+from descriptor files, and receive `($Context, $Descriptor, $Parameters, $Transport)`; a
+reconciliation strategy additionally receives `$IntendedState` and may use only the supplied
+read delegate. Unknown IDs, wrong operation-kind prefixes, or invalid handler results fail catalog
+validation. v1 registers `Collection.Default`, `Action.Default`,
+`Reconciliation.StableExternalKey`, and `LongRunningJob.PollStatus`.
 
 The earlier draft stored a single `RetrySafety` value such as `AmbiguousCommit`, which conflated
 two different facts and contradicted the retry matrix below. **The same POST is not always
@@ -661,9 +750,9 @@ additionally require:
 ### Request pipeline
 
 `Invoke-GraphRequest` issues requests through a GraphKit-owned `HttpClient` using a token from
-the context's MSAL client. **GraphKit is the sole retry owner** — there is no underlying handler
-that can retry behind its back, which is what makes the replay guarantees below enforceable
-rather than aspirational.
+the context's `IGraphTokenSource`. **GraphKit is the sole retry owner** — there is no underlying
+handler that can retry behind its back, which is what makes the replay guarantees below
+enforceable rather than aspirational.
 
 A contract test asserts that **one GraphKit attempt produces exactly one physical send**.
 
@@ -672,12 +761,10 @@ A contract test asserts that **one GraphKit attempt produces exactly one physica
 Bearer tokens are attached by the transport, and **nothing in the pipeline can opt out of the
 check** — including `-Raw`. Descriptor validation is bypassable; credential policy is not.
 
-Every request carries a `CredentialPolicy`:
-
 | Policy | Meaning |
 | --- | --- |
-| `GraphBearer` | Attach the context's Graph token. Requires HTTPS **and** an exact match against the cloud-specific Graph authority for that context. |
-| `None` | Send with no credential. Used for report downloads and any other external transfer. |
+| `GraphBearer` | Attach the current result's Graph token. Requires HTTPS and an exact match against the cloud-specific Graph authority for that context. |
+| `None` | Send with no credential. Used for report downloads and any other external transfer; production URLs still require HTTPS. |
 
 Rules:
 
@@ -686,14 +773,16 @@ Rules:
 - **`@odata.nextLink` is opaque but not trusted** — validate scheme and authority before
   attaching a token.
 - **Report download URLs are `None`.** Intune export jobs return SAS-signed Azure blob URLs on a
-  non-Graph host. Sending them a Graph bearer token would leak it to storage; they carry their
-  own signed authorization. Hosts are allowlisted per operation.
-- **Redirects are disabled by default.** If an operation must follow one, every hop is validated
-  before credentials are forwarded. Automatic redirect-following with a bearer token attached is
-  a token-exfiltration primitive.
+  non-Graph host. Sending them a Graph bearer token would leak it to storage; they carry their own
+  signed authorization. Hosts are allowlisted per operation and must be HTTPS.
+- **Redirects are disabled by default.** In v1, only `SafeGetOnly` operations may follow validated
+  redirects, including credential-free downloads. Mutating methods never follow a redirect with a
+  second physical send; they surface the redirect as a non-success result. Every followed hop must
+  remain HTTPS, satisfy the policy, and stay within the descriptor allowlist.
 - **Query strings are stripped from telemetry by default.** SAS URLs carry their signature in the
-  query; logging it would persist a live credential into evidence output. Only an allowlist of
-  known-safe OData parameters is retained.
+  query; logging it would persist a live credential into evidence output. Only parameter names and
+  explicitly value-safe OData values are retained. `$filter`, `$search`, and caller-provided values
+  are redacted.
 
 A failure here is a hard error naming the offending authority — never a silent downgrade to an
 unauthenticated request, and never a silent send.
@@ -791,23 +880,27 @@ bulk extraction the documented answer is Graph Data Connect, out of scope here.
 #### Throttle state must be scoped, not global
 
 Graph enforces overlapping service, tenant, application, tenant+application, operation, and
-request-type limits, and writes are more constrained than reads. **One process-wide backoff
-timestamp is wrong** — it lets an Intune write throttle in Tenant A freeze Entra reads in
-Tenant B, while failing to coordinate calls that actually share a quota.
+request-type limits, and writes are more constrained than reads. One process-wide backoff timestamp
+is wrong. GraphKit uses a hierarchy:
 
-State key:
+1. **Coarse gate:** `Cloud | TenantId | ClientId | Read|Write`, coordinating limits shared across
+   resource families.
+2. **Leaf gate:** `Cloud | TenantId | ClientId | ResourceFamily | Read|Write`, coordinating tighter
+   family limits.
+
+Every request consults both and waits for the strictest active cooldown/admission limit. An
+unqualified `429` or `503` updates the coarse gate; reliable response metadata may additionally
+update a leaf gate. Tenant B remains independent of Tenant A, while two families sharing a Tenant A
+client gate pause together. This is an engineering approximation of Microsoft's overlapping quota
+dimensions and remains tunable.
 
 ```
+Cloud | TenantId | ClientId | Read|Write
 Cloud | TenantId | ClientId | ResourceFamily | Read|Write
-
-Global|tenant-A|app-1|Intune.DeviceConfiguration|Write
-Global|tenant-A|app-1|Entra.Directory|Read
-Global|tenant-B|app-1|Intune.Reporting|Read
 ```
 
-*This key structure is an engineering inference.* Microsoft does not publish a universal
-quota-key algorithm; it is closer to the documented limit dimensions than one global state, and
-should be treated as tunable.
+Token acquisition has a separate authority/resource/auth-mode gate. Cross-process fairness remains
+out of scope; the v1 tests cover both cross-tenant isolation and shared coarse-gate coordination.
 
 **Token acquisition gets its own throttle scope.** Repeated token requests are themselves
 throttled; Microsoft describes "loop detected" errors as the symptom.
@@ -861,11 +954,12 @@ returning a structured result including an explicit "deadline expired while thro
 rather than throwing "maximum retries exceeded".
 
 Per attempt, capture for support cases: logical operation ID, client request ID, response request
-ID, response `Date`, `x-ms-ags-diagnostic`, tenant and profile name (**never secrets or bearer
-tokens**), endpoint family, sanitized URI, attempt number, status and Graph inner-error chain,
-calculated delay *and its source*, current concurrency limit, batch subrequest ID, and whether
-the final state is **known, failed, or indeterminate**. Telemetry is a first-class result object,
-not verbose text.
+ID, response `Date`, `x-ms-ags-diagnostic`, verified tenant and profile ID (**never secrets or
+bearer tokens**), endpoint family, sanitized URI, attempt number, status and a structurally
+allowlisted Graph error code/inner-error chain, calculated delay and its source, current concurrency
+limit, batch subrequest ID, and whether the final state is known, failed, or indeterminate.
+Sanitize query values and free-form error messages before constructing telemetry; JSON export
+preserves only this sanitized telemetry. Telemetry is a first-class result object, not verbose text.
 
 ### One canonical result contract
 
@@ -881,7 +975,7 @@ There is exactly one envelope, `GraphKit.OperationResult`:
 | `Outcome` | `Succeeded` \| `Failed` \| `DeadlineExpired` \| `Cancelled` |
 | `Certainty` | `Known` \| `Indeterminate` — an ambiguous write is `Failed` + `Indeterminate` |
 | `Telemetry` | Per-attempt evidence, as above |
-| `Provenance` | Tenant, API version, endpoint family, retrieval time |
+| `Provenance` | Tenant, API version, endpoint family, retrieval time, `IdentityState`, and `ActualTenantId` when verified |
 
 - `Invoke-GraphRequest` **always** returns exactly one envelope.
 - **`Invoke-GraphBatch` returns one ordered envelope per original subrequest**, not one envelope
@@ -1143,20 +1237,27 @@ have — and 7.4 is the declared floor, so it is the row most likely to drift.
 
 ### Build and delivery commands
 
-The phase gates require an exact command per increment; prose conditions are not gates. These are
-canonical:
+The scaffold committed 2026-08-15 defines these canonical commands; CI and local verification
+must call the same entry points:
 
 | Step | Command |
 | --- | --- |
-| Restore dependencies | `./build.ps1 -ResolveDependency -Tasks noop` |
-| Build | `./build.ps1 -Tasks build` |
-| Deterministic tests | `./build.ps1 -Tasks test` |
-| Package | `./build.ps1 -Tasks pack` |
-| Register a temporary local repo | `Register-PSResourceRepository -Name GraphKitLocal -Uri <path> -Trusted` |
-| Install the exact package | `Install-PSResource GraphKit -Version <exact> -Repository GraphKitLocal -TrustRepository` |
-| Installed-package smoke | fresh `pwsh`, `Import-Module GraphKit`, assert operation data and default views |
-| Publish | `Publish-PSResource -Path <packaged> -Repository GraphKitPrivate` |
-| Pin in IHA | `RequiredModules = @(@{ModuleName='GraphKit'; RequiredVersion='<exact>'})` |
+| Resolve build dependencies | `./build.ps1 -ResolveDependency -Tasks noop` |
+| Build | `./build.ps1 -Tasks build` (Clean, `Build_Module_ModuleBuilder`, changelog release output) |
+| Deterministic tests | `./build.ps1 -Tasks test` (`Pester_Tests_Stop_On_Fail` + coverage threshold) |
+| Package | `./build.ps1 -Tasks pack` (build, then `package_module_nupkg`) |
+| Phase 1.1 gate | `Invoke-Pester ./tests/QA/BuiltModule.tests.ps1` against the built module in a clean `pwsh` |
+| CBA script tests | `Invoke-Pester ./tests/New-ClientServicePrincipalCBA.Tests.ps1 -Output Detailed` |
+
+The remaining delivery gates are contracts for later phases, not runnable yet:
+
+| Gate requirement | Required contract |
+| --- | --- |
+| Clean install | Install GraphKit and its exact runtime dependencies into an isolated module path; file repositories do not resolve dependency metadata |
+| Installed-package smoke | Fresh `pwsh` asserts exact PowerShell version, imports the installed package, and verifies operation data and default views |
+| Protected live contract | A committed protected workflow/task accepts the tested package digest, installs that exact digest, performs read/mutation/cleanup, and gates promotion |
+| Publication | Promote the tested `.nupkg` bytes with the package-file parameter supported by the selected PSResourceGet version; verify the published hash |
+| IHA pinning | Install the exact GraphKit version on every execution host before repointing callers; use `RequiredVersion`, not a minimum |
 
 **Gates test the installed package, never loose `output/` files.** A module that imports from
 `output/` can still fail once packaged — missing `CopyPaths` assets and unregistered
@@ -1188,7 +1289,7 @@ artifact, and an observable pass condition before the next begins.
 
 | # | Increment | Gate |
 | --- | --- | --- |
-| 1.1 | Sampler scaffold and packaging | Distributable package **installed from a temporary repository** imports in a fresh `pwsh`; default views registered; non-code assets present |
+| 1.1 | Sampler scaffold and packaging | **Complete 2026-08-15** — committed scaffold plus `tests/QA/BuiltModule.tests.ps1`, which imports the built package in a clean `pwsh` and asserts views, CopyPaths assets, and dependency declarations |
 | 1.2 | Descriptor schema, loader, validator, strategy registry, minimal Ivy24 descriptors | Invalid descriptors rejected with actionable errors; cross-field rules enforced; catalog round-trips |
 | 1.3 | Immutable context and `IGraphTokenSource` interfaces | Contexts resolve without any network call; token-source contract covers all four auth modes |
 | 1.4 | Normalized transport (`GraphTransportResult`), deadlines, retry engine | Deterministic virtual-clock tests: exact delays, delay-source precedence, no replay after 202, no replay of ambiguous POST, one GraphKit attempt equals one physical send |
@@ -1209,28 +1310,33 @@ tests the **installed package**, not loose files in `output/`.
 
 **4. Export.** `Export-GraphResult` and vault evidence.
 
-**5. Cutover and secret retirement — one ordered gate, not two phases.**
+**5. Cutover and secret retirement — one reversible, overlapping gate.**
 
-An earlier draft rotated the exposed secrets in phase 5 and repointed IntuneHealthAutomation in
-phase 6. That ordering invalidates credentials still in use by the `Start-WithConsole` launchers
-and by IHA's own duplicated authentication layer, breaking working tooling midway through the
-migration. Rotation must come *after* every caller is repointed and verified:
+An earlier draft rotated the exposed secrets before repointing IntuneHealthAutomation, invalidating
+credentials still in use by the `Start-WithConsole` launchers and IHA's duplicated authentication
+layer. The corrected order keeps every caller working at every step and can be rolled back:
 
 1. Inventory legacy callers — the launchers, IHA's authentication layer, any script holding a copy.
 2. Import profiles into SecretManagement (strict data-only parsing of the legacy files, dry-run
    inventory, then transactional import) and verify each profile connects.
 3. Publish GraphKit to a **private, versioned package channel** and pin it. Gallery publication
    stays out of scope, but the channel must exist before anything depends on it.
-4. Repoint every caller at GraphKit and delete IHA's duplicated layer.
-5. Verify reads, then controlled writes, through the repointed callers.
-6. **Only now** rotate the four exposed secrets.
-7. Remove the plaintext sources, with explicit operator confirmation, and delete the
-   `bearerTokens` example from `secrets.example.json`.
-8. Reverify every caller against the rotated credentials.
+4. Register the private repository and install the exact GraphKit version and runtime dependencies
+   on every IHA execution host; run the installed-package smoke before any caller changes.
+5. Repoint each caller while **keeping the previous IHA path and package pin intact**. Record the
+   previous module pin and caller wiring so one command can restore them until the rollback window
+   closes.
+6. Verify reads, then controlled writes, through the repointed callers.
+7. Create a **second credential without revoking the first**, store it in a new immutable vault
+   slot/version, and update profile references atomically. Verify every caller identifies the new
+   credential generation while the old one remains valid.
+8. Revoke the old credential only after the new generation is proven. Remove the plaintext sources
+   with explicit operator confirmation, delete the `bearerTokens` example from
+   `secrets.example.json`, reverify, then close the rollback window and delete the old IHA layer.
 
-If the full cutover cannot be completed in one pass, the acceptable alternative is to move legacy
-callers onto SecretManagement first and rotate afterwards. What is not acceptable is rotating
-while any caller still depends on the old secret.
+If any verification fails, stop and restore the previous pin/caller/vault reference. What is not
+acceptable is revoking a credential or deleting a caller path while any working caller still
+depends on it.
 
 Caching remains in IntuneHealthAutomation throughout.
 
@@ -1261,7 +1367,9 @@ tests and CI inject a stub.
   access tokens are short-lived, and persistence adds theft and stale-cache risk for no gain.
   In-memory only.
 - Cross-process throttle coordination.
-- Simultaneous multi-tenant contexts.
+- High-level cross-tenant comparison and orchestration commands. Simultaneous low-level contexts
+  for different tenants are supported in v1 and are covered by token-isolation and throttle tests;
+  they are not a v1 exclusion.
 - **`GraphKit.Auth`**, the compiled MSAL adapter with an isolated `AssemblyLoadContext`. It is the
   recorded end-state authentication boundary, deliberately deferred: v1 consumes MSAL transitively
   through `Microsoft.Graph.Authentication` as an accepted compatibility constraint, guarded by the
