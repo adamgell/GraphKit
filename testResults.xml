@@ -1,52 +1,47 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="11" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="03:19:23">
-  <environment nunit-version="2.5.8.0" os-version="25.4.0" user="Adam.Gell" machine-name="BigMac26.home.gell.one" user-domain="" cwd="/Users/Adam.Gell/repo/GraphKit" clr-version="10.0.11" platform="Darwin" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="18" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="10:39:47">
+  <environment user-domain="" machine-name="BigMac26.home.gell.one" user="Adam.Gell" cwd="/Users/Adam.Gell/repo/GraphKit" platform="Darwin" nunit-version="2.5.8.0" os-version="25.4.0" clr-version="10.0.11" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.7196" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.8283" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/Get-GraphObject.Tests.ps1" executed="True" result="Success" success="True" time="0.7196" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/Get-GraphObject.Tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Export/ExportRedaction.Tests.ps1" executed="True" result="Success" success="True" time="0.8283" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Export/ExportRedaction.Tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Get-GraphObject" executed="True" result="Success" success="True" time="0.2451" asserts="0" description="Get-GraphObject">
+          <test-suite type="TestFixture" name="Export redaction is applied in every format" executed="True" result="Success" success="True" time="0.1779" asserts="0" description="Export redaction is applied in every format">
             <results>
-              <test-suite type="TestFixture" name="Get-GraphObject.Row stamping" executed="True" result="Success" success="True" time="0.1463" asserts="0" description="Get-GraphObject.Row stamping">
+              <test-case description="redacts inside the VaultEvidence raw rows.json" name="Export redaction is applied in every format.redacts inside the VaultEvidence raw rows.json" time="0.0208" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="writes the secret when -NoRedact is given" name="Export redaction is applied in every format.writes the secret when -NoRedact is given" time="0.0033" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="redacts only the declared branch of a dotted path" name="Export redaction is applied in every format.redacts only the declared branch of a dotted path" time="0.007" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="does NOT redact properties merely because their name looks sensitive" name="Export redaction is applied in every format.does NOT redact properties merely because their name looks sensitive" time="0.0116" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="warns when raw rows are exported, because nothing can be declared" name="Export redaction is applied in every format.warns when raw rows are exported, because nothing can be declared" time="0.0051" asserts="0" success="True" result="Success" executed="True" />
+              <test-suite type="ParameterizedTest" name="Export redaction is applied in every format.redacts a declared property in &lt;Format&gt;" executed="True" result="Success" success="True" time="0.1056" asserts="0" description="redacts a declared property in &lt;Format&gt;">
                 <results>
-                  <test-case description="stamps every row with the type name and provenance fields" name="Get-GraphObject.Row stamping.stamps every row with the type name and provenance fields" time="0.0947" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="reads a single object (non-paging) through the handler strategy and stamps one row" name="Get-GraphObject.Row stamping.reads a single object (non-paging) through the handler strategy and stamps one row" time="0.0376" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-              <test-suite type="TestFixture" name="Get-GraphObject.Failure semantics" executed="True" result="Success" success="True" time="0.1789" asserts="0" description="Get-GraphObject.Failure semantics">
-                <results>
-                  <test-case description="throws on a Failed/Indeterminate outcome, naming both the Outcome and Certainty" name="Get-GraphObject.Failure semantics.throws on a Failed/Indeterminate outcome, naming both the Outcome and Certainty" time="0.0267" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-              <test-suite type="TestFixture" name="Get-GraphObject.Output modes" executed="True" result="Success" success="True" time="0.2035" asserts="0" description="Get-GraphObject.Output modes">
-                <results>
-                  <test-case description="returns the envelope only with -PassThruResult and never emits rows" name="Get-GraphObject.Output modes.returns the envelope only with -PassThruResult and never emits rows" time="0.013" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="emits no rows for an empty result set" name="Get-GraphObject.Output modes.emits no rows for an empty result set" time="0.0104" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-              <test-suite type="TestFixture" name="Get-GraphObject.Paging" executed="True" result="Success" success="True" time="0.2213" asserts="0" description="Get-GraphObject.Paging">
-                <results>
-                  <test-case description="pages a NextLink collection through Invoke-GraphPaging and honours -PageCap" name="Get-GraphObject.Paging.pages a NextLink collection through Invoke-GraphPaging and honours -PageCap" time="0.0166" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-              <test-suite type="TestFixture" name="Get-GraphObject.Descriptor resolution" executed="True" result="Success" success="True" time="0.237" asserts="0" description="Get-GraphObject.Descriptor resolution">
-                <results>
-                  <test-case description="defaults -Operation to List when only -Type is given" name="Get-GraphObject.Descriptor resolution.defaults -Operation to List when only -Type is given" time="0.0141" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-              <test-suite type="TestFixture" name="Get-GraphObject.Input validation" executed="True" result="Success" success="True" time="0.2412" asserts="0" description="Get-GraphObject.Input validation">
-                <results>
-                  <test-case description="rejects supplying both -Context and -ProfileId" name="Get-GraphObject.Input validation.rejects supplying both -Context and -ProfileId" time="0.0025" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="redacts a declared property in Csv" name="Export redaction is applied in every format.redacts a declared property in Csv" time="0.0756" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="redacts a declared property in Json" name="Export redaction is applied in every format.redacts a declared property in Json" time="0.0228" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="redacts a declared property in Markdown" name="Export redaction is applied in every format.redacts a declared property in Markdown" time="0.0072" asserts="0" success="True" result="Success" executed="True" />
                 </results>
               </test-suite>
             </results>
           </test-suite>
-          <test-suite type="TestFixture" name="Register-GraphArgumentCompleter" executed="True" result="Success" success="True" time="0.3017" asserts="0" description="Register-GraphArgumentCompleter">
+          <test-suite type="TestFixture" name="CSV formula injection" executed="True" result="Success" success="True" time="0.2346" asserts="0" description="CSV formula injection">
             <results>
-              <test-case description="registers (or re-registers) without throwing at import" name="Register-GraphArgumentCompleter.registers (or re-registers) without throwing at import" time="0.0065" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="completes -Type from the catalog type set" name="Register-GraphArgumentCompleter.completes -Type from the catalog type set" time="0.0407" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="completes -Operation filtered by the already-bound -Type" name="Register-GraphArgumentCompleter.completes -Operation filtered by the already-bound -Type" time="0.0083" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="does not prefix a negative NUMBER" name="CSV formula injection.does not prefix a negative NUMBER" time="0.0034" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="preserves every column when rows are hashtables" name="CSV formula injection.preserves every column when rows are hashtables" time="0.0113" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="does not prefix in Json, which does not execute formulas" name="CSV formula injection.does not prefix in Json, which does not execute formulas" time="0.0046" asserts="0" success="True" result="Success" executed="True" />
+              <test-suite type="ParameterizedTest" name="CSV formula injection.prefixes a cell beginning &lt;Char&gt;" executed="True" result="Success" success="True" time="0.0167" asserts="0" description="prefixes a cell beginning &lt;Char&gt;">
+                <results>
+                  <test-case description="prefixes a cell beginning =" name="CSV formula injection.prefixes a cell beginning =" time="0.0036" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="prefixes a cell beginning +" name="CSV formula injection.prefixes a cell beginning +" time="0.0061" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="prefixes a cell beginning -" name="CSV formula injection.prefixes a cell beginning -" time="0.0039" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="prefixes a cell beginning @" name="CSV formula injection.prefixes a cell beginning @" time="0.0031" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+          <test-suite type="TestFixture" name="SensitiveProperties descriptor validation" executed="True" result="Success" success="True" time="0.3441" asserts="0" description="SensitiveProperties descriptor validation">
+            <results>
+              <test-case description="rejects a non-array" name="SensitiveProperties descriptor validation.rejects a non-array" time="0.0492" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="rejects an empty entry" name="SensitiveProperties descriptor validation.rejects an empty entry" time="0.0092" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="the shipped catalog declares the operations known to return secrets" name="SensitiveProperties descriptor validation.the shipped catalog declares the operations known to return secrets" time="0.0452" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
         </results>

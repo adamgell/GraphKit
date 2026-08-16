@@ -67,6 +67,24 @@
         Override the refusal to export a result whose Certainty is Indeterminate.
         Without this switch an Indeterminate result raises an actionable error.
 
+    .PARAMETER NoRedact
+        Write rows exactly as the service returned them, including properties the operation
+        declared as secret-bearing.
+
+        By default EVERY format - Csv, Json, Markdown and the VaultEvidence rows.json - replaces
+        those properties with '[REDACTED]'. What gets redacted is DECLARED by the operation
+        descriptor (its SensitiveProperties), not guessed from property names: name-guessing was
+        measured against real responses and redacted nine DeviceCompliancePolicy password-policy
+        settings while missing scriptContent entirely, which produces an export that reads as
+        sanitised and is not.
+
+        Use this when the actual value is the point - an investigation turning on a specific
+        setting, or evidence that must be byte-exact. It writes customer secrets to disk in the
+        clear, so it should be a decision rather than a habit.
+
+        Rows passed without an envelope carry no declaration, so nothing can be redacted; that
+        case warns rather than passing silently.
+
     .PARAMETER VaultAdapter
         An optional scriptblock invoked with the summary DTO (plus EvidenceRoot
         and ReportRoot) after the filesystem evidence write. Use it to capture
@@ -107,6 +125,13 @@ function Export-GraphResult {
 
         [Parameter()]
         [switch] $Force,
+
+        # Writes rows exactly as the service returned them, including any property the
+        # operation declared as secret-bearing. Raw evidence is a legitimate need - an
+        # investigation may turn on the actual value - so the capability exists, but it has to
+        # be asked for. Without it every format redacts what the descriptor declared.
+        [Parameter()]
+        [switch] $NoRedact,
 
         [Parameter()]
         [scriptblock] $VaultAdapter,
@@ -210,6 +235,61 @@ function Export-GraphResult {
         }
     }
 
+    # --- Redact descriptor-declared secret-bearing properties ---------------
+    # The declaration rides on the envelope's provenance because Export-GraphResult never sees
+    # a descriptor. Guessing by property name instead was measured and rejected: the envelope
+    # sanitiser's pattern redacts nine DeviceCompliancePolicy settings while missing
+    # scriptContent, which produces an export that reads as sanitised and is not.
+    if (-not $NoRedact) {
+        $declared = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($envelope in $envelopes) {
+            $envelopeProvenance = $envelope.Provenance
+            if ($null -ne $envelopeProvenance -and $envelopeProvenance.ContainsKey('SensitiveProperties')) {
+                foreach ($declaration in @($envelopeProvenance['SensitiveProperties'])) {
+                    $null = $declared.Add([string] $declaration)
+                }
+            }
+        }
+
+        if ($declared.Count -gt 0) {
+            $redacted = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in $rows) {
+                $redacted.Add((ConvertTo-GraphRedactedRow -Row $row -SensitiveProperties @($declared)))
+            }
+            $rows = $redacted
+
+            # The Json branch serialises the ENVELOPES when given envelope input, and an
+            # envelope's .Data is the original row set - so redacting $rows alone would leave
+            # Json exporting the secrets while Csv, Markdown and rows.json were clean. Rebuild
+            # the envelopes over redacted Data. Copies, not mutations: the caller's envelope is
+            # still theirs to use.
+            if ($isEnvelopeInput) {
+                $redactedEnvelopes = [System.Collections.Generic.List[object]]::new()
+                foreach ($envelope in $envelopes) {
+                    $clone = [ordered]@{}
+                    foreach ($property in $envelope.PSObject.Properties) {
+                        $clone[$property.Name] = if ($property.Name -eq 'Data') {
+                            @(@($property.Value) | Where-Object { $null -ne $_ } | ForEach-Object {
+                                    ConvertTo-GraphRedactedRow -Row $_ -SensitiveProperties @($declared)
+                                })
+                        }
+                        else { $property.Value }
+                    }
+                    $copy = [pscustomobject] $clone
+                    $copy.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+                    $redactedEnvelopes.Add($copy)
+                }
+                $envelopes = $redactedEnvelopes
+            }
+        }
+        elseif (-not $isEnvelopeInput -and $rows.Count -gt 0) {
+            # Raw rows carry no provenance, so nothing can be declared and nothing is redacted.
+            # Saying so matters: a silent no-op here looks identical to a successful redaction,
+            # which is the false-sense-of-safety this whole change exists to remove.
+            Write-Warning 'Exporting raw rows: no operation declaration is available, so no properties were redacted. Pass an envelope from Get-GraphObject/Invoke-GraphOperation if the rows may carry secrets.'
+        }
+    }
+
     # --- Refuse Indeterminate without -Force -------------------------------
     if ($isEnvelopeInput -and -not $Force) {
         $indeterminate = 0
@@ -256,7 +336,40 @@ function Export-GraphResult {
 
         switch ($As) {
             'Csv' {
-                $rows.ToArray() | Export-Csv -LiteralPath $filePath -NoTypeInformation -Encoding utf8
+                # Neutralise spreadsheet formula injection. A cell beginning '=', '+', '-' or
+                # '@' is executed by Excel on open, and Graph data is partly attacker-influenced
+                # at the customer - users can rename their own devices in many Intune
+                # configurations, and these reports are shared WITH customers.
+                #
+                # Only strings are prefixed. A numeric -5 is not a formula risk, and prefixing
+                # it would corrupt every negative number in the report. Only Csv is treated:
+                # JSON and Markdown do not execute cell formulas.
+                # Rows arrive as HASHTABLES when the transport parsed JSON with -AsHashtable,
+                # and $row.PSObject.Properties on a hashtable enumerates Count/Keys/Values -
+                # not the entries. Reading the wrong member set silently drops every real
+                # column: caught by exporting live compliance policies and finding
+                # passwordRequired missing where plain Export-Csv produces it.
+                $csvRows = foreach ($row in $rows) {
+                    $cells = [ordered]@{}
+                    $entries = if ($row -is [System.Collections.IDictionary]) {
+                        @($row.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Value = $row[$_] } })
+                    }
+                    else {
+                        @($row.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Value = $_.Value } })
+                    }
+
+                    foreach ($entry in $entries) {
+                        $value = $entry.Value
+                        if ($value -is [string] -and $value.Length -gt 0 -and $value[0] -in @('=', '+', '-', '@')) {
+                            $cells[$entry.Name] = "'" + $value
+                        }
+                        else {
+                            $cells[$entry.Name] = $value
+                        }
+                    }
+                    [pscustomobject] $cells
+                }
+                @($csvRows) | Export-Csv -LiteralPath $filePath -NoTypeInformation -Encoding utf8
             }
 
             'Json' {

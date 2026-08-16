@@ -189,6 +189,15 @@ function Invoke-GraphOperation {
         IdentityState  = $Context.IdentityState
     }
 
+    # The operation's declared secret-bearing properties travel with the envelope so
+    # Export-GraphResult knows what the rows contain. Only set when the descriptor declares
+    # any - an absent key means nothing was declared, which is different from an empty list.
+    # A raw request has no descriptor and therefore no declaration, which the exporter reports
+    # rather than treating as "nothing to redact".
+    if (-not $raw -and $null -ne $Descriptor.SensitiveProperties -and @($Descriptor.SensitiveProperties).Count -gt 0) {
+        $defaults['SensitiveProperties'] = @($Descriptor.SensitiveProperties)
+    }
+
     foreach ($key in $defaults.Keys) {
         if (-not $provenance.ContainsKey($key)) {
             $provenance[$key] = $defaults[$key]

@@ -3,6 +3,14 @@
 
     Service principals. The permission analyzer already reads these privately; this is the
     public read path.
+    passwordCredentials and keyCredentials are declared sensitive. Verified against a live
+    tenant: passwordCredentials entries carry a secretText field and keyCredentials carry a key
+    field. Graph normally returns those null outside a create response, but a property that CAN
+    carry a secret should not depend on that to stay out of an export.
+
+    preferredTokenSigningKeyThumbprint and tokenEncryptionKeyId are deliberately NOT declared -
+    a thumbprint and a key id are public identifiers, and redacting them would remove useful
+    evidence for no gain.
 #>
 @{
     SchemaVersion       = 1
@@ -40,6 +48,8 @@
 
     ResourceFamily      = 'Directory.ServicePrincipal'
     ThrottleClass       = 'Read'
+
+    SensitiveProperties = @('passwordCredentials', 'keyCredentials')
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(

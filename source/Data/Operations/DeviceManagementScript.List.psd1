@@ -10,6 +10,11 @@
     tenant used for verification does not hold that scope, so this descriptor is CORRECT BUT NOT
     LIVE-VERIFIED - grant DeviceManagementScripts.Read.All and re-run the descriptor
     verification to close it.
+    The response carries scriptContent - the full body of a deployment script. Scripts
+    routinely embed credentials, connection strings and API keys, so it is declared sensitive
+    and redacted from every export format. Declared from Microsoft's documented schema rather
+    than from observation: the verification tenant does not hold DeviceManagementScripts.Read.All,
+    so this operation returns 403 there and the response has never been seen.
 #>
 @{
     SchemaVersion       = 1
@@ -47,6 +52,8 @@
 
     ResourceFamily      = 'Intune.Script'
     ThrottleClass       = 'Read'
+
+    SensitiveProperties = @('scriptContent')
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(

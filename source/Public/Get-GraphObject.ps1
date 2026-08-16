@@ -195,6 +195,14 @@ function Get-GraphObject {
         IdentityState  = $Context.IdentityState
     }
 
+    # The operation's declared secret-bearing properties travel with the envelope, so an export
+    # knows what the rows contain. This is the THIRD place provenance is stamped - the retry
+    # engine and Invoke-GraphOperation are the others - and missing one is silent: the export
+    # simply redacts nothing and looks like it had nothing to redact.
+    if ($null -ne $Descriptor.SensitiveProperties -and @($Descriptor.SensitiveProperties).Count -gt 0) {
+        $defaults['SensitiveProperties'] = @($Descriptor.SensitiveProperties)
+    }
+
     foreach ($key in $defaults.Keys) {
         if (-not $provenance.ContainsKey($key)) {
             $provenance[$key] = $defaults[$key]

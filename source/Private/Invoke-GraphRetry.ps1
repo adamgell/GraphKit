@@ -443,6 +443,16 @@ function Invoke-GraphRetry {
         ActualTenantId = $verifiedTenantId
     }
 
+    # Carry the operation's declared secret-bearing properties on the envelope so it is
+    # self-describing. Export-GraphResult receives a result, not a descriptor - provenance
+    # records ResourceFamily and ApiVersion but not Type or Operation - so without this it has
+    # no way to know what the rows contain and could only guess by property name, which is
+    # exactly the approach that redacts compliance settings while missing scriptContent.
+    # Travelling on the envelope also survives an envelope being serialised and reloaded.
+    if ($null -ne $Descriptor.SensitiveProperties -and @($Descriptor.SensitiveProperties).Count -gt 0) {
+        $provenance['SensitiveProperties'] = @($Descriptor.SensitiveProperties)
+    }
+
     return [pscustomobject] @{
         PSTypeName = 'GraphKit.OperationResult'
         Data       = $data

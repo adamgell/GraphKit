@@ -352,6 +352,28 @@ function Import-GraphOperationDescriptor {
         }
     }
 
+    # Optional 'SensitiveProperties': response property names this operation is known to return
+    # carrying secret VALUES. Export redaction consults this, so an operation declares its own
+    # risk the same way it declares its permissions.
+    #
+    # Validated strictly despite being optional, for the same reason as Timeouts: the failure
+    # mode of a typo is silence. A descriptor naming 'scriptContnet' would load, redact nothing,
+    # and read as though the secret were handled - which is worse than not declaring it, because
+    # the export would then carry a [REDACTED] marker for some other field and look sanitised.
+    if ($descriptor.ContainsKey('SensitiveProperties') -and $null -ne $descriptor['SensitiveProperties']) {
+        $sensitive = $descriptor['SensitiveProperties']
+        if ($sensitive -isnot [array]) {
+            $violations.Add("Field 'SensitiveProperties' must be an array of property names, got '$($sensitive.GetType().Name)'.")
+        }
+        else {
+            foreach ($entry in $sensitive) {
+                if ($entry -isnot [string] -or [string]::IsNullOrWhiteSpace($entry)) {
+                    $violations.Add("Field 'SensitiveProperties' must contain only non-empty property names; found '$entry'.")
+                }
+            }
+        }
+    }
+
     if ($violations.Count -gt 0) {
         $detail = ($violations | ForEach-Object { "  - $_" }) -join [Environment]::NewLine
         throw "Operation descriptor '$Path' is invalid:$([Environment]::NewLine)$detail"

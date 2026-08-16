@@ -7,6 +7,12 @@
     Returns settingInstances, whose shape is polymorphic per setting type, so this is paged
     normally but deliberately declares no advanced query support: a $select against a
     polymorphic base type is rejected by the service for sub-type-only fields.
+    Setting values live under settingInstance.groupSettingCollectionValue, which is where a
+    Wi-Fi pre-shared key or VPN secret appears. The declaration is a dotted path on purpose:
+    declaring settingInstance wholesale would redact settingDefinitionId and the rest of the
+    branch too, leaving a row that says nothing about which setting it described. Verified
+    against a live tenant - settingInstance carries @odata.type, auditRuleInformation,
+    groupSettingCollectionValue, settingDefinitionId and settingInstanceTemplateReference.
 #>
 @{
     SchemaVersion       = 1
@@ -44,6 +50,8 @@
 
     ResourceFamily      = 'Intune.SettingsCatalog'
     ThrottleClass       = 'Read'
+
+    SensitiveProperties = @('settingInstance.groupSettingCollectionValue')
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(
