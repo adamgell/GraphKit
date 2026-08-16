@@ -56,16 +56,54 @@ Describe 'Source hygiene' {
     It 'carries no internal tenant, customer, or project identifiers' {
         # The module is published publicly. Internal names are meaningless to a consumer and
         # advertise private infrastructure, and a tenant id cannot be taken back once shipped.
+        #
+        # Customer names are matched by HASH, not by literal. This file is in a public
+        # repository, so a regex naming a customer would publish the very name it exists to
+        # keep out - the detector becomes the disclosure. Git history was rewritten
+        # on 2026-08-16 to remove two customer identifiers, and restoring them here in plaintext
+        # would have made that rewrite pointless.
+        #
+        # SHA-256 of the lowercased token, first 32 hex chars. To add a name: hash it the same
+        # way and add the digest with a NON-identifying label. Never write the name itself.
+        $secretTokenHashes = @{
+            '5cad5cdbf022740cbfc976f9836ac89d' = 'customer name (A)'
+            'e03427b1afcd1e84a97ed1f2241466cb' = 'internal workspace tenant'
+            '9a08498936078c81ec926fedbce5e7c9' = 'customer name (A, short form)'
+            '6ca05670c4afd49e806f7cddbab83b00' = 'lab tenant id'
+        }
+
+        # Project names that are NOT customer-identifying stay as literals - they are Adam's own
+        # repositories, and hiding them would cost readability for no privacy gain.
         $patterns = @{
-            'internal tenant/project name' = '(?i)\bivy24\b|\bIntuneHealthAutomation\b|\bfabrikam\b|\bcontoso\b'
-            'local user path'             = '/Users/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
+            'internal project name' = '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
+            'local user path'       = '/Users/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
+        }
+
+        function Get-TokenDigest {
+            param([string] $Token)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Token.ToLowerInvariant())
+            return [System.BitConverter]::ToString(
+                [System.Security.Cryptography.SHA256]::HashData($bytes)
+            ).Replace('-', '').ToLowerInvariant().Substring(0, 32)
         }
 
         $offenders = foreach ($file in $script:sourceFiles) {
             $text = [System.IO.File]::ReadAllText($file.FullName)
+
             foreach ($label in $patterns.Keys) {
                 $match = [regex]::Match($text, $patterns[$label])
                 if ($match.Success) { "{0}: {1} ({2})" -f $file.Name, $label, $match.Value }
+            }
+
+            # Tokenize on word and GUID boundaries so a name is caught wherever it appears -
+            # in a string, a path segment, a comment - without the name being written here.
+            foreach ($token in [regex]::Matches($text, '[A-Za-z0-9][A-Za-z0-9-]{3,}')) {
+                $digest = Get-TokenDigest -Token $token.Value
+                if ($secretTokenHashes.ContainsKey($digest)) {
+                    # Report the LABEL and the file, never the matched value - printing it would
+                    # leak the name into CI logs, which are public on a public repository.
+                    "{0}: internal identifier - {1}" -f $file.Name, $secretTokenHashes[$digest]
+                }
             }
         }
         $offenders | Should -BeNullOrEmpty

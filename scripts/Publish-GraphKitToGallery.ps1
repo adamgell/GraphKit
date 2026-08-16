@@ -114,13 +114,40 @@ if ($packageExists) {
             'GUID that is not a well-known Microsoft id' = '\b(?!00000000-0000-0000-0000-00000000000[01]\b)(?!00000003-0000-0000-c000-000000000000\b)(?!' + [regex]::Escape($manifest.GUID) + '\b)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
             'certificate thumbprint'                     = '\b[0-9A-Fa-f]{40}\b'
             'local user path'                            = '/Users/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
-            'internal project or tenant name'            = '(?i)\bivy24\b|\bIntuneHealthAutomation\b|\bcontoso\w*|\bfabrikam\b'
+            'internal project name'                      = '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
+        }
+
+        # Customer names are matched by HASH rather than by literal, because this script lives in
+        # a public repository: a regex spelling out a customer name would publish the name it
+        # exists to keep out. SHA-256 of the lowercased token, first 32 hex chars. To add one,
+        # hash it the same way and give it a non-identifying label - never the name itself.
+        $secretTokenHashes = @{
+            '5cad5cdbf022740cbfc976f9836ac89d' = 'customer name (A)'
+            'e03427b1afcd1e84a97ed1f2241466cb' = 'internal workspace tenant'
+            '9a08498936078c81ec926fedbce5e7c9' = 'customer name (A, short form)'
+            '6ca05670c4afd49e806f7cddbab83b00' = 'lab tenant id'
+        }
+        function Get-TokenDigest {
+            param([string] $Token)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Token.ToLowerInvariant())
+            return [System.BitConverter]::ToString(
+                [System.Security.Cryptography.SHA256]::HashData($bytes)
+            ).Replace('-', '').ToLowerInvariant().Substring(0, 32)
         }
 
         foreach ($entry in $archive.Entries) {
             if ($entry.FullName -notmatch '\.(psm1|psd1|ps1|ps1xml|txt|nuspec|xml|md)$') { continue }
             $reader = [System.IO.StreamReader]::new($entry.Open())
             try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }
+
+            foreach ($token in [regex]::Matches($content, '[A-Za-z0-9][A-Za-z0-9-]{3,}')) {
+                $digest = Get-TokenDigest -Token $token.Value
+                if ($secretTokenHashes.ContainsKey($digest)) {
+                    # Report the label, never the matched value - this output is shown on screen
+                    # and would otherwise reintroduce the name it just caught.
+                    $findings.Add(('{0}: internal identifier - {1}' -f $entry.FullName, $secretTokenHashes[$digest]))
+                }
+            }
 
             foreach ($label in $patterns.Keys) {
                 foreach ($match in [regex]::Matches($content, $patterns[$label])) {
