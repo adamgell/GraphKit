@@ -118,6 +118,14 @@ Rewriting the call sites to call `Get-GraphObject` directly is still the better 
 This makes that migration incremental and reversible rather than one large irreversible change,
 and it is what lets a customer tenant be moved one flag at a time.
 
+**Scope note, 2026-08-15.** IntuneHealthAutomation **v2** is a rewrite in progress and will not
+consume this shim: it calls GraphKit's public commands directly. The shim's only remaining
+audience is **v1's reversible-cutover fallback** — keeping v1 running on GraphKit with a single
+environment variable to roll back, for as long as v1 is in service. It does not need to be kept
+current against the rewrite, and it should not be presented as the integration path. What v2
+consumes is the operation catalog, and the contract it codes against is `Type` + `Operation`;
+`Get-GraphKitCutoverCoverage.ps1` regenerates the mapping against whatever IHA looks like.
+
 ## Live verification earned its keep
 
 Twenty-four of twenty-nine new descriptors were verified against Ivy24. Three had **wrong
