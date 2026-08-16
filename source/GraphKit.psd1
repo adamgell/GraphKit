@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.0'
+ModuleVersion = '0.1.1'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,7 +130,12 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.1.0 - first public release.
+0.1.1 - first public release.
+
+Fixes a defect found before publication: importing the module left a
+CommandNotFoundException in the caller's $Error. A module-load guard probed for a function
+with Get-Command -ErrorAction SilentlyContinue, which suppresses the display of an error but
+still records it. Nothing failed, but every import dirtied the session error stream.
 
 An app-only, multi-tenant Microsoft Graph execution layer for Intune and Entra. Its focus is
 reliable request execution rather than breadth of coverage:
