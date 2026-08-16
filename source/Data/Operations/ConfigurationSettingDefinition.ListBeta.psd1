@@ -13,20 +13,32 @@
          reads like a permissions problem. This is the mirror of Organization/GetMdmAuthority:
          there the $select is mandatory and lives in the path; here it must never appear.
 
-      2. IT CURRENTLY FAILS AT GRAPHKIT'S DEFAULTS, and the reason is measured rather than
-         guessed. Verified against a live tenant on 2026-08-15: this endpoint returns the entire
-         corpus in ONE page - 18,227 items, 55,164,526 bytes, no nextLink - and takes about 16
-         seconds just to transfer. The transport's body-read phase timeout
-         (TimeoutBodySeconds) is 30 seconds and is not currently plumbed through the public
-         API, so the read is cancelled mid-body and reported as Outcome Failed with Certainty
-         Indeterminate. That reporting is right - a body truncated by a client-side timeout
-         genuinely leaves the outcome unknown - but it means this operation cannot succeed
-         until the timeout is configurable. -PageCap does not help: the failure is on the first
-         page, not on paging depth.
+      2. IT CURRENTLY FAILS AT GRAPHKIT'S DEFAULTS, and the cause is the HEADERS timeout,
+         not the body timeout. Measured against a live tenant on 2026-08-15, three runs:
 
-         Resolving it is a design decision: a descriptor field for the expected body timeout is
-         the natural fit, since "this operation returns tens of megabytes" is an operation fact
-         like any other, but it touches both the schema and the transport.
+             time to first byte : 10.5 - 13.5 s   <-- the bottleneck
+             body read          :  2.7 -  2.8 s
+             UTF8 decode        :  ~0 s
+             JSON parse         :  1.0 -  1.3 s
+             total              : 14.2 - 17.6 s
+             payload            : 18,227 items, 55,164,526 bytes, ONE page, no nextLink
+
+         The service takes 10-13 seconds to begin responding because it composes the whole
+         corpus before sending. TimeoutHeadersSeconds defaults to 10, so the request is
+         cancelled before the first byte arrives: StatusCode 0, a transport exception, and a
+         correctly Indeterminate outcome. TimeoutBodySeconds (30) is never reached - the body
+         transfers in under three seconds.
+
+         Proven by calling the transport directly: headers timeout 10 gives StatusCode 0;
+         headers timeout 45 gives StatusCode 200 and all 18,227 items.
+
+         So -PageCap is irrelevant here (there is no second page), and raising the body timeout
+         would change nothing. What this operation needs is a per-operation headers timeout of
+         roughly 60 seconds - about 4x the observed worst case, since a tenant with more
+         settings or a slower link will be slower than the lab. Raising the GLOBAL default is
+         the wrong fix: a 10-second time-to-first-byte limit is worth keeping for every other
+         operation, and a hung endpoint should fail fast.
+
 #>
 @{
     SchemaVersion       = 1
