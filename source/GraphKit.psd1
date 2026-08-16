@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.0'
+ModuleVersion = '0.1.1'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,31 +130,45 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.1.0 - first public release.
+0.1.1
 
-An app-only, multi-tenant Microsoft Graph execution layer for Intune and Entra. Its focus is
-reliable request execution rather than breadth of coverage:
+Fixes two defects that a consumer could not work around, and adds twelve read operations.
 
-- Immutable per-tenant contexts. Tokens come from MSAL per context, never from a process-global
-  connection, so parallel multi-tenant work cannot cross-contaminate.
-- Four auth modes: certificate, client secret, managed identity, and a caller-supplied bearer.
-  Credentials are referenced from SecretManagement, never stored in the profile.
-- Semantics-aware retry that distinguishes a known failure from an indeterminate commit, and
-  never blind-replays a write after an ambiguous response.
-- Scoped throttling with AIMD admission control, keyed per cloud/tenant/client/resource so one
-  throttled tenant does not stall the others.
-- Operation behaviour is data, not code: each operation is a versioned descriptor declaring
-  method, path, API version, paging, retry safety, permissions and cloud support.
-- API version is a per-operation fact, not a global mode. Beta operations are separate,
-  explicitly named, and declare why they are beta.
+Fixed:
+- Get-GraphObject threw a bare string on failure, so the HTTP status was recorded in telemetry
+  but unreachable from the error. A caller could not distinguish permission-denied from any
+  other failure without re-issuing the whole request. The throw is now an ErrorRecord whose
+  CategoryInfo.Category is mapped from the status (403 PermissionDenied, 401
+  AuthenticationError, 404 ObjectNotFound, 429 LimitsExceeded, 5xx ResourceUnavailable), whose
+  message names the status and Graph error code, and whose TargetObject is the whole result
+  envelope. Branch on CategoryInfo.Category rather than parsing the message.
+- PSData ExternalModuleDependencies was not declared while RequiredModules named both
+  dependencies, so PowerShellGet resolving a local or private repository demanded they exist in
+  that same repository and failed the install. Not fixable from the consumer side.
+- A throttle admission slot leaked whenever token acquisition or the send threw. The
+  coordinator starts at two concurrent slots, so two failures on one scope exhausted it for the
+  rest of the session and every later operation reported back-pressure - blaming the service
+  for a slot this module never returned.
 
-Requires PowerShell 7.4+. Depends on Microsoft.Graph.Authentication (as the MSAL delivery
-vehicle only - Connect-MgGraph is never called) and Microsoft.PowerShell.SecretManagement.
+Added:
+- Twelve read operations: Organization (List/ListBeta/GetMdmAuthority), EntraDevice
+  (List/ListBeta), DirectoryRoleAssignment.List, DirectoryRoleDefinition (List/ListBeta),
+  SecurityDefaultsPolicy.Get, ConfigurationPolicy.ListBeta, ConfigurationPolicySetting.ListBeta
+  and ConfigurationSettingDefinition.ListBeta. Fifty-five operations in total.
+- Descriptors may declare per-operation transport timeouts. Absent means the transport defaults
+  apply. Values are capped, and clamped to the operation deadline so a declared timeout cannot
+  outlive the caller's deadline.
 
-Importing the module writes nothing to the error stream; a QA test asserts this, because a
-non-terminating error on import is invisible to Should -Not -Throw.
-
-This is an early release: the command surface is small and may change before 1.0.
+Notes:
+- mobileDeviceManagementAuthority is exposed on the organization ENTITY and only when named in
+  $select; it is absent from /organization entirely. Organization.GetMdmAuthority encodes that,
+  and the $select is part of the operation rather than a tuning detail.
+- isPrivileged on role definitions is beta-only. DirectoryRoleDefinition.List (v1.0) omits it;
+  use ListBeta for privileged classification.
+- Five descriptors are correct but not verified against a live tenant, because the verification
+  tenant does not hold their scopes. Each says so in its own header.
+- _Tenant provenance carries the ProfileId, which the operator chose and may name after a
+  customer. Strip or pseudonymise it if your exports must carry no tenant identifiers.
 '@
 
         # Prerelease string of this module
