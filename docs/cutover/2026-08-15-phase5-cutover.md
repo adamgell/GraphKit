@@ -1,5 +1,10 @@
 # Phase 5 Cutover — completion record, 2026-08-15
 
+> **Status as of 2026-08-16:** phase 5 is closed. GraphKit 0.1.0 and 0.1.1 are published to the
+> public PowerShell Gallery and consumed by the TenantPulse rebuild; an external security review
+> found no Critical or Important issues and all five of its Minor findings are fixed. The two
+> operator actions below are the only items outstanding.
+
 Phase 5 is the eight-step cutover that repoints IntuneHealthAutomation onto GraphKit and
 retires the legacy credential path. All eight steps ran and were verified against the Ivy24 lab
 tenant. Two sub-parts of step 8 remain, and neither is a judgement call about effort — one is a

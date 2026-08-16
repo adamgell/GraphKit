@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.1'
+ModuleVersion = '0.1.2'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,45 +130,40 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.1.1
+0.1.2
 
-Fixes two defects that a consumer could not work around, and adds twelve read operations.
+Export hardening. Closes the last three findings from an external security review; all five are
+now fixed.
 
-Fixed:
-- Get-GraphObject threw a bare string on failure, so the HTTP status was recorded in telemetry
-  but unreachable from the error. A caller could not distinguish permission-denied from any
-  other failure without re-issuing the whole request. The throw is now an ErrorRecord whose
-  CategoryInfo.Category is mapped from the status (403 PermissionDenied, 401
-  AuthenticationError, 404 ObjectNotFound, 429 LimitsExceeded, 5xx ResourceUnavailable), whose
-  message names the status and Graph error code, and whose TargetObject is the whole result
-  envelope. Branch on CategoryInfo.Category rather than parsing the message.
-- PSData ExternalModuleDependencies was not declared while RequiredModules named both
-  dependencies, so PowerShellGet resolving a local or private repository demanded they exist in
-  that same repository and failed the install. Not fixable from the consumer side.
-- A throttle admission slot leaked whenever token acquisition or the send threw. The
-  coordinator starts at two concurrent slots, so two failures on one scope exhausted it for the
-  rest of the session and every later operation reported back-pressure - blaming the service
-  for a slot this module never returned.
+Changed - these alter the output of Export-GraphResult:
+- EVERY format now redacts secret-bearing properties. Previously only -As Json redacted, while
+  -As Csv, -As Markdown and the VaultEvidence rows.json wrote rows raw.
+- What is redacted is DECLARED by the operation, not inferred from property names. Descriptors
+  name the properties their responses carry secrets in, and dotted paths are supported so a
+  nested branch can be redacted without losing its siblings. Name-matching was measured against
+  live responses and rejected: it redacts nine DeviceCompliancePolicy password-policy settings -
+  configuration, not credentials - while missing scriptContent and Settings Catalog values
+  entirely, producing an export that reads as sanitised and is not.
+- CSV cells beginning = + - @ are prefixed with an apostrophe so a spreadsheet does not execute
+  them. Strings only; negative numbers are untouched.
+- Exporting rows without an envelope warns that no declaration is available, rather than
+  redacting nothing silently.
+- Get-GraphOperation returns a deep copy. It previously handed out the cached catalog objects,
+  so a caller mutating one changed the descriptor every later operation in that session used -
+  including its CredentialPolicy.
 
 Added:
-- Twelve read operations: Organization (List/ListBeta/GetMdmAuthority), EntraDevice
-  (List/ListBeta), DirectoryRoleAssignment.List, DirectoryRoleDefinition (List/ListBeta),
-  SecurityDefaultsPolicy.Get, ConfigurationPolicy.ListBeta, ConfigurationPolicySetting.ListBeta
-  and ConfigurationSettingDefinition.ListBeta. Fifty-five operations in total.
-- Descriptors may declare per-operation transport timeouts. Absent means the transport defaults
-  apply. Values are capped, and clamped to the operation deadline so a declared timeout cannot
-  outlive the caller's deadline.
+- Export-GraphResult -NoRedact writes rows exactly as the service returned them, for when the
+  actual value is the point.
+- Descriptors may declare SensitiveProperties, validated at load.
 
-Notes:
-- mobileDeviceManagementAuthority is exposed on the organization ENTITY and only when named in
-  $select; it is absent from /organization entirely. Organization.GetMdmAuthority encodes that,
-  and the $select is part of the operation rather than a tuning detail.
-- isPrivileged on role definitions is beta-only. DirectoryRoleDefinition.List (v1.0) omits it;
-  use ListBeta for privileged classification.
-- Five descriptors are correct but not verified against a live tenant, because the verification
-  tenant does not hold their scopes. Each says so in its own header.
-- _Tenant provenance carries the ProfileId, which the operator chose and may name after a
-  customer. Strip or pseudonymise it if your exports must carry no tenant identifiers.
+Operations declaring secrets today: DeviceManagementScript.List (scriptContent),
+ServicePrincipal.List (passwordCredentials, keyCredentials) and
+ConfigurationPolicySetting.ListBeta (settingInstance.groupSettingCollectionValue). A declaration
+covers only what someone thought of - an operation returning a secret nobody declared is still
+exported.
+
+Requires PowerShell 7.4+. 676 tests.
 '@
 
         # Prerelease string of this module

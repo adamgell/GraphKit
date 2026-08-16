@@ -53,5 +53,12 @@ function Get-GraphOperation {
         [string] $Cloud
     )
 
-    Get-GraphOperationInternal -Type $Type -Operation $Operation -List:$List -Cloud $Cloud
+    # Deep-copied on the way out. The catalog is cached once per session and handed out by
+    # reference, so a caller who edits a returned descriptor was editing the catalog itself -
+    # a later operation would then run under whatever they changed, including CredentialPolicy.
+    # Load-time validation is what makes a descriptor trustworthy; an object that can be
+    # rewritten afterwards has quietly escaped it. Internal resolution keeps the cached
+    # instance, since that path already owns the original and runs per request.
+    Get-GraphOperationInternal -Type $Type -Operation $Operation -List:$List -Cloud $Cloud |
+        Copy-GraphOperationDescriptor
 }

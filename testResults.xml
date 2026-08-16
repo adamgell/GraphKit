@@ -1,47 +1,25 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="18" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="10:39:47">
-  <environment user-domain="" machine-name="BigMac26.home.gell.one" user="Adam.Gell" cwd="/Users/Adam.Gell/repo/GraphKit" platform="Darwin" nunit-version="2.5.8.0" os-version="25.4.0" clr-version="10.0.11" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="8" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="10:47:56">
+  <environment cwd="/Users/Adam.Gell/repo/GraphKit" os-version="25.4.0" machine-name="BigMac26.home.gell.one" nunit-version="2.5.8.0" platform="Darwin" clr-version="10.0.11" user-domain="" user="Adam.Gell" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.8283" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.6107" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Export/ExportRedaction.Tests.ps1" executed="True" result="Success" success="True" time="0.8283" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Export/ExportRedaction.Tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1" executed="True" result="Success" success="True" time="0.6107" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Export redaction is applied in every format" executed="True" result="Success" success="True" time="0.1779" asserts="0" description="Export redaction is applied in every format">
+          <test-suite type="TestFixture" name="Descriptor invariants that fail silently if broken" executed="True" result="Success" success="True" time="0.0819" asserts="0" description="Descriptor invariants that fail silently if broken">
             <results>
-              <test-case description="redacts inside the VaultEvidence raw rows.json" name="Export redaction is applied in every format.redacts inside the VaultEvidence raw rows.json" time="0.0208" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="writes the secret when -NoRedact is given" name="Export redaction is applied in every format.writes the secret when -NoRedact is given" time="0.0033" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="redacts only the declared branch of a dotted path" name="Export redaction is applied in every format.redacts only the declared branch of a dotted path" time="0.007" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="does NOT redact properties merely because their name looks sensitive" name="Export redaction is applied in every format.does NOT redact properties merely because their name looks sensitive" time="0.0116" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="warns when raw rows are exported, because nothing can be declared" name="Export redaction is applied in every format.warns when raw rows are exported, because nothing can be declared" time="0.0051" asserts="0" success="True" result="Success" executed="True" />
-              <test-suite type="ParameterizedTest" name="Export redaction is applied in every format.redacts a declared property in &lt;Format&gt;" executed="True" result="Success" success="True" time="0.1056" asserts="0" description="redacts a declared property in &lt;Format&gt;">
-                <results>
-                  <test-case description="redacts a declared property in Csv" name="Export redaction is applied in every format.redacts a declared property in Csv" time="0.0756" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="redacts a declared property in Json" name="Export redaction is applied in every format.redacts a declared property in Json" time="0.0228" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="redacts a declared property in Markdown" name="Export redaction is applied in every format.redacts a declared property in Markdown" time="0.0072" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
+              <test-case description="keeps the $select on Organization/GetMdmAuthority" name="Descriptor invariants that fail silently if broken.keeps the $select on Organization/GetMdmAuthority" time="0.0444" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="declares every singleton with the singleton handler and no paging" name="Descriptor invariants that fail silently if broken.declares every singleton with the singleton handler and no paging" time="0.005" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="gives every beta descriptor a reason" name="Descriptor invariants that fail silently if broken.gives every beta descriptor a reason" time="0.011" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="never pairs a ListBeta operation with a v1.0 ApiVersion" name="Descriptor invariants that fail silently if broken.never pairs a ListBeta operation with a v1.0 ApiVersion" time="0.0086" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
-          <test-suite type="TestFixture" name="CSV formula injection" executed="True" result="Success" success="True" time="0.2346" asserts="0" description="CSV formula injection">
+          <test-suite type="TestFixture" name="Get-GraphOperation does not hand out the live catalog" executed="True" result="Success" success="True" time="0.104" asserts="0" description="Get-GraphOperation does not hand out the live catalog">
             <results>
-              <test-case description="does not prefix a negative NUMBER" name="CSV formula injection.does not prefix a negative NUMBER" time="0.0034" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="preserves every column when rows are hashtables" name="CSV formula injection.preserves every column when rows are hashtables" time="0.0113" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="does not prefix in Json, which does not execute formulas" name="CSV formula injection.does not prefix in Json, which does not execute formulas" time="0.0046" asserts="0" success="True" result="Success" executed="True" />
-              <test-suite type="ParameterizedTest" name="CSV formula injection.prefixes a cell beginning &lt;Char&gt;" executed="True" result="Success" success="True" time="0.0167" asserts="0" description="prefixes a cell beginning &lt;Char&gt;">
-                <results>
-                  <test-case description="prefixes a cell beginning =" name="CSV formula injection.prefixes a cell beginning =" time="0.0036" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="prefixes a cell beginning +" name="CSV formula injection.prefixes a cell beginning +" time="0.0061" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="prefixes a cell beginning -" name="CSV formula injection.prefixes a cell beginning -" time="0.0039" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="prefixes a cell beginning @" name="CSV formula injection.prefixes a cell beginning @" time="0.0031" asserts="0" success="True" result="Success" executed="True" />
-                </results>
-              </test-suite>
-            </results>
-          </test-suite>
-          <test-suite type="TestFixture" name="SensitiveProperties descriptor validation" executed="True" result="Success" success="True" time="0.3441" asserts="0" description="SensitiveProperties descriptor validation">
-            <results>
-              <test-case description="rejects a non-array" name="SensitiveProperties descriptor validation.rejects a non-array" time="0.0492" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="rejects an empty entry" name="SensitiveProperties descriptor validation.rejects an empty entry" time="0.0092" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="the shipped catalog declares the operations known to return secrets" name="SensitiveProperties descriptor validation.the shipped catalog declares the operations known to return secrets" time="0.0452" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="a mutated result does not affect the next lookup" name="Get-GraphOperation does not hand out the live catalog.a mutated result does not affect the next lookup" time="0.0057" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="copies nested structures, not just the top level" name="Get-GraphOperation does not hand out the live catalog.copies nested structures, not just the top level" time="0.005" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="copies array members" name="Get-GraphOperation does not hand out the live catalog.copies array members" time="0.0056" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="still returns a usable descriptor with its values intact" name="Get-GraphOperation does not hand out the live catalog.still returns a usable descriptor with its values intact" time="0.004" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
         </results>

@@ -55,3 +55,52 @@ Describe 'Descriptor invariants that fail silently if broken' {
         }
     }
 }
+
+Describe 'Get-GraphOperation does not hand out the live catalog' {
+
+    # The catalog is cached once per session and was handed out by reference, so a caller
+    # mutating a returned descriptor mutated it for every later operation in that runspace.
+    # Demonstrated before fixing: setting CredentialPolicy = 'None' on a returned descriptor
+    # made the next Get-GraphOperation report None - meaning a subsequent request would have
+    # run with no bearer token. Load-time validation is what makes a descriptor trustworthy,
+    # and an object editable afterwards has escaped it.
+
+    It 'a mutated result does not affect the next lookup' {
+        $first = Get-GraphOperation -Type ManagedDevice -Operation List
+        $first.CredentialPolicy = 'None'
+
+        (Get-GraphOperation -Type ManagedDevice -Operation List).CredentialPolicy |
+            Should -Be 'GraphBearer'
+    }
+
+    It 'copies nested structures, not just the top level' {
+        # AdvancedQuery, Concurrency, Timeouts and RequiredPermissions are all nested; a shallow
+        # copy would leave every one of them shared with the catalog and the fix would look like
+        # it worked while the interesting fields stayed mutable.
+        $first = Get-GraphOperation -Type ManagedDevice -Operation List
+        $first.Concurrency['Mode'] = 'Mutated'
+        $first.AdvancedQuery['Supported'] = 'Mutated'
+
+        $second = Get-GraphOperation -Type ManagedDevice -Operation List
+        $second.Concurrency['Mode'] | Should -Not -Be 'Mutated'
+        $second.AdvancedQuery['Supported'] | Should -Not -Be 'Mutated'
+    }
+
+    It 'copies array members' {
+        $first = Get-GraphOperation -Type ManagedDevice -Operation List
+        $first.SupportedClouds[0] = 'Mutated'
+
+        (Get-GraphOperation -Type ManagedDevice -Operation List).SupportedClouds |
+            Should -Not -Contain 'Mutated'
+    }
+
+    It 'still returns a usable descriptor with its values intact' {
+        # A copy that dropped or mangled fields would break every caller while passing the
+        # isolation tests above.
+        $d = Get-GraphOperation -Type ManagedDevice -Operation List
+        $d.Type | Should -Be 'ManagedDevice'
+        $d.PathTemplate | Should -Be '/deviceManagement/managedDevices'
+        $d.SupportedClouds | Should -Contain 'Global'
+        $d.RequiredPermissions[0].Value | Should -Not -BeNullOrEmpty
+    }
+}
