@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without losing its siblings. Validated at load, because a typo would redact nothing and look
   correct.
 - `Export-GraphResult -NoRedact` writes rows exactly as the service returned them.
+- **Write operations.** `Invoke-GraphOperation` now declares `SupportsShouldProcess`, so `-WhatIf`
+  gives a real dry run on any mutating operation. What counts as mutating is declared by the
+  descriptor's `ReplayPolicy`, not inferred from the HTTP verb - two descriptors are POSTs that
+  change nothing, and a verb-based gate would prompt on reads. ConfirmImpact is deliberately not
+  raised, so unattended writes still run without a console.
+- Actions may declare `RequestBodyKind = $null` and are then executed without a body. The action
+  strategy previously demanded a body from every action, which excluded most of the write surface:
+  Intune device actions are bodyless POSTs and deletes carry no body at all.
+- Two write descriptors (61 operations): `ManagedDevice.SyncDevice` and
+  `DeviceCompliancePolicy.Assign`. Destructive device actions - retire, wipe, delete - are
+  deliberately NOT included; see the note in `AGENTS.md`.
 - Four read-only beta descriptors requested by a consumer, taking the catalog from 55 to 59:
   `GroupPolicyConfiguration.ListBeta`, `GroupPolicyDefinitionValue.ListBeta`,
   `GroupPolicyPresentationValue.ListBeta` (the Administrative Template walk) and

@@ -229,11 +229,25 @@ $script:SingletonDefaultStrategy = {
 $script:ActionDefaultStrategy = {
     param($Context, $Descriptor, $Parameters, $Transport)
 
-    if (-not $Parameters.ContainsKey('Body') -or $null -eq $Parameters['Body']) {
-        throw "Action '{0}/{1}' requires a request body; supply it via -Parameters @{{ Body = ... }}." -f $Descriptor.Type, $Descriptor.Operation
+    # Whether an action takes a body is DECLARED by RequestBodyKind, not assumed. Requiring one
+    # unconditionally was correct while MobileApp.Assign was the only action in the catalog, and it
+    # silently excluded most of the write surface: Intune's device actions are bodyless POSTs
+    # (/syncDevice, /retire, /rebootNow) and deletes carry no body at all. Those descriptors could
+    # be written but never executed - the strategy rejected them before the request was built.
+    #
+    # A body supplied to an action that declares none is also an error rather than something to
+    # drop quietly: Graph would reject it, and the caller's intent is clearly mismatched.
+    $expectsBody = -not [string]::IsNullOrWhiteSpace([string] $Descriptor.RequestBodyKind)
+    $suppliedBody = $Parameters.ContainsKey('Body') -and $null -ne $Parameters['Body']
+
+    if ($expectsBody -and -not $suppliedBody) {
+        throw "Action '{0}/{1}' requires a request body ({2}); supply it via -Parameters @{{ Body = ... }}." -f $Descriptor.Type, $Descriptor.Operation, $Descriptor.RequestBodyKind
+    }
+    if (-not $expectsBody -and $suppliedBody) {
+        throw "Action '{0}/{1}' declares no request body (RequestBodyKind is null) but a Body was supplied." -f $Descriptor.Type, $Descriptor.Operation
     }
 
-    $body = $Parameters['Body']
+    $body = if ($expectsBody) { $Parameters['Body'] } else { $null }
 
     $baseUri = [uri] ('{0}/{1}' -f $Context.GraphBaseUri.AbsoluteUri.TrimEnd('/'), $Descriptor.ApiVersion)
     $uri = Resolve-GraphUri -Descriptor $Descriptor -Parameters $Parameters -BaseUri $baseUri

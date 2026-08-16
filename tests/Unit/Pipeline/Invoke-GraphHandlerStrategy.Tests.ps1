@@ -68,6 +68,11 @@ Describe 'Invoke-GraphHandlerStrategy dispatch' {
             HandlerStrategyId = 'Action.Default'; Method = 'POST'
             PathTemplate = '/deviceAppManagement/mobileApps/{id}/assign'
             ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            # RequestBodyKind is what declares that this action takes a body. These stubs called
+            # themselves MobileApp/Assign while omitting it, so they asserted against a shape the
+            # real descriptor does not have - the tests passed only because the strategy used to
+            # demand a body from every action regardless of what the descriptor said.
+            RequestBodyKind = 'MobileAppAssignmentSet'
             RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
         }
 
@@ -87,6 +92,11 @@ Describe 'Invoke-GraphHandlerStrategy dispatch' {
             HandlerStrategyId = 'Action.Default'; Method = 'POST'
             PathTemplate = '/deviceAppManagement/mobileApps/{id}/assign'
             ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            # RequestBodyKind is what declares that this action takes a body. These stubs called
+            # themselves MobileApp/Assign while omitting it, so they asserted against a shape the
+            # real descriptor does not have - the tests passed only because the strategy used to
+            # demand a body from every action regardless of what the descriptor said.
+            RequestBodyKind = 'MobileAppAssignmentSet'
             RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
         }
 
@@ -145,6 +155,11 @@ Describe 'Invoke-GraphHandlerStrategy dispatch' {
             PathTemplate = '/deviceManagement/configurationPolicies'
             ReplayPolicy = 'Reconciliable'; Reconciliation = $null
             ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            # RequestBodyKind is what declares that this action takes a body. These stubs called
+            # themselves MobileApp/Assign while omitting it, so they asserted against a shape the
+            # real descriptor does not have - the tests passed only because the strategy used to
+            # demand a body from every action regardless of what the descriptor said.
+            RequestBodyKind = 'MobileAppAssignmentSet'
             RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
         }
 
@@ -166,6 +181,11 @@ Describe 'Invoke-GraphHandlerStrategy dispatch' {
             ReplayPolicy = 'Reconciliable'
             Reconciliation = @{ StableExternalKey = 'displayName' }
             ApiVersion = 'v1.0'; AdvancedQuery = @{ Supported = $false }
+            # RequestBodyKind is what declares that this action takes a body. These stubs called
+            # themselves MobileApp/Assign while omitting it, so they asserted against a shape the
+            # real descriptor does not have - the tests passed only because the strategy used to
+            # demand a body from every action regardless of what the descriptor said.
+            RequestBodyKind = 'MobileAppAssignmentSet'
             RequiredPagingHeaders = @(); Concurrency = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
         }
 

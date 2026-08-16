@@ -149,3 +149,79 @@ Describe 'The mutating-operation dry-run gate' {
         }
     }
 }
+
+Describe 'Bodyless actions' {
+    # Whether an action carries a body is declared by RequestBodyKind. Action.Default used to
+    # demand one from every action, which was correct while MobileApp.Assign was the only action in
+    # the catalog and silently excluded most of the write surface: Intune's device actions are
+    # bodyless POSTs and deletes carry no body at all. Those descriptors could be written but never
+    # executed - the strategy rejected them before a request was built.
+
+    BeforeAll {
+        $script:ctx = InModuleScope GraphKit {
+            [PSCustomObject]@{
+                ProfileId = 'bodyless-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                TokenSource = $null; TenantId = [guid]::Empty
+            }
+        }
+    }
+
+    It 'executes an action that declares no body' {
+        InModuleScope GraphKit -Parameters @{ Ctx = $script:ctx } {
+            param($Ctx)
+            $script:sentBody = 'unset'
+            Mock Test-GraphCredentialPolicy { $null }
+            Mock Invoke-GraphRetry {
+                param($Context, $Descriptor, $Uri, $Method, $Headers, $Body, $CancellationToken)
+                $script:sentBody = $Body
+                [PSCustomObject]@{ Data = @(); Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{} }
+            }
+
+            $null = Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation SyncDevice `
+                        -Parameters @{ id = 'dev-1' } -Confirm:$false
+            $script:sentBody | Should -BeNullOrEmpty -Because 'a bodyless action must send no body'
+        }
+    }
+
+    It 'rejects a Body supplied to an action that declares none' {
+        # Dropping it silently would hide a real mismatch in the caller's intent, and Graph would
+        # reject the request anyway with a less specific error.
+        {
+            InModuleScope GraphKit -Parameters @{ Ctx = $script:ctx } {
+                param($Ctx)
+                Mock Test-GraphCredentialPolicy { $null }
+                Mock Invoke-GraphRetry { [PSCustomObject]@{ Data = @(); Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{} } }
+                Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation SyncDevice `
+                    -Parameters @{ id = 'dev-1'; Body = @{ unexpected = $true } } -Confirm:$false
+            }
+        } | Should -Throw -ExpectedMessage '*declares no request body*'
+    }
+
+    It 'still requires a body from an action that declares one' {
+        {
+            InModuleScope GraphKit -Parameters @{ Ctx = $script:ctx } {
+                param($Ctx)
+                Mock Test-GraphCredentialPolicy { $null }
+                Mock Invoke-GraphRetry { [PSCustomObject]@{ Data = @(); Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{} } }
+                Invoke-GraphOperation -Context $Ctx -Type DeviceCompliancePolicy -Operation Assign `
+                    -Parameters @{ id = 'pol-1' } -Confirm:$false
+            }
+        } | Should -Throw -ExpectedMessage '*requires a request body*'
+    }
+
+    It 'gates both new writes behind -WhatIf' {
+        foreach ($op in @(
+            @{ T = 'ManagedDevice'; O = 'SyncDevice'; P = @{ id = 'dev-1' } }
+            @{ T = 'DeviceCompliancePolicy'; O = 'Assign'; P = @{ id = 'pol-1'; Body = @{ assignments = @() } } }
+        )) {
+            InModuleScope GraphKit -Parameters @{ Ctx = $script:ctx; Op = $op } {
+                param($Ctx, $Op)
+                Mock Test-GraphCredentialPolicy { $null }
+                Mock Invoke-GraphRetry { throw "the $($Op.T)/$($Op.O) write escaped the -WhatIf gate" }
+                { Invoke-GraphOperation -Context $Ctx -Type $Op.T -Operation $Op.O -Parameters $Op.P -WhatIf } |
+                    Should -Not -Throw
+            }
+        }
+    }
+}
+
