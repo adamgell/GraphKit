@@ -38,7 +38,9 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)]
+    # Not mandatory: when this script sits in a transfer bundle next to its pin - which is how
+    # it reaches an execution host - running it bare should just work. A mandatory parameter
+    # prompts for a path the caller has no reason to know, and the obvious guesses fail.
     [string] $PinPath,
 
     [ValidateSet('CurrentUser', 'AllUsers')]
@@ -59,8 +61,22 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
+if ([string]::IsNullOrWhiteSpace($PinPath)) {
+    # Prefer a pin beside this script (the bundle layout), then the repository's channel.
+    $candidates = @(
+        (Join-Path $PSScriptRoot 'graphkit.pin.json')
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'graphkit.pin.json')
+    )
+    $PinPath = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+    if ([string]::IsNullOrWhiteSpace($PinPath)) {
+        throw "No -PinPath given and no graphkit.pin.json found next to this script. Pass -PinPath explicitly, or run this from a bundle directory that contains the pin."
+    }
+    Write-Host "  using pin beside the script: $PinPath" -ForegroundColor DarkGray
+}
+
 if (-not (Test-Path -LiteralPath $PinPath -PathType Leaf)) {
-    throw "Pin record '$PinPath' does not exist. Publish first with ./scripts/Publish-GraphKitPackage.ps1."
+    throw "Pin record '$PinPath' does not exist. Expected a graphkit.pin.json - in a transfer bundle it sits beside this script, so running the script with no arguments from that folder is usually what you want."
 }
 
 $pin = Get-Content -LiteralPath $PinPath -Raw | ConvertFrom-Json
@@ -112,7 +128,17 @@ if ($pin.channel -ne 'FileSystem') {
     throw "Automated install currently supports the FileSystem channel only; this pin names '$($pin.channel)'. For a GitHub release, download the asset to a directory and re-pin against it, or extend this script once that channel is in use."
 }
 
-$channelSource = if (-not [string]::IsNullOrWhiteSpace($Source)) { $Source } else { [string] $pin.source }
+$channelSource = if (-not [string]::IsNullOrWhiteSpace($Source)) {
+    $Source
+}
+elseif (Test-Path -LiteralPath (Join-Path (Split-Path $PinPath -Parent) $pin.packageName) -PathType Leaf) {
+    # The package sits beside the pin: this is a transfer bundle, and the publisher's recorded
+    # path almost certainly does not exist on this host. Prefer what is actually here.
+    Split-Path $PinPath -Parent
+}
+else {
+    [string] $pin.source
+}
 
 if (-not (Test-Path -LiteralPath $channelSource -PathType Container)) {
     throw "Channel source '$channelSource' is not reachable from this host. The pin records the publisher's path; on another machine pass -Source pointing at a directory this host can read. The digest check is unaffected."

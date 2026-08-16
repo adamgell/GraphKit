@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.1'
+ModuleVersion = '0.1.0'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,12 +130,7 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.1.1 - first public release.
-
-Fixes a defect found before publication: importing the module left a
-CommandNotFoundException in the caller's $Error. A module-load guard probed for a function
-with Get-Command -ErrorAction SilentlyContinue, which suppresses the display of an error but
-still records it. Nothing failed, but every import dirtied the session error stream.
+0.1.0 - first public release.
 
 An app-only, multi-tenant Microsoft Graph execution layer for Intune and Entra. Its focus is
 reliable request execution rather than breadth of coverage:
@@ -155,6 +150,9 @@ reliable request execution rather than breadth of coverage:
 
 Requires PowerShell 7.4+. Depends on Microsoft.Graph.Authentication (as the MSAL delivery
 vehicle only - Connect-MgGraph is never called) and Microsoft.PowerShell.SecretManagement.
+
+Importing the module writes nothing to the error stream; a QA test asserts this, because a
+non-terminating error on import is invisible to Should -Not -Throw.
 
 This is an early release: the command surface is small and may change before 1.0.
 '@
