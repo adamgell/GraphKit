@@ -156,3 +156,31 @@ Describe 'The admin-template walk and Settings Catalog assignments' {
     }
 }
 
+Describe 'Directory settings need both halves to be interpretable' {
+
+    It 'ships the instantiated settings AND the templates that supply their defaults' {
+        # /settings returns only settings that have been INSTANTIATED. Verified against a live
+        # tenant: 10 templates available, exactly one instantiated. So a consumer holding only
+        # DirectorySetting.List sees nothing for Password Protection or Consent Policy and cannot
+        # tell "default value, compliant" from "unknown" - it reports false non-compliance on every
+        # tenant that never customised the setting.
+        foreach ($t in @('DirectorySetting', 'DirectorySettingTemplate')) {
+            $d = $script:catalog | Where-Object { $_.Type -eq $t -and $_.Operation -eq 'List' }
+            $d | Should -Not -BeNullOrEmpty -Because "$t/List is half of an interpretable answer"
+            $d.AdvancedQuery.Supported | Should -BeFalse -Because '/settings supports no query options'
+            $d.PathTemplate | Should -Not -BeLike '*{*' -Because 'both are unparameterized lists, not per-template lookups'
+        }
+    }
+
+    It 'keeps AuthorizationPolicy a singleton with no paging' {
+        # /policies/authorizationPolicy returns one object with no 'value' wrapper. Collection
+        # .Default would unwrap a property that is not there and return nothing while reporting
+        # success - the failure is silent, so the shape is declared rather than inferred.
+        $d = $script:catalog | Where-Object { $_.Type -eq 'AuthorizationPolicy' -and $_.Operation -eq 'Get' }
+        $d | Should -Not -BeNullOrEmpty
+        $d.OperationKind | Should -Be 'Singleton'
+        $d.HandlerStrategyId | Should -Be 'Singleton.Default'
+        $d.PagingStrategy | Should -Be 'None'
+    }
+}
+
