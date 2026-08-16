@@ -163,7 +163,39 @@ ConfigurationPolicySetting.ListBeta (settingInstance.groupSettingCollectionValue
 covers only what someone thought of - an operation returning a secret nobody declared is still
 exported.
 
-Requires PowerShell 7.4+. 676 tests.
+Fixed - a correctness bug in URI building:
+- A PathTemplate that fixes a query option now extends it with '&' instead of a second '?'.
+  Resolve-GraphUri always joined with '?', so a descriptor with a fixed option plus a
+  caller-supplied one produced '?$expand=a?$filter=b'. That is not two options - the second '?'
+  becomes part of the first option's value, so Graph answers 200 and IGNORES the filter,
+  returning a complete collection that reads as a filtered one. Only Organization/GetMdmAuthority
+  fixed an option before this release, and it was safe purely because it accepts no caller
+  options at all.
+- A caller-supplied option that the descriptor already fixes is now rejected by name, instead of
+  being emitted twice for Graph to reject with an error naming the option rather than the
+  descriptor responsible.
+
+Added - four read-only beta descriptors, taking the catalog from 55 to 59:
+- GroupPolicyConfiguration.ListBeta, GroupPolicyDefinitionValue.ListBeta and
+  GroupPolicyPresentationValue.ListBeta - the three-level Administrative Template walk. The two
+  child operations fix a load-bearing $expand in their path, because without it the rows are ids
+  with no indication of which setting they configure: a 200 response that cannot be interpreted.
+  GroupPolicyPresentationValue takes TWO path parameters, 'id' and 'definitionValueId'.
+- ConfigurationPolicyAssignment.ListBeta - assignments for a Settings Catalog policy. This closes
+  a silent gap: assignment descriptors existed for compliance policies, device configurations and
+  mobile apps, so a reconciliation across policy types contributed nothing for Settings Catalog
+  and still reported success.
+
+Verification status, stated rather than implied: GroupPolicyConfiguration and
+ConfigurationPolicyAssignment are live-verified against populated responses. The two admin-template
+CHILD operations are verified for path, auth and error handling only - every administrative
+template in the lab tenant has zero definitionValues. Those zeros were checked, not assumed: a
+bogus parent id returns ResourceNotFound, so the endpoint distinguishes missing from empty, and
+those policies have createdDateTime == lastModifiedDateTime. They are unpopulated shells. Each
+descriptor header records this.
+
+Requires PowerShell 7.4+. 687 tests, 0 skipped, green on Windows, Linux and macOS across
+PowerShell 7.4 and 7.6.
 '@
 
         # Prerelease string of this module
