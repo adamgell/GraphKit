@@ -378,9 +378,21 @@ function Ensure-GraphV1StrategiesRegistered {
 }
 
 # Register at import when the registry is already available. ModuleBuilder concatenates Private
-# files alphabetically, which can place this file before the registry, so the idempotent
-# Ensure-GraphV1StrategiesRegistered also runs on first strategy execution to guarantee the four
-# strategies are present before any descriptor resolves against them.
-if (Get-Command -Name Register-GraphHandlerStrategy -ErrorAction SilentlyContinue) {
+# files alphabetically, which places this file before Operations/GraphHandlerStrategyRegistry.ps1,
+# so at import the registry function does not exist yet and this guard is expected to be false.
+# The idempotent Ensure-GraphV1StrategiesRegistered therefore also runs on first strategy
+# execution, which is what actually registers the strategies in a normal load.
+#
+# The existence probe is Test-Path on the Function: drive, NOT Get-Command. Get-Command writes a
+# CommandNotFoundException into $Error for a name it cannot resolve even under
+# -ErrorAction SilentlyContinue: SilentlyContinue suppresses the *display* of an error, not the
+# record. Because this guard is false on every normal import, Get-Command left a
+# CommandNotFoundException in $Error every single time GraphKit was loaded. Nothing failed, which
+# is why it survived - but a consumer that inspects $Error, or CI that fails a build on a
+# non-empty error stream, sees GraphKit dirty the session on import.
+#
+# Test-Path Function:\ answers the same question, resolves module-scoped functions, and writes
+# nothing to the error stream when the answer is no.
+if (Test-Path -LiteralPath 'Function:\Register-GraphHandlerStrategy') {
     Ensure-GraphV1StrategiesRegistered
 }

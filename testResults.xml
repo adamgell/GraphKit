@@ -1,23 +1,17 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="5" errors="0" failures="1" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="21:33:42">
-  <environment user-domain="" user="Adam.Gell" platform="Darwin" cwd="/Users/Adam.Gell/repo/GraphKit" os-version="25.4.0" nunit-version="2.5.8.0" machine-name="BigMac26.home.gell.one" clr-version="10.0.11" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="4" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="21:53:24">
+  <environment user-domain="" clr-version="10.0.11" cwd="/Users/Adam.Gell/repo/GraphKit" os-version="25.4.0" platform="Darwin" user="Adam.Gell" machine-name="BigMac26.home.gell.one" nunit-version="2.5.8.0" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Failure" success="False" time="1.5292" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="4.1183" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/QA/SourceHygiene.tests.ps1" executed="True" result="Failure" success="False" time="1.5292" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/QA/SourceHygiene.tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/QA/CleanImport.tests.ps1" executed="True" result="Success" success="True" time="4.1183" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/QA/CleanImport.tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Source hygiene" executed="True" result="Failure" success="False" time="1.4107" asserts="0" description="Source hygiene">
+          <test-suite type="TestFixture" name="Built module imports cleanly" executed="True" result="Success" success="True" time="3.9986" asserts="0" description="Built module imports cleanly">
             <results>
-              <test-case description="ships source files to check" name="Source hygiene.ships source files to check" time="0.0324" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="contains no control characters outside tab, CR and LF" name="Source hygiene.contains no control characters outside tab, CR and LF" time="1.3231" asserts="0" success="False" result="Failure" executed="True">
-                <failure>
-                  <message>Expected $null or empty, because a control byte in source is invisible in a diff and silently breaks the construct containing it, but got 'Get-GraphTenant.ps1: 1 control byte(s), first is 0x08'.</message>
-                  <stack-trace>at $offenders | Should -BeNullOrEmpty -Because 'a control byte in source is invisible in a diff and silently breaks the construct containing it', /Users/Adam.Gell/repo/GraphKit/tests/QA/SourceHygiene.tests.ps1:31</stack-trace>
-                </failure>
-              </test-case>
-              <test-case description="is valid UTF-8 with no replacement characters" name="Source hygiene.is valid UTF-8 with no replacement characters" time="0.0053" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="has no source file that fails to parse" name="Source hygiene.has no source file that fails to parse" time="0.0268" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="carries no internal tenant, customer, or project identifiers" name="Source hygiene.carries no internal tenant, customer, or project identifiers" time="0.0108" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="writes nothing to the error stream when imported by path" name="Built module imports cleanly.writes nothing to the error stream when imported by path" time="0.7524" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="writes nothing to the error stream when imported by name" name="Built module imports cleanly.writes nothing to the error stream when imported by name" time="1.5017" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="writes nothing to the error stream when imported twice" name="Built module imports cleanly.writes nothing to the error stream when imported twice" time="1.0867" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="registers its handler strategies despite the import-time guard being false" name="Built module imports cleanly.registers its handler strategies despite the import-time guard being false" time="0.6433" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
         </results>
