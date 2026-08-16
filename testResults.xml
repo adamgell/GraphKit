@@ -1,17 +1,28 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="4" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="23:02:07">
-  <environment machine-name="BigMac26.home.gell.one" user="Adam.Gell" nunit-version="2.5.8.0" clr-version="10.0.11" cwd="/Users/Adam.Gell/repo/GraphKit" platform="Darwin" user-domain="" os-version="25.4.0" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="7" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="23:41:41">
+  <environment machine-name="BigMac26.home.gell.one" platform="Darwin" cwd="/Users/Adam.Gell/repo/GraphKit" os-version="25.4.0" nunit-version="2.5.8.0" clr-version="10.0.11" user="Adam.Gell" user-domain="" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.5808" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.6263" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1" executed="True" result="Success" success="True" time="0.5808" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Pipeline/DescriptorTimeouts.Tests.ps1" executed="True" result="Success" success="True" time="0.6263" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Pipeline/DescriptorTimeouts.Tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Descriptor invariants that fail silently if broken" executed="True" result="Success" success="True" time="0.0902" asserts="0" description="Descriptor invariants that fail silently if broken">
+          <test-suite type="TestFixture" name="Per-operation transport timeouts" executed="True" result="Success" success="True" time="0.1825" asserts="0" description="Per-operation transport timeouts">
             <results>
-              <test-case description="keeps the $select on Organization/GetMdmAuthority" name="Descriptor invariants that fail silently if broken.keeps the $select on Organization/GetMdmAuthority" time="0.0483" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="declares every singleton with the singleton handler and no paging" name="Descriptor invariants that fail silently if broken.declares every singleton with the singleton handler and no paging" time="0.0062" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="gives every beta descriptor a reason" name="Descriptor invariants that fail silently if broken.gives every beta descriptor a reason" time="0.0102" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="never pairs a ListBeta operation with a v1.0 ApiVersion" name="Descriptor invariants that fail silently if broken.never pairs a ListBeta operation with a v1.0 ApiVersion" time="0.0111" asserts="0" success="True" result="Success" executed="True" />
+              <test-suite type="TestFixture" name="Per-operation transport timeouts.plumbing" executed="True" result="Success" success="True" time="0.1186" asserts="0" description="Per-operation transport timeouts.plumbing">
+                <results>
+                  <test-case description="passes declared timeouts to the sender" name="Per-operation transport timeouts.plumbing.passes declared timeouts to the sender" time="0.0898" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="clamps a declared timeout to the remaining operation deadline" name="Per-operation transport timeouts.plumbing.clamps a declared timeout to the remaining operation deadline" time="0.0099" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="passes NO timeout parameters when the descriptor declares none" name="Per-operation transport timeouts.plumbing.passes NO timeout parameters when the descriptor declares none" time="0.0064" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Per-operation transport timeouts.validation" executed="True" result="Success" success="True" time="0.1779" asserts="0" description="Per-operation transport timeouts.validation">
+                <results>
+                  <test-case description="rejects an unknown Timeouts key rather than ignoring it" name="Per-operation transport timeouts.validation.rejects an unknown Timeouts key rather than ignoring it" time="0.0286" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="rejects a non-positive timeout" name="Per-operation transport timeouts.validation.rejects a non-positive timeout" time="0.0044" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="rejects a timeout above the ceiling, which is how a slipped digit reads" name="Per-operation transport timeouts.validation.rejects a timeout above the ceiling, which is how a slipped digit reads" time="0.0034" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="accepts a valid Timeouts block" name="Per-operation transport timeouts.validation.accepts a valid Timeouts block" time="0.0132" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
             </results>
           </test-suite>
         </results>

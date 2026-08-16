@@ -32,14 +32,47 @@ Describe 'Per-operation transport timeouts' {
                     Timeouts = @{ HeadersSeconds = 60; BodySeconds = 45 }
                 }
                 $context = [PSCustomObject]@{ Cloud = 'Global'; GraphBaseUri = [uri]'https://graph.microsoft.com'; TenantId = 'tid'; TokenSource = $null }
+                # Deadline deliberately larger than both declared timeouts, so this test
+                # exercises plumbing rather than the clamp - the clamp has its own test.
                 $null = Invoke-GraphRetry -Context $context -Descriptor $descriptor -Uri ([uri]'https://graph.microsoft.com/v1.0/x') `
-                    -Method GET -Headers @{} -Body $null -DeadlineSeconds 30 `
+                    -Method GET -Headers @{} -Body $null -DeadlineSeconds 300 `
                     -CancellationToken ([System.Threading.CancellationToken]::None) `
                     -Injections @{ Send = $Send; Delay = { param($Seconds) }; Jitter = { 0.0 } }
             }
 
             $script:captured.Headers | Should -Be 60
             $script:captured.Body | Should -Be 45
+        }
+
+        It 'clamps a declared timeout to the remaining operation deadline' {
+            # The operation deadline must win. Deadline expiry is only checked BETWEEN
+            # attempts, so once a send starts nothing else bounds it - a 600s descriptor
+            # timeout under a 30s deadline would overrun by nearly ten minutes on ONE attempt
+            # and make the caller's deadline meaningless.
+            $send = {
+                param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy,
+                      $TokenSource, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding,
+                      $TenantBindingProver, $TimeoutConnectionSeconds, $TimeoutHeadersSeconds, $TimeoutBodySeconds)
+                $script:clamped = @{ Headers = $TimeoutHeadersSeconds; Body = $TimeoutBodySeconds }
+                [PSCustomObject]@{ StatusCode = 200; Headers = @{}; Body = @{ value = @() }; RequestId = 'x'; TransportException = $null; ResponseReceived = $true }
+            }
+
+            InModuleScope GraphKit -Parameters @{ Send = $send } {
+                $descriptor = @{
+                    Type = 'T'; Operation = 'O'; Method = 'GET'; PathTemplate = '/x'
+                    CredentialPolicy = 'None'; ResponseKind = 'Json'; ReplayPolicy = 'Safe'
+                    ThrottleClass = 'Read'; ResourceFamily = 'F'
+                    Timeouts = @{ HeadersSeconds = 600; BodySeconds = 600 }
+                }
+                $context = [PSCustomObject]@{ Cloud = 'Global'; GraphBaseUri = [uri]'https://graph.microsoft.com'; TenantId = 'tid'; TokenSource = $null }
+                $null = Invoke-GraphRetry -Context $context -Descriptor $descriptor -Uri ([uri]'https://graph.microsoft.com/v1.0/x') `
+                    -Method GET -Headers @{} -Body $null -DeadlineSeconds 30 `
+                    -CancellationToken ([System.Threading.CancellationToken]::None) `
+                    -Injections @{ Send = $Send; Delay = { param($Seconds) }; Jitter = { 0.0 } }
+            }
+
+            $script:clamped.Headers | Should -BeLessOrEqual 30 -Because 'a 600s phase timeout cannot outlive a 30s operation deadline'
+            $script:clamped.Headers | Should -BeGreaterThan 0 -Because 'zero is read as infinite by several stacks'
         }
 
         It 'passes NO timeout parameters when the descriptor declares none' {
@@ -99,6 +132,18 @@ Describe 'Per-operation transport timeouts' {
 
             InModuleScope GraphKit -Parameters @{ Path = $path } {
                 { Import-GraphOperationDescriptor -Path $Path } | Should -Throw -ExpectedMessage '*positive integer*'
+            }
+        }
+
+        It 'rejects a timeout above the ceiling, which is how a slipped digit reads' {
+            # 6000 instead of 600 types cleanly and would hang a request for over an hour,
+            # looking like a network fault rather than a descriptor mistake.
+            $path = Join-Path $script:descriptorDir 'Bad3.List.psd1'
+            ($script:template -replace "ThrottleClass       = 'Read'", "ThrottleClass       = 'Read'`n    Timeouts            = @{ HeadersSeconds = 6000 }") |
+                Set-Content -LiteralPath $path -Encoding utf8
+
+            InModuleScope GraphKit -Parameters @{ Path = $path } {
+                { Import-GraphOperationDescriptor -Path $Path } | Should -Throw -ExpectedMessage '*ceiling*'
             }
         }
 

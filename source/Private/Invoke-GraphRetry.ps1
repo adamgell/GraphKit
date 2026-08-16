@@ -263,9 +263,23 @@ function Invoke-GraphRetry {
         # delegate is precisely how the -CancellationToken defect reached a live tenant.
         $descriptorTimeouts = $Descriptor.Timeouts
         if ($descriptorTimeouts -is [hashtable]) {
-            if ($descriptorTimeouts.ContainsKey('ConnectionSeconds')) { $sendParams.TimeoutConnectionSeconds = [int] $descriptorTimeouts['ConnectionSeconds'] }
-            if ($descriptorTimeouts.ContainsKey('HeadersSeconds')) { $sendParams.TimeoutHeadersSeconds = [int] $descriptorTimeouts['HeadersSeconds'] }
-            if ($descriptorTimeouts.ContainsKey('BodySeconds')) { $sendParams.TimeoutBodySeconds = [int] $descriptorTimeouts['BodySeconds'] }
+            # The operation deadline must still win. Deadline expiry is only checked BETWEEN
+            # attempts, so once a send begins nothing else bounds it: a descriptor declaring a
+            # 600-second timeout under a 300-second deadline would overrun the deadline by
+            # minutes on a single attempt, and the caller's timeout would mean nothing. Clamp
+            # each phase to whatever remains, with a one-second floor so a nearly-expired
+            # deadline fails fast rather than passing 0 (which several stacks read as infinite).
+            $remainingSeconds = [Math]::Max(1, [int]([double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds))
+
+            foreach ($phase in @(
+                    @{ Key = 'ConnectionSeconds'; Param = 'TimeoutConnectionSeconds' }
+                    @{ Key = 'HeadersSeconds'; Param = 'TimeoutHeadersSeconds' }
+                    @{ Key = 'BodySeconds'; Param = 'TimeoutBodySeconds' }
+                )) {
+                if (-not $descriptorTimeouts.ContainsKey($phase.Key)) { continue }
+                $declared = [int] $descriptorTimeouts[$phase.Key]
+                $sendParams[$phase.Param] = [Math]::Min($declared, $remainingSeconds)
+            }
         }
 
         if ($credentialPolicy -eq 'GraphBearer') {

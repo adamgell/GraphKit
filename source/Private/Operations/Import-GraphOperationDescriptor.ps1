@@ -18,6 +18,9 @@ $script:GraphOperationRequiredFields = @(
     'SupportedAuthModes', 'RequiredPermissions', 'RequiredLicense', 'SupportedClouds'
 )
 
+# Ceiling for any per-operation transport timeout. See the Timeouts validation below.
+$script:GraphOperationMaxTimeoutSeconds = 600
+
 # Fields that must be non-empty strings (no enum).
 $script:GraphOperationStringFields = @(
     'Type', 'Operation', 'Method', 'PathTemplate', 'ResponseKind', 'ResourceFamily'
@@ -337,6 +340,13 @@ function Import-GraphOperationDescriptor {
                 $value = $timeouts[$key]
                 if ($value -isnot [int] -or $value -le 0) {
                     $violations.Add("Field 'Timeouts.$key' must be a positive integer number of seconds, got '$value'.")
+                }
+                elseif ($value -gt $script:GraphOperationMaxTimeoutSeconds) {
+                    # An upper bound because the realistic authoring error is a slipped digit:
+                    # 6000 for 600, or 600 for 60. Without a cap that types cleanly and hangs a
+                    # request for over an hour, which looks like a network fault rather than a
+                    # descriptor mistake.
+                    $violations.Add("Field 'Timeouts.$key' is $value seconds, above the $($script:GraphOperationMaxTimeoutSeconds)-second ceiling. If an operation genuinely needs longer, raise the ceiling deliberately rather than per-descriptor.")
                 }
             }
         }
