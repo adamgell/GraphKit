@@ -225,3 +225,119 @@ Describe 'Bodyless actions' {
     }
 }
 
+Describe 'High-impact confirmation' {
+    # ConfirmImpact is a property of the CMDLET, and Invoke-GraphOperation is one cmdlet serving
+    # every descriptor, so it cannot vary per operation. Its default Medium against the default
+    # $ConfirmPreference of High means ShouldProcess returns true WITHOUT PROMPTING - fine for an
+    # assignment, not fine for a factory reset. Impact = 'High' adds ShouldContinue, which prompts
+    # regardless of $ConfirmPreference, and -Force is the named automation opt-out.
+
+    BeforeAll {
+        $script:hiCtx = InModuleScope GraphKit {
+            [PSCustomObject]@{
+                ProfileId = 'impact-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                TokenSource = $null; TenantId = [guid]::Empty
+            }
+        }
+        $script:catalog = @(Get-GraphOperation -List)
+    }
+
+    It 'declares exactly one High-impact operation, and it is Wipe' {
+        # If this count grows, someone added an irreversible operation. That should be a decision,
+        # not a diff nobody read.
+        $high = @($script:catalog | Where-Object { $_.Impact -eq 'High' })
+        $high.Count | Should -Be 1
+        "$($high[0].Type)/$($high[0].Operation)" | Should -Be 'ManagedDevice/Wipe'
+    }
+
+    It 'separates disruptive from destructive' {
+        # Delete removes the Intune RECORD; the machine keeps working. Wipe erases the machine.
+        # They read almost identically in a script, so the catalog carries the difference.
+        foreach ($n in @('Retire', 'Delete')) {
+            $d = $script:catalog | Where-Object { $_.Type -eq 'ManagedDevice' -and $_.Operation -eq $n }
+            $d | Should -Not -BeNullOrEmpty
+            $d.Impact | Should -Be 'Medium' -Because "$n is recoverable - the user re-enrolls"
+        }
+    }
+
+    It 'requires a body for Wipe even though Graph would accept an empty one' {
+        # keepUserData and keepEnrollmentData default to false server-side, so the empty body is
+        # the MOST destructive call - and the one written by accident.
+        $d = $script:catalog | Where-Object { $_.Type -eq 'ManagedDevice' -and $_.Operation -eq 'Wipe' }
+        $d.RequestBodyKind | Should -Not -BeNullOrEmpty
+    }
+
+    It 'refuses to send a High-impact operation without -Force' {
+        # The critical case, and it must FAIL rather than prompt. The first version of this gate
+        # called ShouldContinue, which does not reliably throw in a non-interactive host - it
+        # blocks on stdin. The test run hung past ten minutes. A wedged CI job is worse than a
+        # failed one, so the gate is now a hard requirement with no prompt at all.
+        {
+            InModuleScope GraphKit -Parameters @{ Ctx = $script:hiCtx } {
+                param($Ctx)
+                Mock Test-GraphCredentialPolicy { $null }
+                Mock Invoke-GraphHandlerStrategy { throw 'a High-impact operation was SENT without confirmation' }
+                Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation Wipe `
+                    -Parameters @{ id = 'dev-1'; Body = @{ keepUserData = $false } }
+            }
+        } | Should -Throw -ExpectedMessage '*-Force*'
+    }
+
+    It 'proceeds when -Force is given' {
+        InModuleScope GraphKit -Parameters @{ Ctx = $script:hiCtx } {
+            param($Ctx)
+            $script:wipeSent = $false
+            Mock Test-GraphCredentialPolicy { $null }
+            Mock Invoke-GraphHandlerStrategy {
+                $script:wipeSent = $true
+                [PSCustomObject]@{ Data = @(); Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{} }
+            }
+            $null = Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation Wipe `
+                        -Parameters @{ id = 'dev-1'; Body = @{ keepUserData = $false } } -Force
+            $script:wipeSent | Should -BeTrue
+        }
+    }
+
+    It 'still honours -WhatIf ahead of -Force, so a dry run of a wipe sends nothing' {
+        # -Force must not become a way to skip the dry run. If these two ever swapped order,
+        # "-WhatIf -Force" would wipe the device it claimed to be simulating.
+        InModuleScope GraphKit -Parameters @{ Ctx = $script:hiCtx } {
+            param($Ctx)
+            Mock Test-GraphCredentialPolicy { $null }
+            Mock Invoke-GraphHandlerStrategy { throw '-WhatIf was overridden by -Force' }
+            { Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation Wipe `
+                -Parameters @{ id = 'dev-1'; Body = @{ keepUserData = $false } } -WhatIf -Force } |
+                Should -Not -Throw
+        }
+    }
+
+    It 'does not gate a Medium-impact write behind confirmation' {
+        # Retire is disruptive, not destructive. If Medium started prompting, every routine
+        # remediation script would hang and someone would reach for -Force everywhere - which is
+        # how the High gate gets neutered in practice.
+        InModuleScope GraphKit -Parameters @{ Ctx = $script:hiCtx } {
+            param($Ctx)
+            $script:retireSent = $false
+            Mock Test-GraphCredentialPolicy { $null }
+            Mock Invoke-GraphHandlerStrategy {
+                $script:retireSent = $true
+                [PSCustomObject]@{ Data = @(); Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{} }
+            }
+            $null = Invoke-GraphOperation -Context $Ctx -Type ManagedDevice -Operation Retire -Parameters @{ id = 'dev-1' }
+            $script:retireSent | Should -BeTrue -Because 'Medium impact must not require -Force'
+        }
+    }
+
+    It 'rejects a descriptor claiming impact on a non-mutating operation' {
+        $dir = Join-Path $TestDrive ([guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $dir -Force
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+        $tpl = Get-Content (Join-Path $repoRoot 'source/Data/Operations/ManagedDevice.List.psd1') -Raw
+        $path = Join-Path $dir 'Bad.List.psd1'
+        ($tpl -replace "ReplayPolicy        = 'Safe'", "ReplayPolicy        = 'Safe'`n    Impact              = 'High'") |
+            Set-Content -LiteralPath $path -Encoding utf8
+        InModuleScope GraphKit -Parameters @{ Path = $path } {
+            { Import-GraphOperationDescriptor -Path $Path } | Should -Throw -ExpectedMessage '*cannot be destructive*'
+        }
+    }
+}
+

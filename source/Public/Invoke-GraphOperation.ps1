@@ -54,6 +54,14 @@
     .PARAMETER ProfileId
         The canonical profile identifier to resolve into a context via Get-GraphContext. Mutually
         exclusive with -Context; supply exactly one.
+    .PARAMETER Force
+        Bypasses the confirmation required by operations whose descriptor declares Impact 'High'.
+        It bypasses nothing else - not -WhatIf, not the credential-policy check. High-impact
+        operations can cause irreversible data loss, and ShouldProcess alone does not prompt for
+        them under the default $ConfirmPreference, so an unattended caller must opt into
+        destruction by naming this switch rather than inheriting permission from a preference
+        variable it never set.
+
     .NOTES
         Named Invoke-GraphOperation, not Invoke-GraphRequest, because Microsoft.Graph.Authentication
         (a required module) exports an SDK cmdlet named Invoke-GraphRequest; a same-named export
@@ -91,7 +99,14 @@ function Invoke-GraphOperation {
         [PSCustomObject] $Context,
 
         [Parameter()]
-        [string] $ProfileId
+        [string] $ProfileId,
+
+        # Bypasses the High-impact confirmation ONLY. It does not bypass -WhatIf, the
+        # credential-policy check, or anything else. This is the automation opt-in for
+        # destruction, and it has to be named explicitly so that permission to wipe a device is
+        # never inherited from a preference variable the caller did not set.
+        [Parameter()]
+        [switch] $Force
     )
 
     # 1. Resolve the context: exactly one of -Context / -ProfileId.
@@ -202,6 +217,43 @@ function Invoke-GraphOperation {
 
         if (-not $PSCmdlet.ShouldProcess($shouldProcessTarget, $shouldProcessAction)) {
             return
+        }
+
+        # A second gate for operations whose descriptor declares Impact = 'High'.
+        #
+        # This REQUIRES -Force rather than prompting, and the first version prompting was a real
+        # defect: ShouldContinue does not reliably throw in a non-interactive host, it BLOCKS
+        # waiting on stdin. The test run hung past ten minutes with six processes stuck on it. In
+        # CI that is not a failed build, it is a wedged one - strictly worse than the silent wipe
+        # it was meant to prevent.
+        #
+        # Requiring an explicit switch is also better on the merits. It behaves identically
+        # interactive and unattended, it cannot hang, and the intent to destroy is recorded in the
+        # command itself - visible in shell history, a script diff, and a code review - instead of
+        # in an answer someone typed once and nobody can audit.
+        #
+        # ConfirmImpact could not have done this: it is a property of the CMDLET, and
+        # Invoke-GraphOperation is one cmdlet serving every descriptor, so it cannot vary per
+        # operation. Its default Medium against the default $ConfirmPreference of High means
+        # ShouldProcess returns true WITHOUT prompting - fine for an assignment, not for a factory
+        # reset.
+        if (-not $raw -and ([string] $Descriptor.Impact) -eq 'High' -and -not $Force) {
+            throw [System.Management.Automation.ErrorRecord]::new(
+                # The extra parentheses around the -f expression are load-bearing. Inside a .NET
+                # constructor call the comma is an ARGUMENT SEPARATOR, so without them this parses
+                # as ::new(("...{0}/{1}..." -f $Descriptor.Type), $Descriptor.Operation) - the
+                # format string gets one argument for two placeholders and throws "Index (zero
+                # based) must be ... less than the size of the argument list" INSTEAD of the error
+                # it was written to raise. The gate still blocked the wipe; it just reported
+                # something unintelligible while doing it.
+                [System.InvalidOperationException]::new(
+                    (("Operation '{0}/{1}' is declared High impact and can cause irreversible data loss. " +
+                      'Re-run with -Force to confirm. Use -WhatIf first to see exactly what would be affected.') -f $Descriptor.Type, $Descriptor.Operation)
+                ),
+                'GraphKit.HighImpactConfirmationRequired',
+                [System.Management.Automation.ErrorCategory]::PermissionDenied,
+                $shouldProcessTarget
+            )
         }
     }
 

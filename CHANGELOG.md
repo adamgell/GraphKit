@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Actions may declare `RequestBodyKind = $null` and are then executed without a body. The action
   strategy previously demanded a body from every action, which excluded most of the write surface:
   Intune device actions are bodyless POSTs and deletes carry no body at all.
+- **Descriptors may declare `Impact` (`Low`/`Medium`/`High`).** `High` means the operation can
+  cause irreversible data loss, and `Invoke-GraphOperation` then requires an explicit `-Force`.
+  It does not prompt: `ShouldContinue` blocks rather than throws in a non-interactive host, which
+  would wedge a CI job instead of failing it. Requiring a named switch also records the intent to
+  destroy in the command itself, where a code review can see it. A non-mutating operation
+  declaring an impact is rejected at load.
+- Three device write descriptors (64 operations): `ManagedDevice.Retire` and `ManagedDevice.Delete`
+  (`Medium` - disruptive but recoverable) and `ManagedDevice.Wipe` (`High`). Wipe requires a
+  request body even though Graph accepts an empty one, because `keepUserData` defaults to false
+  server-side and the empty body is therefore the most destructive possible call.
 - Two write descriptors (61 operations): `ManagedDevice.SyncDevice` and
   `DeviceCompliancePolicy.Assign`. Destructive device actions - retire, wipe, delete - are
   deliberately NOT included; see the note in `AGENTS.md`.

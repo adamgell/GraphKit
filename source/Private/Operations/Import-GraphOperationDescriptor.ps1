@@ -58,6 +58,7 @@ $script:GraphOperationEnums = @{
     RedirectPolicy     = @('None', 'SafeGetOnly')
     IdentityRequirement = @('Verified', 'AllowUnverifiedRead')
     ThrottleClass      = @('Read', 'Write')
+    Impact             = @('Low', 'Medium', 'High')
 }
 
 function Import-GraphOperationDescriptor {
@@ -210,6 +211,21 @@ function Import-GraphOperationDescriptor {
             if ($pathTemplate.Contains('..')) {
                 $violations.Add("Field 'PathTemplate' must not contain '..'; got '$pathTemplate'.")
             }
+        }
+    }
+
+    # Impact is OPTIONAL and describes how bad it is if this operation runs when it should not.
+    # Only 'High' changes behaviour: Invoke-GraphOperation additionally requires an interactive
+    # confirmation or an explicit -Force, because ShouldProcess alone does not prompt under the
+    # default $ConfirmPreference and a mistyped device id would otherwise wipe a real machine
+    # silently.
+    #
+    # A non-mutating operation declaring an impact is a contradiction, not a harmless extra: it
+    # would mean someone believed a read was dangerous, and the reader cannot tell which half is
+    # wrong. Reject it at load rather than letting the two facts disagree in the catalog.
+    if ($descriptor.ContainsKey('Impact') -and $descriptor['Impact'] -in @('Medium', 'High')) {
+        if ($descriptor.ContainsKey('ReplayPolicy') -and $descriptor['ReplayPolicy'] -eq 'Safe') {
+            $violations.Add("Field 'Impact' is '$($descriptor['Impact'])' but ReplayPolicy is 'Safe'; a non-mutating operation cannot be destructive.")
         }
     }
 
