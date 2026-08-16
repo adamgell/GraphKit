@@ -1,5 +1,11 @@
 # GraphKit
 
+[![PSGallery Version](https://img.shields.io/powershellgallery/v/GraphKit)](https://www.powershellgallery.com/packages/GraphKit)
+[![PSGallery Downloads](https://img.shields.io/powershellgallery/dt/GraphKit)](https://www.powershellgallery.com/packages/GraphKit)
+[![PowerShell 7.4+](https://img.shields.io/badge/PowerShell-7.4%2B-blue)](https://github.com/PowerShell/PowerShell)
+
+> Query Microsoft Graph across multiple tenants from PowerShell — auth, retries, throttling, and paging handled for you.
+
 GraphKit is an app-only, multi-tenant Microsoft Graph execution and analysis layer for PowerShell, with explicit Microsoft Intune and Entra operation semantics.
 
 It centralizes tenant profiles, credential resolution, token acquisition, Graph request execution, paging, batching, throttling, retry policy, permission analysis, and evidence export without becoming a generic Graph SDK or OAuth client.
