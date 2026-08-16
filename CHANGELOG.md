@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without losing its siblings. Validated at load, because a typo would redact nothing and look
   correct.
 - `Export-GraphResult -NoRedact` writes rows exactly as the service returned them.
+- Four read-only beta descriptors requested by a consumer, taking the catalog from 55 to 59:
+  `GroupPolicyConfiguration.ListBeta`, `GroupPolicyDefinitionValue.ListBeta`,
+  `GroupPolicyPresentationValue.ListBeta` (the Administrative Template walk) and
+  `ConfigurationPolicyAssignment.ListBeta`. The last closes a silent gap - assignment
+  descriptors existed for compliance policies, device configurations and mobile apps, so a
+  reconciliation across policy types contributed nothing for Settings Catalog and still
+  reported success.
 
 ### Changed
 
@@ -25,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched.
 - Exporting rows without an envelope now warns that no declaration is available and nothing was
   redacted, rather than passing silently.
+- **A `PathTemplate` that fixes a query option now extends it with `&`.** `Resolve-GraphUri`
+  always joined with `?`, so a descriptor with a fixed option plus a caller-supplied one
+  produced `...?$expand=definition?$filter=x` - not two options, since the second `?` becomes
+  part of the first option's value. Graph returns 200 and silently ignores the filter, so the
+  caller gets a complete unfiltered collection that looks like a filtered one. Only
+  `Organization/GetMdmAuthority` fixed an option before now, and it was safe purely because it
+  declares no caller options at all.
+- A caller-supplied query option that the descriptor already fixes is now rejected by name,
+  rather than emitted twice for Graph to reject with an error naming the option instead of the
+  descriptor responsible.
 
 ### Deprecated
 

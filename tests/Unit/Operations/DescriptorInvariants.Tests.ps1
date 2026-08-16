@@ -104,3 +104,55 @@ Describe 'Get-GraphOperation does not hand out the live catalog' {
         $d.RequiredPermissions[0].Value | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'The admin-template walk and Settings Catalog assignments' {
+
+    It 'fixes the load-bearing $expand on both admin-template child operations' {
+        # Without $expand a definitionValue is ids + an enabled flag, and a presentationValue is
+        # a value with no label. Both return 200, so dropping the expand does not fail - it
+        # produces rows that cannot be interpreted, which a consumer reads as "the tenant
+        # configured nothing meaningful".
+        foreach ($case in @(
+            @{ Type = 'GroupPolicyDefinitionValue';   Expand = 'definition' }
+            @{ Type = 'GroupPolicyPresentationValue'; Expand = 'presentation' }
+        )) {
+            $d = $script:catalog | Where-Object { $_.Type -eq $case.Type -and $_.Operation -eq 'ListBeta' }
+            $d | Should -Not -BeNullOrEmpty -Because "$($case.Type)/ListBeta must exist"
+            $d.PathTemplate | Should -BeLike "*`$expand=$($case.Expand)*"
+            $d.AdvancedQuery.Supported | Should -BeFalse -Because 'the fixed option must not be overridable'
+        }
+    }
+
+    It 'parameterizes the presentationValue walk by BOTH ancestors' {
+        $d = $script:catalog | Where-Object { $_.Type -eq 'GroupPolicyPresentationValue' -and $_.Operation -eq 'ListBeta' }
+        $d.PathTemplate | Should -BeLike '*{id}*'
+        $d.PathTemplate | Should -BeLike '*{definitionValueId}*'
+    }
+
+    It 'covers assignments for every policy type a conflict check compares' {
+        # The gap this closes was invisible: a reconciliation across policy types simply
+        # contributed nothing for Settings Catalog, so overlap involving it was never reported
+        # and the run still looked complete.
+        $assignmentTypes = @($script:catalog | Where-Object { $_.Type -like '*Assignment' } | ForEach-Object { $_.Type })
+        foreach ($required in @(
+            'DeviceCompliancePolicyAssignment'
+            'DeviceConfigurationAssignment'
+            'MobileAppAssignment'
+            'ConfigurationPolicyAssignment'
+        )) {
+            $assignmentTypes | Should -Contain $required
+        }
+    }
+
+    It 'roots every admin-template operation under the same parent collection' {
+        $walk = @($script:catalog | Where-Object { $_.ResourceFamily -eq 'Intune.GroupPolicy' })
+        $walk.Count | Should -Be 3
+        foreach ($d in $walk) {
+            $d.PathTemplate | Should -BeLike '/deviceManagement/groupPolicyConfigurations*'
+            $d.ApiVersion | Should -Be 'beta' -Because 'v1.0 returns 400 BadRequest for this collection'
+            $d.Method | Should -Be 'GET'
+            $d.ReplayPolicy | Should -Be 'Safe'
+        }
+    }
+}
+

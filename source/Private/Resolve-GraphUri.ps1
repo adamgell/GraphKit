@@ -65,7 +65,26 @@ function Resolve-GraphUri {
     )
     $countSupported = [bool] $advancedQuery.Count
 
-    # 3. Collect and validate query options. Only keys prefixed with '$' are query options; every
+    # 3. Options already baked into the template. A handful of descriptors carry a load-bearing
+    #    query option in PathTemplate because the operation is meaningless without it -
+    #    Organization/GetMdmAuthority's $select, the admin-template $expand. Their names are
+    #    collected so a caller cannot supply the same option a second time: Graph rejects a
+    #    duplicated option, and its error names the option rather than the descriptor that fixed
+    #    it, sending the reader to the wrong place.
+    #
+    #    Read from $path, not $pathTemplate, and only AFTER substitution - which is safe because
+    #    EscapeDataString turns a '?' inside a token value into %3F, so no supplied value can
+    #    forge a query string here.
+    $templateQueryIndex = $path.IndexOf('?')
+    $bakedOptionNames = @{}
+    if ($templateQueryIndex -ge 0) {
+        foreach ($pair in $path.Substring($templateQueryIndex + 1).Split('&')) {
+            $bakedName = $pair.Split('=')[0]
+            if (-not [string]::IsNullOrEmpty($bakedName)) { $bakedOptionNames[$bakedName] = $true }
+        }
+    }
+
+    # 4. Collect and validate query options. Only keys prefixed with '$' are query options; every
     #    other parameter (path token already consumed, Body for actions, etc.) is ignored here and
     #    consumed by its own stage of the pipeline.
     $queryParts = [System.Collections.Generic.List[string]]::new()
@@ -77,6 +96,14 @@ function Resolve-GraphUri {
         $parameterValue = $Parameters[$parameterName]
         if ($null -eq $parameterValue) {
             continue
+        }
+
+        if ($bakedOptionNames.ContainsKey($parameterName)) {
+            throw (
+                "Query option '{0}' is fixed by operation '{1}/{2}' and cannot be supplied again. " +
+                'The descriptor bakes it into the path because the operation does not return ' +
+                'usable data without it.'
+            ) -f $parameterName, $Descriptor.Type, $Descriptor.Operation
         }
 
         $isCount = ($parameterName -eq '$count')
@@ -96,9 +123,16 @@ function Resolve-GraphUri {
         $queryParts.Add(('{0}={1}' -f $parameterName, [uri]::EscapeDataString([string] $parameterValue)))
     }
 
-    # 4. Assemble the absolute URI.
+    # 5. Assemble the absolute URI. A template that already carries a query must EXTEND it with
+    #    '&'. Joining with '?' unconditionally produced 'path?$select=a?$filter=b', which is not
+    #    two options: the second '?' becomes part of the first option's value, so the caller's
+    #    filter silently does nothing instead of failing loudly.
     $baseString = $BaseUri.AbsoluteUri.TrimEnd('/')
-    $queryString = if ($queryParts.Count -gt 0) { '?' + ($queryParts -join '&') } else { '' }
+    $queryString = ''
+    if ($queryParts.Count -gt 0) {
+        $separator = if ($templateQueryIndex -ge 0) { '&' } else { '?' }
+        $queryString = $separator + ($queryParts -join '&')
+    }
 
     return [uri] ('{0}{1}{2}' -f $baseString, $path, $queryString)
 }
