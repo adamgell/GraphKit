@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of Group.List. Assignment targets resolve through groups, and the beta shape carries membership and licensing fields v1.0 omits.'
 
     Method              = 'GET'
     PathTemplate        = '/groups'

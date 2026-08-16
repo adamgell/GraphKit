@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of DeviceCategory.List. Callers commonly read categories from beta, and the beta shape carries fields the v1.0 projection drops.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceManagement/deviceCategories'

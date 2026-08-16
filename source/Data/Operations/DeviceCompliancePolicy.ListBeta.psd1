@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of DeviceCompliancePolicy.List. Compliance policy types are richer on beta; several platform-specific policy shapes are beta-only.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceManagement/deviceCompliancePolicies'

@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of ManagedDevice.List. The beta device record carries hardware, compliance and sync fields that v1.0 drops.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceManagement/managedDevices'

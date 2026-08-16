@@ -1,17 +1,17 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="4" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="21:53:24">
-  <environment user-domain="" clr-version="10.0.11" cwd="/Users/Adam.Gell/repo/GraphKit" os-version="25.4.0" platform="Darwin" user="Adam.Gell" machine-name="BigMac26.home.gell.one" nunit-version="2.5.8.0" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="4" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="23:02:07">
+  <environment machine-name="BigMac26.home.gell.one" user="Adam.Gell" nunit-version="2.5.8.0" clr-version="10.0.11" cwd="/Users/Adam.Gell/repo/GraphKit" platform="Darwin" user-domain="" os-version="25.4.0" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="4.1183" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.5808" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/QA/CleanImport.tests.ps1" executed="True" result="Success" success="True" time="4.1183" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/QA/CleanImport.tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1" executed="True" result="Success" success="True" time="0.5808" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/DescriptorInvariants.Tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Built module imports cleanly" executed="True" result="Success" success="True" time="3.9986" asserts="0" description="Built module imports cleanly">
+          <test-suite type="TestFixture" name="Descriptor invariants that fail silently if broken" executed="True" result="Success" success="True" time="0.0902" asserts="0" description="Descriptor invariants that fail silently if broken">
             <results>
-              <test-case description="writes nothing to the error stream when imported by path" name="Built module imports cleanly.writes nothing to the error stream when imported by path" time="0.7524" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="writes nothing to the error stream when imported by name" name="Built module imports cleanly.writes nothing to the error stream when imported by name" time="1.5017" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="writes nothing to the error stream when imported twice" name="Built module imports cleanly.writes nothing to the error stream when imported twice" time="1.0867" asserts="0" success="True" result="Success" executed="True" />
-              <test-case description="registers its handler strategies despite the import-time guard being false" name="Built module imports cleanly.registers its handler strategies despite the import-time guard being false" time="0.6433" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="keeps the $select on Organization/GetMdmAuthority" name="Descriptor invariants that fail silently if broken.keeps the $select on Organization/GetMdmAuthority" time="0.0483" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="declares every singleton with the singleton handler and no paging" name="Descriptor invariants that fail silently if broken.declares every singleton with the singleton handler and no paging" time="0.0062" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="gives every beta descriptor a reason" name="Descriptor invariants that fail silently if broken.gives every beta descriptor a reason" time="0.0102" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="never pairs a ListBeta operation with a v1.0 ApiVersion" name="Descriptor invariants that fail silently if broken.never pairs a ListBeta operation with a v1.0 ApiVersion" time="0.0111" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
         </results>

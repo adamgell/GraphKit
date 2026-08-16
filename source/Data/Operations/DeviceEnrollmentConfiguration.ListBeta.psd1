@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of DeviceEnrollmentConfiguration.List. Enrollment restriction and ESP shapes are fuller on beta.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceManagement/deviceEnrollmentConfigurations'

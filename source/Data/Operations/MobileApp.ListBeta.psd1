@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of MobileApp.List. Verified against a live tenant: beta returns 80 apps where v1.0 returns 75, so the two projections are not merely wider - they differ in membership.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceAppManagement/mobileApps'

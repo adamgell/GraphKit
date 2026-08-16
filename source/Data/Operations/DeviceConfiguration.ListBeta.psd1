@@ -23,7 +23,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
-    BetaReason          = $null
+    BetaReason          = 'Beta sibling of DeviceConfiguration.List. Settings-catalog and newer profile types surface on beta before v1.0.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceManagement/deviceConfigurations'
