@@ -9,12 +9,25 @@
     Requires an existing delegated Graph session for the target tenant (a cached MSAL token
     is sufficient - Connect-MgGraph is called silently).
 
-    Run:  pwsh -NoProfile -File ./scripts/New-Ivy24LabApp.ps1
+    -TenantId is required rather than baked in. It used to hardcode a real lab tenant id,
+    which put a tenant identifier in version control - the thing AGENTS.md tells everyone else
+    never to commit. A placeholder would have been worse than either: the script would run,
+    fail its own tenant guard, and look broken rather than unconfigured.
+
+    Run:  pwsh -NoProfile -File ./scripts/New-Ivy24LabApp.ps1 -TenantId <guid>
 #>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string] $TenantId,
+
+    [string] $DisplayName = 'GraphKit-Lab',
+
+    [string] $OutPath = "$HOME/.graphkit/certs/lab"
+)
+
 $ErrorActionPreference = 'Stop'
-$TenantId = '11111111-2222-3333-4444-555555555555'
-$DisplayName = 'GraphKit-Ivy24'
-$OutPath = "$HOME/.graphkit/certs/ivy24"
 $CreateScript = Join-Path $PSScriptRoot 'New-ClientServicePrincipalCBA.ps1'
 
 function Step { param($t) Write-Host "`n=== $t ===" -ForegroundColor Cyan }

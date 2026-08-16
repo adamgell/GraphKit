@@ -39,8 +39,8 @@ therefore two seams — a data plane and an auth plane — not 45 edits.
 importer refuses to relocate bearer tokens if it ever finds them, because moving a secret is an
 operator decision rather than a migration detail.
 
-**Two customer tenants** are configured — `contoso` (LocalMachine) and `fabrikam`
-(CurrentUser) — both certificate-store based, so the import must run on the Windows execution
+**Two customer tenants** are configured — one using the LocalMachine certificate store and one
+using CurrentUser — both certificate-store based, so the import must run on the Windows execution
 host. The dry run works anywhere and was verified on macOS.
 
 **The channel is local-only, at `~/graphkit-channel`.** The owner's decision: no GitHub
