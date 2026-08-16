@@ -3,9 +3,10 @@
 
     Authentication methods policy singleton (commonly surfaced as "MFA" in reporting tools).
 
-    NOT LIVE-VERIFIED: requires Policy.Read.All, which the verification tenant does not hold. It
-    returned 403 accessDenied, consistent with the declared permission being correct but
-    ungranted - the same position as ConditionalAccessPolicy.
+    VERIFIED against a live tenant on 2026-08-16, once Policy.Read.All was granted. Before that
+    grant it returned 403 accessDenied - which is what confirmed the declared permission was
+    correct rather than wrong, since a wrong scope and an ungranted one look identical until
+    the grant is made.
 #>
 @{
     SchemaVersion       = 1

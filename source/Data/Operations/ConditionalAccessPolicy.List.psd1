@@ -7,7 +7,8 @@
     Requires Policy.Read.All. Verified against a live tenant on 2026-08-15: an app-only token
     holding Policy.Read.ConditionalAccess received 403 AccessDenied, the same result as
     NamedLocation - the narrower conditional-access scope does not cover these reads. The lab
-    app does not hold Policy.Read.All, so this descriptor is CORRECT BUT NOT LIVE-VERIFIED.
+    app did not hold Policy.Read.All at the time. VERIFIED against a live tenant on 2026-08-16
+    once that scope was granted: 32 policies returned.
 #>
 @{
     SchemaVersion       = 1
