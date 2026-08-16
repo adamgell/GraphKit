@@ -110,6 +110,26 @@ if ($msal) { $result.DetectedMsalVersion = $msal.GetName().Version.ToString() }
         ([version] $version) -ge [version] '4.82.1' | Should -BeTrue -Because "detected MSAL $version is below the tested minimum 4.82.1"
     }
 
+    It 'the bundled MSAL has not changed MAJOR version' -ForEach $matrixRows {
+        # The design defers GraphKit.Auth - the compiled adapter in an isolated
+        # AssemblyLoadContext - as "much later, not v1", and names the conditions that would bring
+        # it forward. One is "Microsoft.Graph.Authentication changing or removing its bundled
+        # MSAL". Removal is already caught: the import guard fails outright. A DOWNGRADE is caught
+        # by the minimum below. An UPGRADE was not caught by anything - MSAL 5.x would satisfy
+        # ">= 4.82.1" and sail through, which is the one shape of that trigger that arrives
+        # silently.
+        #
+        # This turns the prose trigger into an executable one. A major-version change is not
+        # necessarily a failure of GraphKit; it is a signal that the deferral needs re-deciding by
+        # a person, which is exactly what a red test asks for.
+        $version = [version] $script:Results[$_.Name].DetectedMsalVersion
+        $version.Major | Should -Be 4 -Because @'
+the bundled Microsoft.Identity.Client changed major version. This is a RECORDED TRIGGER for
+bringing GraphKit.Auth forward (see the design spec: "Microsoft.Graph.Authentication changing or
+removing its bundled MSAL"). Re-decide the deferral rather than raising this number reflexively.
+'@
+    }
+
     It 'all non-Az rows agree on a single winning MSAL version' {
         $winners = @($script:MatrixRows | Where-Object { -not $_.IsAz } | ForEach-Object { $script:Results[$_.Name].DetectedMsalVersion } | Select-Object -Unique)
         $winners.Count | Should -Be 1 -Because "non-Az rows surfaced different winners: $($winners -join ', ')"
