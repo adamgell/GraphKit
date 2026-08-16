@@ -186,13 +186,13 @@ Added - four read-only beta descriptors, taking the catalog from 55 to 59:
   mobile apps, so a reconciliation across policy types contributed nothing for Settings Catalog
   and still reported success.
 
-Verification status, stated rather than implied: GroupPolicyConfiguration and
-ConfigurationPolicyAssignment are live-verified against populated responses. The two admin-template
-CHILD operations are verified for path, auth and error handling only - every administrative
-template in the lab tenant has zero definitionValues. Those zeros were checked, not assumed: a
-bogus parent id returns ResourceNotFound, so the endpoint distinguishes missing from empty, and
-those policies have createdDateTime == lastModifiedDateTime. They are unpopulated shells. Each
-descriptor header records this.
+All four are live-verified against POPULATED responses. The lab tenant's own administrative
+templates turned out to be unpopulated shells - every one had zero definitionValues, which was
+checked rather than assumed (a bogus parent id returns ResourceNotFound, so the endpoint does
+distinguish missing from empty) - so a fixture policy was created there to exercise the walk
+properly. Each descriptor header records the row shape that came back, and that the $expand is
+load-bearing is measured rather than argued: the same requests without it return HTTP 200 and the
+identical rows minus the 'definition' / 'presentation' keys.
 
 Requires PowerShell 7.4+. 687 tests, 0 skipped, green on Windows, Linux and macOS across
 PowerShell 7.4 and 7.6.

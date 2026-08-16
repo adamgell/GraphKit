@@ -15,12 +15,21 @@
     $expand: without it a presentationValue carries a value and an id with no label, so there is
     no way to tell which field of the setting it filled in.
 
-    VERIFICATION STATUS - NOT live-verified end to end, and that is a tenant limitation rather
-    than a reason to trust it more. The lab tenant's administrative templates are unpopulated
-    shells, so there is no definitionValue to walk from and this level was never reached against
-    a real response. URI construction for the two-token template IS verified, including that an
-    unsupplied second token errors by name instead of shipping a literal '{definitionValueId}'
-    to Graph. Treat a first live call as the real verification.
+    LIVE-VERIFIED end to end against a populated response, via a fixture policy created in the
+    lab tenant for this purpose ("GraphKit verification fixture - do not deploy", unassigned,
+    left in place). Two presentation value types were exercised:
+
+        groupPolicyPresentationValueText     value = a string
+        groupPolicyPresentationValueDecimal  value = a number
+
+    A populated row carries: @odata.type, createdDateTime, id, lastModifiedDateTime,
+    presentation, value. The expanded 'presentation' carries @odata.type, defaultValue, id,
+    label, lastModifiedDateTime, required, plus type-specific fields - maxLength for a text box,
+    minValue/maxValue/spin/spinStep for a decimal one.
+
+    The $expand being load-bearing is measured: the same request without it returns HTTP 200 and
+    the identical row MINUS the 'presentation' key, so the value survives and the label that says
+    what it means does not.
 
     A presentationValue's 'value' is whatever the ADMX author declared - text, decimal, list.
     Administrative templates configure Windows components rather than storing credentials, so

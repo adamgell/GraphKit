@@ -14,13 +14,19 @@
     Because the option is fixed, AdvancedQuery stays unsupported and Resolve-GraphUri refuses a
     caller-supplied $expand rather than emitting it twice.
 
-    VERIFICATION STATUS - path, auth and error handling are live-verified; a POPULATED response
-    is not. Every groupPolicyConfiguration in the lab tenant returned 0 definitionValues, and
-    that was checked rather than assumed: a bogus parent id returns ResourceNotFound from the
-    GroupPolicyAdminService, so this endpoint does distinguish "missing" from "empty" and the
-    zeros are real. Those policies have createdDateTime == lastModifiedDateTime, i.e. they are
-    unpopulated shells. A tenant with configured administrative templates is still needed to
-    confirm the shape of a non-empty row.
+    LIVE-VERIFIED against a populated response. The lab tenant's own administrative templates are
+    all unpopulated shells (createdDateTime == lastModifiedDateTime), so a fixture policy was
+    created there specifically to verify this walk - "GraphKit verification fixture - do not
+    deploy", unassigned, left in place so future changes can re-verify without another write.
+
+    A populated row carries: configurationType, createdDateTime, definition, enabled, id,
+    lastModifiedDateTime. The expanded 'definition' carries categoryPath, classType, displayName,
+    explainText, groupPolicyCategoryId, hasRelatedDefinitions, id, lastModifiedDateTime,
+    minDeviceCspVersion, minUserCspVersion, policyType, supportedOn, version.
+
+    The $expand being load-bearing is measured, not argued: the same request without it returns
+    HTTP 200 and the identical row MINUS the 'definition' key. Nothing errors - the caller just
+    gets a row that cannot say which Group Policy setting it configures.
 #>
 @{
     SchemaVersion       = 1
