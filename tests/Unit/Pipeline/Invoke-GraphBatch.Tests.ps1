@@ -214,3 +214,61 @@ Describe 'Invoke-GraphBatch' {
         }
     }
 }
+
+Describe 'Batch refuses to carry a mutating subrequest' {
+    # This guard is why Invoke-GraphBatch needs no ShouldProcess gate of its own: a batch cannot
+    # mutate anything, by construction. That makes it load-bearing - and it had NO test, so a
+    # refactor could have deleted it and every existing test would still have passed. The gate on
+    # Invoke-GraphOperation would then have been the only write protection in the module, with a
+    # completely ungated bulk path sitting next to it.
+
+    BeforeAll {
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+        $built = Get-ChildItem (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+        Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force
+
+        $script:ctx = [PSCustomObject]@{
+            ProfileId    = 'batch-guard-probe'
+            GraphBaseUri = [uri] 'https://graph.microsoft.com'
+            TokenSource  = $null
+            TenantId     = [guid]::Empty
+        }
+    }
+
+    It 'refuses a write whose descriptor is not ReplayPolicy Safe' {
+        # MobileApp.Assign is the catalog's one genuine mutation (NeverReplay). $batch retries the
+        # whole envelope, so a non-replay-safe subrequest inside it could be re-sent after a
+        # partial failure with no way to know whether it already committed.
+        {
+            Invoke-GraphBatch -Context $script:ctx -Requests @(
+                @{ Id = '1'; Method = 'POST'
+                   Uri = 'https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps/x/assign'
+                   Type = 'MobileApp'; Operation = 'Assign'; Body = @{} }
+            )
+        } | Should -Throw -ExpectedMessage '*only Safe writes may be batched*'
+    }
+
+    It 'refuses a write that names no descriptor at all' {
+        # Without this, a caller could smuggle any mutation into a batch simply by omitting the
+        # Type/Operation that would have revealed its ReplayPolicy - the guard would have nothing
+        # to consult and the request would sail through.
+        {
+            Invoke-GraphBatch -Context $script:ctx -Requests @(
+                @{ Id = '1'; Method = 'DELETE'
+                   Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/x' }
+            )
+        } | Should -Throw -ExpectedMessage '*requires Type and Operation*'
+    }
+
+    It 'refuses every mutating verb, not just the one that was tested' {
+        foreach ($verb in @('POST', 'PUT', 'PATCH', 'DELETE')) {
+            {
+                Invoke-GraphBatch -Context $script:ctx -Requests @(
+                    @{ Id = '1'; Method = $verb; Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/x' }
+                )
+            } | Should -Throw -Because "$verb must not bypass the batch write guard"
+        }
+    }
+}
+
