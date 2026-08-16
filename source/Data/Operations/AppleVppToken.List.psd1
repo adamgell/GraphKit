@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. VPP token inventory is not exposed on v1.0.
+    Beta collection. VPP token inventory is not exposed on v1.0.
 #>
 @{
     SchemaVersion       = 1

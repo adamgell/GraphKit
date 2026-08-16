@@ -1,10 +1,10 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    A single-object read is modelled as a non-paging Collection read: the v1
-    handler-strategy registry has no 'Singleton' kind prefix, and the
-    Collection.Default strategy already performs a plain GET (no .value
-    unwrapping) for non-paging operations, which is exactly the singleton shape.
+    A single-object read is modelled as a non-paging Collection read: the v1 handler-strategy
+    registry has no 'Singleton' kind prefix, and the Collection.Default strategy already
+    performs a plain GET (no .value unwrapping) for non-paging operations, which is exactly the
+    singleton shape.
 #>
 @{
     SchemaVersion       = 1

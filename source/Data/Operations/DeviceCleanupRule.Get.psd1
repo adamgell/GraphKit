@@ -1,11 +1,11 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Device cleanup rule singleton, read by IntuneHealthAutomation.
+    Device cleanup rule singleton.
 
-    NOT LIVE-VERIFIED. Against Ivy24 on 2026-08-15 this returned 403 with an app-only token
-    holding DeviceManagementConfiguration.Read.All, so the declared permission is a best
-    guess and may be wrong in the same way NamedLocation and DeviceManagementScript were.
+    NOT LIVE-VERIFIED. Against the verification tenant on 2026-08-15 this returned 403 with an
+    app-only token holding DeviceManagementConfiguration.Read.All, so the declared permission is
+    a best guess and may be wrong in the same way NamedLocation and DeviceManagementScript were.
     Confirm the required scope from the service's own 403 before relying on this descriptor.
 #>
 @{

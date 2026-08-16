@@ -24,8 +24,8 @@ function Test-GraphTenant {
         ~/.graphkit/profiles.json when omitted.
 
     .EXAMPLE
-        if (Test-GraphTenant -ProfileId ivy24) { 'valid' }
-        # Validates the stored ivy24 profile metadata.
+        if (Test-GraphTenant -ProfileId contoso) { 'valid' }
+        # Validates the stored contoso profile metadata.
 
     .EXAMPLE
         Test-GraphTenant -TenantProfile @{ ProfileId = 'x'; TenantId = '...' }

@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. DEP onboarding settings are not exposed on v1.0.
+    Beta collection. DEP onboarding settings are not exposed on v1.0.
 #>
 @{
     SchemaVersion       = 1

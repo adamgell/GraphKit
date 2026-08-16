@@ -21,7 +21,7 @@ function Get-GraphTenant {
         # Lists every registered tenant profile from the profile store.
 
     .EXAMPLE
-        $tenant = Get-GraphTenant -ProfileId ivy24
+        $tenant = Get-GraphTenant -ProfileId contoso
         $tenant.Environment   # Global
     #>
     [CmdletBinding()]

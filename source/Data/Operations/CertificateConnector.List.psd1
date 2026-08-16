@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. NDES connector health is not exposed on v1.0.
+    Beta collection. NDES connector health is not exposed on v1.0.
 #>
 @{
     SchemaVersion       = 1

@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. Autopilot device identities are read from beta by every current consumer.
+    Beta collection. Autopilot device identities are read from beta by every current consumer.
 #>
 @{
     SchemaVersion       = 1

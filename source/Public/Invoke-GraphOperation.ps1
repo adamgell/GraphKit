@@ -12,9 +12,9 @@
         remain non-bypassable.
 
     .EXAMPLE
-        Invoke-GraphOperation -ProfileId ivy24 -Type MobileApp -Operation Assign -Parameters @{ id = '00000000-0000-0000-0000-000000000000'; Body = @{ assignments = @() } }
+        Invoke-GraphOperation -ProfileId contoso -Type MobileApp -Operation Assign -Parameters @{ id = '00000000-0000-0000-0000-000000000000'; Body = @{ assignments = @() } }
 
-        Resolves the ivy24 context, looks up the MobileApp Assign descriptor, and posts an assignment.
+        Resolves the contoso context, looks up the MobileApp Assign descriptor, and posts an assignment.
 
     .EXAMPLE
         Invoke-GraphOperation -Context $context -Uri 'https://graph.microsoft.com/v1.0/me' -Method GET

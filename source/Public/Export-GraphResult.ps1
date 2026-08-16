@@ -27,10 +27,10 @@
         Writes only the Data rows to managedDevices.csv under ./exports.
 
     .EXAMPLE
-        Export-GraphResult -Result $result -As VaultEvidence -ProfileId ivy24 -Kind lab
+        Export-GraphResult -Result $result -As VaultEvidence -ProfileId contoso -Kind lab
 
         Files raw rows under the report root and a summary evidence page, log,
-        and index under the evidence root for the ivy24 profile.
+        and index under the evidence root for the contoso profile.
 
     .PARAMETER Result
         The operation result to export: one or more GraphKit.OperationResult

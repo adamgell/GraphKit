@@ -1,7 +1,8 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Service principals. The permission analyzer already reads these privately; this is the public read path.
+    Service principals. The permission analyzer already reads these privately; this is the
+    public read path.
 #>
 @{
     SchemaVersion       = 1

@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. The configuration conflict summary is not exposed on v1.0.
+    Beta collection. The configuration conflict summary is not exposed on v1.0.
 #>
 @{
     SchemaVersion       = 1

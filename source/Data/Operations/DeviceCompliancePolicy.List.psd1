@@ -1,7 +1,7 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Compliance policy inventory. IntuneHealthAutomation reads this on every run.
+    Compliance policy inventory. this is read on nearly every inventory run.
 #>
 @{
     SchemaVersion       = 1

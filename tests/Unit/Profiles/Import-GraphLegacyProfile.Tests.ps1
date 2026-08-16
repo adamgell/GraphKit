@@ -178,16 +178,29 @@ Describe 'Import-GraphLegacyProfile' {
             $report.Planned[0].Environment | Should -BeExactly 'Global'
         }
 
-        It 'assigns lab kind to Ivy24 and the default kind to everything else' {
+        It 'assigns lab kind by name and the default kind to everything else' {
+            # The heuristic keys on the word 'lab', not on any particular tenant name. It
+            # previously special-cased a private lab tenant, which a public module has no
+            # business knowing about.
             $path = New-LegacyFile -Root $TestDrive -Content @{
                 tenants = @(
-                    @{ name = 'Ivy24'; tenantId = $script:tenantA; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); environment = 'Global' }
+                    @{ name = 'Contoso Lab'; tenantId = $script:tenantA; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); environment = 'Global' }
                     @{ name = 'Northwind'; tenantId = $script:tenantB; authMethod = 'Certificate'; certificateThumbprint = ('B' * 40); environment = 'Global' }
                 )
             }
-            $report = Import-GraphLegacyProfile -Path $path -StorePath (Join-Path $TestDrive 's6.json')
-            ($report.Planned | Where-Object LegacyName -eq 'Ivy24').Kind | Should -Be 'lab'
+            $report = Import-GraphLegacyProfile -Path $path -StorePath (Join-Path $TestDrive 's6.json') -WhatIf
+            ($report.Planned | Where-Object LegacyName -eq 'Contoso Lab').Kind | Should -Be 'lab'
             ($report.Planned | Where-Object LegacyName -eq 'Northwind').Kind | Should -Be 'customer'
+        }
+
+        It 'does not treat a name merely containing the letters l-a-b as a lab' {
+            # Word-boundary matching: 'Elaborate Corp' is not a lab tenant. Without \b this
+            # silently misclassifies a customer, and the kind drives taxonomy checks.
+            $path = New-LegacyFile -Root $TestDrive -Content @{
+                tenants = @(@{ name = 'Elaborate Corp'; tenantId = $script:tenantA; authMethod = 'ManagedIdentity'; environment = 'Global' })
+            }
+            $report = Import-GraphLegacyProfile -Path $path -StorePath (Join-Path $TestDrive 's6b.json') -WhatIf
+            $report.Planned[0].Kind | Should -Be 'customer'
         }
     }
 

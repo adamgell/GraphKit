@@ -111,9 +111,9 @@ function Register-GraphTenant {
             -TenantId 3a4b5c6d-... -Environment Global -AuthMethod ManagedIdentity
 
     .EXAMPLE
-        Register-GraphTenant -ProfileId ivy24 -Name Ivy24 -Kind lab `
-            -TenantId 3a4b5c6d-... -AuthMethod Certificate -PfxPath ./ivy24.pfx `
-            -PfxVaultName GraphKit -PfxSecretName ivy24-pfx-password
+        Register-GraphTenant -ProfileId contoso -Name 'Contoso' -Kind customer `
+            -TenantId 3a4b5c6d-... -AuthMethod Certificate -PfxPath ./contoso.pfx `
+            -PfxVaultName GraphKit -PfxSecretName contoso-pfx-password
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]

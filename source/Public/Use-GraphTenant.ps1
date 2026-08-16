@@ -19,7 +19,7 @@ function Use-GraphTenant {
         ~/.graphkit/profiles.json when omitted.
 
     .EXAMPLE
-        Use-GraphTenant -ProfileId ivy24
+        Use-GraphTenant -ProfileId contoso
         $script:GraphKitCurrentContext   # the resolved GraphKit.Context
     #>
     [CmdletBinding()]

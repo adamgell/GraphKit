@@ -1,7 +1,8 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. A v1.0 route exists, but IntuneHealthAutomation reads beta for this collection.
+    Beta collection. A v1.0 route exists, but the beta shape is the one in common use for this
+    collection.
 #>
 @{
     SchemaVersion       = 1
@@ -13,7 +14,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'BetaPreferred'
-    BetaReason          = 'A v1.0 route exists, but IntuneHealthAutomation reads beta for this collection.'
+    BetaReason          = 'A v1.0 route exists, but the beta shape is the one in common use for this collection.'
 
     Method              = 'GET'
     PathTemplate        = '/deviceAppManagement/mobileAppCategories'

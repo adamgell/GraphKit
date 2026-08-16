@@ -1,9 +1,9 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Authentication methods policy singleton (IHA calls this collection "MFA").
+    Authentication methods policy singleton (commonly surfaced as "MFA" in reporting tools).
 
-    NOT LIVE-VERIFIED: requires Policy.Read.All, which the Ivy24 lab app does not hold. It
+    NOT LIVE-VERIFIED: requires Policy.Read.All, which the verification tenant does not hold. It
     returned 403 accessDenied, consistent with the declared permission being correct but
     ungranted - the same position as ConditionalAccessPolicy.
 #>
@@ -17,7 +17,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'BetaOnly'
-    BetaReason          = 'IntuneHealthAutomation reads the beta shape of this policy.'
+    BetaReason          = 'the beta shape of this policy is the one in common use.'
 
     Method              = 'GET'
     PathTemplate        = '/policies/authenticationMethodsPolicy'

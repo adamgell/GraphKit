@@ -34,7 +34,7 @@ function Get-GraphContext {
         auth-resolution phase; it is invoked only when a token is acquired.
 
     .EXAMPLE
-        $context = Get-GraphContext -ProfileId ivy24
+        $context = Get-GraphContext -ProfileId contoso
         $context.GraphBaseUri   # https://graph.microsoft.com (Global cloud)
 
     .EXAMPLE

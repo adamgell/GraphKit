@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.0.2'
+ModuleVersion = '0.1.0'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -101,10 +101,26 @@ PrivateData = @{
     PSData = @{
 
         # Tags applied to this module. These help with module discovery in online galleries.
-        # Tags = @()
+        # No spaces permitted; PSGallery adds 'PSModule' itself.
+        Tags = @(
+            'Microsoft365'
+            'MicrosoftGraph'
+            'Graph'
+            'Intune'
+            'Entra'
+            'EntraID'
+            'MDM'
+            'DeviceManagement'
+            'MultiTenant'
+            'AppOnly'
+            'Automation'
+            'Windows'
+            'Linux'
+            'MacOS'
+        )
 
         # A URL to the license for this module.
-        # LicenseUri = ''
+        LicenseUri = 'https://opensource.org/licenses/MIT'
 
         # A URL to the main website for this project.
         # ProjectUri = ''
@@ -113,7 +129,30 @@ PrivateData = @{
         # IconUri = ''
 
         # ReleaseNotes of this module
-        ReleaseNotes = ''
+        ReleaseNotes = @'
+0.1.0 - first public release.
+
+An app-only, multi-tenant Microsoft Graph execution layer for Intune and Entra. Its focus is
+reliable request execution rather than breadth of coverage:
+
+- Immutable per-tenant contexts. Tokens come from MSAL per context, never from a process-global
+  connection, so parallel multi-tenant work cannot cross-contaminate.
+- Four auth modes: certificate, client secret, managed identity, and a caller-supplied bearer.
+  Credentials are referenced from SecretManagement, never stored in the profile.
+- Semantics-aware retry that distinguishes a known failure from an indeterminate commit, and
+  never blind-replays a write after an ambiguous response.
+- Scoped throttling with AIMD admission control, keyed per cloud/tenant/client/resource so one
+  throttled tenant does not stall the others.
+- Operation behaviour is data, not code: each operation is a versioned descriptor declaring
+  method, path, API version, paging, retry safety, permissions and cloud support.
+- API version is a per-operation fact, not a global mode. Beta operations are separate,
+  explicitly named, and declare why they are beta.
+
+Requires PowerShell 7.4+. Depends on Microsoft.Graph.Authentication (as the MSAL delivery
+vehicle only - Connect-MgGraph is never called) and Microsoft.PowerShell.SecretManagement.
+
+This is an early release: the command surface is small and may change before 1.0.
+'@
 
         # Prerelease string of this module
         Prerelease =  ''

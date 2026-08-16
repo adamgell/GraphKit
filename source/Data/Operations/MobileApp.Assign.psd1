@@ -1,10 +1,9 @@
 <#
     Operation descriptor - data only.
 
-    This is the normative example from the design spec. Descriptors are versioned,
-    data-only .psd1 files: behavioural fields reference validated strategy IDs,
-    never scriptblocks, so a descriptor can be loaded with Import-PowerShellDataFile
-    without executing anything.
+    This is the normative example from the design spec. Descriptors are versioned, data-only
+    .psd1 files: behavioural fields reference validated strategy IDs, never scriptblocks, so a
+    descriptor can be loaded with Import-PowerShellDataFile without executing anything.
 #>
 @{
     SchemaVersion       = 1

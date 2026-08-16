@@ -13,7 +13,7 @@
         every subrequest is Safe.
 
     .EXAMPLE
-        Invoke-GraphBatch -ProfileId ivy24 -Requests @(
+        Invoke-GraphBatch -ProfileId contoso -Requests @(
             @{ Id = '1'; Method = 'GET'; Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices' },
             @{ Id = '2'; Method = 'GET'; Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=10' }
         )

@@ -1,11 +1,11 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Beta collection consumed by IntuneHealthAutomation. A v1.0 route exists, but
-    IntuneHealthAutomation reads beta for this collection.
+    Beta collection. A v1.0 route exists, but the beta shape is the one in common use for this
+    collection; the v1.0 sibling operation covers the other.
 
-    Requires Policy.Read.All. Verified against Ivy24 on 2026-08-15: an app-only token holding
-    Policy.Read.ConditionalAccess received 403 AccessDenied, the same result as
+    Requires Policy.Read.All. Verified against a live tenant on 2026-08-15: an app-only token
+    holding Policy.Read.ConditionalAccess received 403 AccessDenied, the same result as
     NamedLocation - the narrower conditional-access scope does not cover these reads. The lab
     app does not hold Policy.Read.All, so this descriptor is CORRECT BUT NOT LIVE-VERIFIED.
 #>
@@ -19,7 +19,7 @@
 
     ApiVersion          = 'beta'
     Stability           = 'BetaPreferred'
-    BetaReason          = 'A v1.0 route exists, but IntuneHealthAutomation reads beta for this collection.'
+    BetaReason          = 'A v1.0 route exists, but the beta shape is the one in common use for this collection.'
 
     Method              = 'GET'
     PathTemplate        = '/identity/conditionalAccess/policies'

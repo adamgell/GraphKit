@@ -1,7 +1,8 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Tenant-wide Intune device settings. A singleton: the response IS the object, with no collection envelope.
+    Tenant-wide Intune device settings. A singleton: the response IS the object, with no
+    collection envelope.
 #>
 @{
     SchemaVersion       = 1

@@ -1,7 +1,7 @@
 function Import-GraphLegacyProfile {
     <#
         .SYNOPSIS
-            Imports IntuneHealthAutomation's legacy secrets.json tenant entries into the
+            Imports a legacy secrets.json tenant configuration into the
             GraphKit profile store.
 
         .DESCRIPTION
@@ -195,7 +195,7 @@ function Import-GraphLegacyProfile {
                 # Register-GraphTenant refuses store-based certificate material off Windows,
                 # by design. Surface it here as a platform blocker rather than letting it
                 # throw mid-transaction, so the dry run is still fully useful on macOS.
-                $reasons.Add("Certificate-store profiles can only be registered on Windows; this is $($PSVersionTable.Platform). Run the import on the IHA execution host, or convert the entry to PFX/vault certificate material.")
+                $reasons.Add("Certificate-store profiles can only be registered on Windows; this is $($PSVersionTable.Platform). Run the import on the Windows execution host, or convert the entry to PFX/vault certificate material.")
             }
         }
         elseif ($authMethod -in @('ClientSecret', 'BearerToken')) {
@@ -210,7 +210,9 @@ function Import-GraphLegacyProfile {
                 ClientId    = [string]$entry.clientId
                 AuthMethod  = $authMethod
                 Environment = $environment
-                Kind        = if ($name -match '(?i)ivy24|lab') { 'lab' } else { $DefaultKind }
+                # A name containing 'lab' as a whole word is treated as a lab tenant. This is a
+                # convenience heuristic only; -DefaultKind decides everything else.
+                Kind        = if ($name -match '(?i)\blab\b') { 'lab' } else { $DefaultKind }
                 Thumbprint  = $thumbprint
                 StoreName   = $store
                 IsDefault   = [bool]$entry.isDefault

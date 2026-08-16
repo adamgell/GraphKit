@@ -1,17 +1,17 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    The app install summary report, read by IntuneHealthAutomation as "AppInstallErrors".
+    The app install summary report, read by reporting tools as "app install errors".
 
-    This is the one collection in IHA's surface that is not a read: it is a POST to a report
-    endpoint that returns the report body in the response. That shape is why it needed an
-    Action descriptor rather than another Collection one, and why it was the last gap.
+    This is the one collection in a typical inventory surface that is not a read: it is a POST
+    to a report endpoint that returns the report body in the response. That shape is why it
+    needed an Action descriptor rather than another Collection one, and why it was the last gap.
 
-    ReplayPolicy is 'Safe' even though the method is POST. That is deliberate and is the
-    narrow case the policy exists to express: this POST computes and returns a report, it
-    creates nothing and mutates nothing, so replaying it after an ambiguous failure cannot
-    double-apply anything. ThrottleClass stays 'Read' for the same reason - it belongs in the
-    read budget, not the write one.
+    ReplayPolicy is 'Safe' even though the method is POST. That is deliberate and is the narrow
+    case the policy exists to express: this POST computes and returns a report, it creates
+    nothing and mutates nothing, so replaying it after an ambiguous failure cannot double-apply
+    anything. ThrottleClass stays 'Read' for the same reason - it belongs in the read budget,
+    not the write one.
 #>
 @{
     SchemaVersion       = 1

@@ -14,9 +14,9 @@
         are never mixed on one stream.
 
     .EXAMPLE
-        Get-GraphObject -ProfileId ivy24 -Type MobileApp
+        Get-GraphObject -ProfileId contoso -Type MobileApp
 
-        Lists every mobile app in the ivy24 tenant (Operation defaults to 'List'), returning one
+        Lists every mobile app in the Contoso tenant (Operation defaults to 'List'), returning one
         stamped GraphKit.MobileApp row per app.
 
     .EXAMPLE
