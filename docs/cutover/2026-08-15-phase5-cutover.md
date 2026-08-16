@@ -239,6 +239,26 @@ without its key, or a LocalMachine key the process cannot read. It now fails at 
 certificate and needs no tenant, vault, or secret. `~/graphkit-cutover-bundle` packages it with
 the pinned build for transfer to the execution host.
 
+**Done, 2026-08-15, PowerShell 7.6.5 — 15 of 15 checks passed.** The certificate-store resolver
+and certificate-store registration executed for the first time anywhere and behaved correctly,
+including resolving a real private key out of `CurrentUser\My` and reporting the *store* rather
+than a later MSAL error for a thumbprint that is not present. The first-run profile store, the
+store lock, and offline context resolution all passed on NTFS.
+
+Two installer defects surfaced that macOS could not have shown. An install interrupted partway
+left a `Microsoft.Graph.Authentication` directory that PSResourceGet recorded as present and
+PowerShell could not load; `Install-GraphKitPinned.ps1` accepted that contradiction — its own
+check reported "absent" while the installer replied "already installed" — and the real failure
+appeared three steps later as GraphKit's `RequiredModules` being unsatisfiable, which named the
+wrong module entirely. It now forces a reinstall in exactly that case and post-verifies each
+dependency is discoverable before continuing. Separately, the rollback note read "uninstalling
+0.1.0 and leaving 0.1.0 in place" when reinstalling the same version.
+
+One concern proved unfounded and is recorded so it is not raised again: the Windows host's
+`Documents` folder is redirected into a Parallels shared folder, so `-Scope CurrentUser`
+installs to `C:\Mac\Home\Documents\PowerShell\Modules`. That works — the module loads, the
+digest verifies, and elevation is not needed.
+
 ## Next moves
 
 1. Run `Test-GraphKitOnWindows.ps1` on the Windows host — the only place several code paths can

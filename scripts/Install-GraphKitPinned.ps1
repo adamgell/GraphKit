@@ -107,12 +107,22 @@ $restore = [ordered]@{
     moduleName       = $pin.moduleName
     previousVersions = $previous
     installingVersion = $pin.version
-    note             = if ($previous.Count -eq 0) {
-        'GraphKit was not installed before this. Rollback means uninstalling the pinned version.'
-    }
-    else {
-        "Rollback means uninstalling $($pin.version) and leaving $(@($previous | ForEach-Object { $_.Version }) -join ', ') in place."
-    }
+    note             = $(
+        # Reinstalling the same version is the common case on a re-run, and treating the
+        # outgoing version as something to "leave in place" produced the nonsense
+        # "uninstalling 0.1.0 and leaving 0.1.0 in place". Only OTHER versions survive a
+        # rollback.
+        $others = @($previous | ForEach-Object { $_.Version } | Where-Object { $_ -ne $pin.version })
+        if ($previous.Count -eq 0) {
+            'GraphKit was not installed before this. Rollback means uninstalling the pinned version.'
+        }
+        elseif ($others.Count -eq 0) {
+            "$($pin.version) was already installed and has been reinstalled over. Rollback means uninstalling it; no other version was present to fall back to."
+        }
+        else {
+            "Rollback means uninstalling $($pin.version) and leaving $($others -join ', ') in place."
+        }
+    )
 }
 
 if ($PSCmdlet.ShouldProcess($RestoreRecordPath, 'Write rollback record')) {
@@ -193,8 +203,42 @@ if ($PSCmdlet.ShouldProcess("$($pin.moduleName) $($pin.version)", "Install from 
 
             $found = if ($null -eq $present) { 'absent' } else { "v$($present.Version)" }
             Write-Host "  Installing $dep (>= $minimum; found $found)" -ForegroundColor DarkGray
-            Install-PSResource -Name $dep -Version "[$minimum,)" -Repository PSGallery `
-                -Scope $Scope -TrustRepository -ErrorAction Stop
+
+            # Get-Module -ListAvailable says absent while Install-PSResource says "already
+            # installed" when a previous install left a directory PSResourceGet has recorded but
+            # PowerShell cannot load - a partially written module, most often from an
+            # interrupted install. Without -Reinstall the installer declines, this loop reports
+            # success, and the failure resurfaces much later as GraphKit's RequiredModules being
+            # unsatisfiable. Force a real reinstall in exactly that case.
+            $installArgs = @{
+                Name            = $dep
+                Version         = "[$minimum,)"
+                Repository      = 'PSGallery'
+                Scope           = $Scope
+                TrustRepository = $true
+                ErrorAction     = 'Stop'
+            }
+            if ($null -eq $present) {
+                $recorded = Get-InstalledPSResource -Name $dep -ErrorAction SilentlyContinue
+                if ($null -ne $recorded) {
+                    Write-Host "    $dep is recorded as installed but is not loadable; reinstalling over it" -ForegroundColor Yellow
+                    $installArgs.Reinstall = $true
+                }
+            }
+
+            Install-PSResource @installArgs
+
+            # Installing is not the same as being usable. Confirm the dependency is now
+            # discoverable before moving on, or GraphKit's own import fails later with a
+            # message about RequiredModules that says nothing about which install went wrong.
+            $after = Get-Module $dep -ListAvailable |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if ($null -eq $after -or $after.Version -lt $minimum) {
+                $recorded = Get-InstalledPSResource -Name $dep -ErrorAction SilentlyContinue
+                $where = if ($null -ne $recorded) { " PSResourceGet records it at '$($recorded[0].InstalledLocation)'." } else { '' }
+                throw "$dep still is not discoverable after installing it.$where Check that its install location is on `$env:PSModulePath and that the module directory is complete - an interrupted install leaves one that is recorded but unloadable. Removing that directory and re-running usually fixes it."
+            }
+            Write-Host "    $dep v$($after.Version) is now discoverable" -ForegroundColor DarkGray
         }
     }
 
