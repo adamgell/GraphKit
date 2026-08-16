@@ -382,8 +382,24 @@ Describe 'New-ClientServicePrincipalCBA' {
                 $LASTEXITCODE | Should -Be 0
 
                 $secure = ConvertTo-SecureString 'testpw' -AsPlainText -Force
-                $cert = [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadPkcs12FromFile(
-                    $pfx, [System.Net.NetworkCredential]::new('', $secure).Password)
+                $plain = [System.Net.NetworkCredential]::new('', $secure).Password
+
+                # X509CertificateLoader is .NET 9, so it does not exist on PowerShell 7.4 -
+                # which is this module's declared floor. The test used it unconditionally and
+                # therefore could not run on 7.4 at all; that went unnoticed until CI ran the
+                # matrix for the first time and every 7.4 leg failed on a missing type.
+                #
+                # The point of this test is that a PFX written by openssl's defaults loads with
+                # its private key intact, so it exercises whichever idiom the running runtime
+                # actually has. GraphKit's own source uses the X509Certificate2 constructor,
+                # which works everywhere; the loader is what the standalone CBA script
+                # documents, and that script therefore needs 7.5+.
+                $cert = if ($null -ne ('System.Security.Cryptography.X509Certificates.X509CertificateLoader' -as [type])) {
+                    [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadPkcs12FromFile($pfx, $plain)
+                }
+                else {
+                    [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $plain)
+                }
 
                 $cert.HasPrivateKey | Should -BeTrue   # required for Connect-MgGraph -Certificate
                 $cert.Subject | Should -Be 'CN=PesterLoadTest'

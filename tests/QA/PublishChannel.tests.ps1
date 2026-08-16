@@ -40,7 +40,10 @@ BeforeAll {
             else { $args += "-$k"; $args += [string] $Params[$k] }
         }
         $out = & pwsh -NoProfile -File $script:publish @args 2>&1
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out | Out-String) }
+        # Console output wraps at the terminal width, which differs per runner - so a
+        # multi-word phrase can be split across lines and a -BeLike/-Match on it fails on
+        # one OS and passes on another. Collapse whitespace so assertions are wrap-independent.
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out | Out-String) -replace '\s+', ' ') }
     }
 }
 

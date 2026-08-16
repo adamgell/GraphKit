@@ -29,7 +29,9 @@ BeforeAll {
     function Invoke-Gate {
         param([string] $ResultPath, [int] $MinimumTests = 500, [int] $AllowedSkips = 0)
         $out = & pwsh -NoProfile -File $script:gate -ResultPath $ResultPath -MinimumTests $MinimumTests -AllowedSkips $AllowedSkips 2>&1
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
+        # Console output wraps at the terminal width, which differs per runner, so collapse
+        # whitespace to keep multi-word assertions wrap-independent.
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out -join ' ') -replace '\s+', ' ') }
     }
 }
 
