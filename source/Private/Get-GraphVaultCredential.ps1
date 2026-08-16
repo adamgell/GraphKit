@@ -373,6 +373,15 @@ function Get-GraphStoreCertificate {
         throw "No certificate matching $selector was found in the Cert:\$location\$storeName store."
     }
 
+    # A certificate without an accessible private key cannot sign a client assertion. Without
+    # this check the store lookup succeeds and the failure surfaces later inside MSAL, where
+    # the message is about assertion signing rather than about the certificate the operator
+    # actually chose. This is the common Windows case: the public certificate is installed,
+    # the key is not, or the process lacks rights to it in LocalMachine.
+    if (-not $match.HasPrivateKey) {
+        throw "Certificate '$($match.Thumbprint)' in Cert:\$location\$storeName has no accessible private key, so it cannot sign a client assertion. Import the PFX with its key, and for LocalMachine make sure this process has permission to read it."
+    }
+
     return $match
 }
 
