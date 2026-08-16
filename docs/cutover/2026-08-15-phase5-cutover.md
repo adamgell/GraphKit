@@ -259,10 +259,17 @@ One concern proved unfounded and is recorded so it is not raised again: the Wind
 installs to `C:\Mac\Home\Documents\PowerShell\Modules`. That works — the module loads, the
 digest verifies, and elevation is not needed.
 
+## Published
+
+**GraphKit 0.1.0 went to the public PowerShell Gallery on 2026-08-15** and is verified
+installable from it. That changes the consumer story: IntuneHealthAutomation v2 depends on
+`GraphKit` from PSGallery rather than a local path, a transfer bundle, or the file-system
+channel. The channel and bundle remain useful for an offline host and for testing an unreleased
+build, but they are no longer the distribution path.
+
 ## Next moves
 
-1. Run `Test-GraphKitOnWindows.ps1` on the Windows host — the only place several code paths can
-   execute at all.
+1. ~~Run `Test-GraphKitOnWindows.ps1` on the Windows host~~ — **done, 15/15 on PowerShell 7.6.5**.
 2. Grant the five outstanding scopes on the lab app and re-run the descriptor verification.
 3. Verify the repoint read-only on one customer tenant with
    `Complete-GraphKitCutover.ps1`, then the other.
