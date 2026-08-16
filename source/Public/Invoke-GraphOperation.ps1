@@ -60,7 +60,12 @@
         would collide in every session.
 #>
 function Invoke-GraphOperation {
-    [CmdletBinding(DefaultParameterSetName = 'Descriptor')]
+    # SupportsShouldProcess without a ConfirmImpact: the default impact is Medium and the default
+    # $ConfirmPreference is High, so nothing prompts unless the caller asks with -Confirm. That is
+    # deliberate - raising ConfirmImpact to High would make every unattended write hang waiting for
+    # a console that is not there, which is exactly how automation breaks at 3am. What this buys is
+    # -WhatIf: a dry run that resolves the URI and enforces credential policy but sends nothing.
+    [CmdletBinding(DefaultParameterSetName = 'Descriptor', SupportsShouldProcess)]
     [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory, ParameterSetName = 'Descriptor', Position = 0)]
@@ -160,7 +165,47 @@ function Invoke-GraphOperation {
             -CancellationToken $CancellationToken
     }
 
-    # 6. Execute the registered strategy.
+    # 6. Dry-run gate for mutating operations.
+    #
+    #    What counts as mutating is DECLARED, not inferred from the HTTP verb. Two descriptors are
+    #    POSTs that mutate nothing - AppInstallSummaryReport.Get and DeviceReport.Export post a
+    #    request body to obtain a report - and gating on the verb would make a read prompt while
+    #    teaching callers that the prompt is noise to be suppressed. ReplayPolicy already carries
+    #    the fact: 'Safe' means replaying the call is harmless, which for a POST is only true when
+    #    it has no side effect. Every other policy (Conditional, Reconciliable, NeverReplay)
+    #    describes an operation whose replay needs care, i.e. one that changes something.
+    #
+    #    Under -Raw there is no descriptor to ask, so the verb is all there is; that is a fallback
+    #    for a path that deliberately opts out of the catalog, not the general rule.
+    #
+    #    Placed AFTER URI resolution and the credential-policy check so -WhatIf still exercises
+    #    both. A dry run that skipped validation would report success for a call that could not
+    #    have run.
+    $isMutating = if ($raw) {
+        $Method -notin @('GET', 'HEAD')
+    } else {
+        ([string] $Descriptor.ReplayPolicy) -ne 'Safe'
+    }
+
+    if ($isMutating) {
+        # Names the PROFILE and the URI PATH - never the tenant id (AGENTS.md forbids logging it)
+        # and never the query string, which can carry $filter values containing user data.
+        $shouldProcessTarget = if ($raw) {
+            "profile '{0}'" -f $Context.ProfileId
+        } else {
+            "{0}/{1} on profile '{2}'" -f $Descriptor.Type, $Descriptor.Operation, $Context.ProfileId
+        }
+        # $Method is bound only in the Raw parameter set; for a catalog operation the verb is a
+        # property of the descriptor, and reading the unbound parameter would print a bare path.
+        $shouldProcessVerb = if ($raw) { $Method } else { [string] $Descriptor.Method }
+        $shouldProcessAction = '{0} {1}' -f $shouldProcessVerb, ([uri] $requestUri).AbsolutePath
+
+        if (-not $PSCmdlet.ShouldProcess($shouldProcessTarget, $shouldProcessAction)) {
+            return
+        }
+    }
+
+    # 7. Execute the registered strategy.
     $result = if ($raw) {
         & $transport -Uri $requestUri -Method $Method -Headers @{} -Body $Body -CancellationToken ([System.Threading.CancellationToken]::None)
     } else {
