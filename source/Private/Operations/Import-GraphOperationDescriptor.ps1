@@ -315,6 +315,33 @@ function Import-GraphOperationDescriptor {
         }
     }
 
+    # Optional 'Timeouts' block: per-operation transport phase timeouts. Absent means the
+    # transport's defaults apply, which is what almost every operation wants.
+    #
+    # Validated strictly even though it is optional, because the failure mode of a typo is
+    # silence: a descriptor declaring @{ HeadersTimeout = 60 } instead of
+    # @{ HeadersSeconds = 60 } would be accepted, applied to nothing, and the operation would
+    # keep timing out with no indication that its declared timeout was never read.
+    if ($descriptor.ContainsKey('Timeouts') -and $null -ne $descriptor['Timeouts']) {
+        $timeouts = $descriptor['Timeouts']
+        if ($timeouts -isnot [hashtable]) {
+            $violations.Add("Field 'Timeouts' must be a hashtable, got '$($timeouts.GetType().Name)'.")
+        }
+        else {
+            $knownTimeoutKeys = @('ConnectionSeconds', 'HeadersSeconds', 'BodySeconds')
+            foreach ($key in $timeouts.Keys) {
+                if ($key -notin $knownTimeoutKeys) {
+                    $violations.Add("Field 'Timeouts' has unknown key '$key'. Known keys: $($knownTimeoutKeys -join ', ').")
+                    continue
+                }
+                $value = $timeouts[$key]
+                if ($value -isnot [int] -or $value -le 0) {
+                    $violations.Add("Field 'Timeouts.$key' must be a positive integer number of seconds, got '$value'.")
+                }
+            }
+        }
+    }
+
     if ($violations.Count -gt 0) {
         $detail = ($violations | ForEach-Object { "  - $_" }) -join [Environment]::NewLine
         throw "Operation descriptor '$Path' is invalid:$([Environment]::NewLine)$detail"

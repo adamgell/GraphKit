@@ -256,6 +256,18 @@ function Invoke-GraphRetry {
             CredentialPolicy  = $credentialPolicy
         }
 
+        # Per-operation transport timeouts. Added ONLY when the descriptor declares them, for
+        # two reasons: the transport's defaults stay authoritative for every other operation,
+        # and an injected test sender - which declares only the parameters it needs - is not
+        # handed a parameter it cannot bind. Splatting an unbindable parameter into an injected
+        # delegate is precisely how the -CancellationToken defect reached a live tenant.
+        $descriptorTimeouts = $Descriptor.Timeouts
+        if ($descriptorTimeouts -is [hashtable]) {
+            if ($descriptorTimeouts.ContainsKey('ConnectionSeconds')) { $sendParams.TimeoutConnectionSeconds = [int] $descriptorTimeouts['ConnectionSeconds'] }
+            if ($descriptorTimeouts.ContainsKey('HeadersSeconds')) { $sendParams.TimeoutHeadersSeconds = [int] $descriptorTimeouts['HeadersSeconds'] }
+            if ($descriptorTimeouts.ContainsKey('BodySeconds')) { $sendParams.TimeoutBodySeconds = [int] $descriptorTimeouts['BodySeconds'] }
+        }
+
         if ($credentialPolicy -eq 'GraphBearer') {
             $sendParams.TokenSource = $Context.TokenSource
             $sendParams.ExpectedAuthority = $Context.GraphBaseUri

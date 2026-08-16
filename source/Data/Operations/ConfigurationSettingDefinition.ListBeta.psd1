@@ -67,6 +67,13 @@
     Reconciliation      = $null
 
     AdvancedQuery       = @{ Supported = $false }
+
+    # Measured, not guessed: time to first byte is 10.5-13.5 s on a lab tenant because the
+    # service composes all 55 MB before sending. The transport default of 10 s cancels the
+    # request before the first byte. 60 s is roughly 4x the observed worst case, which leaves
+    # room for a tenant with more settings or a slower link. The body itself transfers in under
+    # 3 s, so BodySeconds is raised only modestly.
+    Timeouts            = @{ HeadersSeconds = 60; BodySeconds = 60 }
     Concurrency         = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
 
     CredentialPolicy    = 'GraphBearer'
