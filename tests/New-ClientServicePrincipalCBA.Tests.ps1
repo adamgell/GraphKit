@@ -238,13 +238,29 @@ Describe 'New-ClientServicePrincipalCBA' {
             $script:Source | Should -Match '\[System\.Net\.NetworkCredential\]::new\(.{2}, \$certPasswordSecure\)\.Password'
         }
 
-        It 'PtrToStringAuto genuinely truncates on this platform' -Skip:($IsWindows) {
-            # Guards against a future "cleanup" reintroducing it.
+        It 'NetworkCredential unwraps a SecureString correctly on this platform' {
+            # Guards against a future "cleanup" reintroducing PtrToStringAuto, which reads a
+            # UTF-16 BSTR as ANSI on Unix and yields just the first character - the defect that
+            # silently truncated a PFX password to 'T'.
+            #
+            # Asserted per platform rather than skipped on Windows. A -Skip here made the whole
+            # CI run fail the AllowedSkips=0 gate, and skipping is the wrong instinct anyway:
+            # the NetworkCredential guarantee is what the script depends on and it must hold
+            # EVERYWHERE, while only the PtrToStringAuto quirk is Unix-specific.
             $sec = ConvertTo-SecureString 'TestPw123' -AsPlainText -Force
             $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
             try {
-                [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) | Should -Be 'T'
+                # The property under test, on every platform.
                 [System.Net.NetworkCredential]::new('', $sec).Password | Should -Be 'TestPw123'
+
+                if ($IsWindows) {
+                    # PtrToStringAuto is correct on Windows, which is exactly why the bug
+                    # survived review: it only misbehaves off Windows.
+                    [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) | Should -Be 'TestPw123'
+                }
+                else {
+                    [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) | Should -Be 'T'
+                }
             }
             finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
         }

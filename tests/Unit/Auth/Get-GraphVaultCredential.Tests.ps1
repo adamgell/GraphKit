@@ -161,12 +161,24 @@ Describe 'Get-GraphVaultCredential' {
     }
 
     Context 'Certificate (store)' {
-        It 'errors as Windows-only on a non-Windows platform' -Skip:$IsWindows {
-            {
+        It 'refuses a certificate-store lookup off Windows, and looks in the store on Windows' {
+            # Branched rather than skipped: a -Skip failed the AllowedSkips=0 gate for the whole
+            # run, and Windows is the platform where this code path actually executes, so
+            # skipping there left the only real implementation untested in CI.
+            $act = {
                 InModuleScope GraphKit {
                     Get-GraphVaultCredential -Credential @{ StoreLocation = 'CurrentUser'; StoreName = 'My'; Thumbprint = 'abc123' } -AuthMethod Certificate
                 }
-            } | Should -Throw -ExpectedMessage '*Windows-only*'
+            }
+
+            if ($IsWindows) {
+                # The store lookup runs for real and finds nothing for a bogus thumbprint. The
+                # message must name the STORE, not fail later inside MSAL.
+                $act | Should -Throw -ExpectedMessage '*No certificate matching*'
+            }
+            else {
+                $act | Should -Throw -ExpectedMessage '*Windows-only*'
+            }
         }
     }
 
