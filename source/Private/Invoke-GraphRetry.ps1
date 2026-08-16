@@ -221,86 +221,114 @@ function Invoke-GraphRetry {
             break
         }
 
-        # ---- Token acquisition (force refresh when the prior decision demanded it) ----
-        if ($credentialPolicy -eq 'GraphBearer' -and $null -ne $Context.TokenSource) {
-            $acquireForce = $forceRefreshPending
-            $tokenResult = $Context.TokenSource.Acquire($acquireForce, $CancellationToken)
-            if ($acquireForce) {
-                $forceRefreshPending = $false
-                $forceRefreshUsed = $true
+        # Everything from token acquisition to the admission release runs under try/catch.
+        # Wait-GraphThrottleGate has already taken a slot at this point, and the only
+        # releases were the normal-completion path and the mid-throttle deadline path - so
+        # ANY throw in between leaked the slot permanently. TokenSource.Acquire throwing is
+        # not hypothetical: a wrong vault secret name, a certificate without a private key,
+        # or an MSAL service exception all reach here.
+        #
+        # A leak is worse than it sounds. The coordinator starts at InitialConcurrency = 2,
+        # so two failures on one scope exhaust it for the rest of the session, and every
+        # later operation on that tenant|client|class|family then blocks and reports
+        # back-pressure - blaming Graph for a slot this module never gave back.
+        try {
+            # ---- Token acquisition (force refresh when the prior decision demanded it) ----
+            if ($credentialPolicy -eq 'GraphBearer' -and $null -ne $Context.TokenSource) {
+                $acquireForce = $forceRefreshPending
+                $tokenResult = $Context.TokenSource.Acquire($acquireForce, $CancellationToken)
+                if ($acquireForce) {
+                    $forceRefreshPending = $false
+                    $forceRefreshUsed = $true
+                }
+
+                if ($null -ne $tokenResult -and
+                    -not [string]::IsNullOrEmpty([string] $tokenResult.VerifiedTenantId) -and
+                    [string]::Equals([string] $tokenResult.VerifiedTenantId, [string] $Context.TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $verifiedTenantId = $Context.TenantId
+                }
             }
 
-            if ($null -ne $tokenResult -and
-                -not [string]::IsNullOrEmpty([string] $tokenResult.VerifiedTenantId) -and
-                [string]::Equals([string] $tokenResult.VerifiedTenantId, [string] $Context.TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $verifiedTenantId = $Context.TenantId
+            # ---- Build per-attempt request headers (never mutate the caller's table) ----
+            $clientRequestId = [guid]::NewGuid()
+            $sendHeaders = @{}
+            if ($null -ne $Headers) {
+                foreach ($entry in $Headers.GetEnumerator()) {
+                    $sendHeaders[$entry.Key] = $entry.Value
+                }
             }
-        }
+            $sendHeaders['client-request-id'] = $clientRequestId.ToString()
 
-        # ---- Build per-attempt request headers (never mutate the caller's table) ----
-        $clientRequestId = [guid]::NewGuid()
-        $sendHeaders = @{}
-        if ($null -ne $Headers) {
-            foreach ($entry in $Headers.GetEnumerator()) {
-                $sendHeaders[$entry.Key] = $entry.Value
+            $sendParams = @{
+                Uri               = $Uri
+                Method            = $Method
+                Headers           = $sendHeaders
+                Body              = $Body
+                CancellationToken = $CancellationToken
+                CredentialPolicy  = $credentialPolicy
             }
-        }
-        $sendHeaders['client-request-id'] = $clientRequestId.ToString()
 
-        $sendParams = @{
-            Uri               = $Uri
-            Method            = $Method
-            Headers           = $sendHeaders
-            Body              = $Body
-            CancellationToken = $CancellationToken
-            CredentialPolicy  = $credentialPolicy
-        }
+            # Per-operation transport timeouts. Added ONLY when the descriptor declares them, for
+            # two reasons: the transport's defaults stay authoritative for every other operation,
+            # and an injected test sender - which declares only the parameters it needs - is not
+            # handed a parameter it cannot bind. Splatting an unbindable parameter into an injected
+            # delegate is precisely how the -CancellationToken defect reached a live tenant.
+            $descriptorTimeouts = $Descriptor.Timeouts
+            if ($descriptorTimeouts -is [hashtable]) {
+                # The operation deadline must still win. Deadline expiry is only checked BETWEEN
+                # attempts, so once a send begins nothing else bounds it: a descriptor declaring a
+                # 600-second timeout under a 300-second deadline would overrun the deadline by
+                # minutes on a single attempt, and the caller's timeout would mean nothing. Clamp
+                # each phase to whatever remains, with a one-second floor so a nearly-expired
+                # deadline fails fast rather than passing 0 (which several stacks read as infinite).
+                $remainingSeconds = [Math]::Max(1, [int]([double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds))
 
-        # Per-operation transport timeouts. Added ONLY when the descriptor declares them, for
-        # two reasons: the transport's defaults stay authoritative for every other operation,
-        # and an injected test sender - which declares only the parameters it needs - is not
-        # handed a parameter it cannot bind. Splatting an unbindable parameter into an injected
-        # delegate is precisely how the -CancellationToken defect reached a live tenant.
-        $descriptorTimeouts = $Descriptor.Timeouts
-        if ($descriptorTimeouts -is [hashtable]) {
-            # The operation deadline must still win. Deadline expiry is only checked BETWEEN
-            # attempts, so once a send begins nothing else bounds it: a descriptor declaring a
-            # 600-second timeout under a 300-second deadline would overrun the deadline by
-            # minutes on a single attempt, and the caller's timeout would mean nothing. Clamp
-            # each phase to whatever remains, with a one-second floor so a nearly-expired
-            # deadline fails fast rather than passing 0 (which several stacks read as infinite).
-            $remainingSeconds = [Math]::Max(1, [int]([double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds))
-
-            foreach ($phase in @(
+                # The phases run SEQUENTIALLY, so capping each at the full remaining budget
+                # would let one attempt take phases x remaining: three declared phases under a
+                # 300s deadline could hold a single attempt for ~900s, and the deadline is only
+                # checked BETWEEN attempts. Divide the budget across the phases declared.
+                $phaseMap = @(
                     @{ Key = 'ConnectionSeconds'; Param = 'TimeoutConnectionSeconds' }
                     @{ Key = 'HeadersSeconds'; Param = 'TimeoutHeadersSeconds' }
                     @{ Key = 'BodySeconds'; Param = 'TimeoutBodySeconds' }
-                )) {
-                if (-not $descriptorTimeouts.ContainsKey($phase.Key)) { continue }
-                $declared = [int] $descriptorTimeouts[$phase.Key]
-                $sendParams[$phase.Param] = [Math]::Min($declared, $remainingSeconds)
+                )
+                $declaredPhases = @($phaseMap | Where-Object { $descriptorTimeouts.ContainsKey($_.Key) })
+                $perPhaseBudget = [Math]::Max(1, [int]($remainingSeconds / [Math]::Max(1, $declaredPhases.Count)))
+
+                foreach ($phase in $declaredPhases) {
+                    $declared = [int] $descriptorTimeouts[$phase.Key]
+                    $sendParams[$phase.Param] = [Math]::Min($declared, $perPhaseBudget)
+                }
             }
-        }
 
-        if ($credentialPolicy -eq 'GraphBearer') {
-            $sendParams.TokenSource = $Context.TokenSource
-            $sendParams.ExpectedAuthority = $Context.GraphBaseUri
-            $sendParams.TargetTenantId = $Context.TenantId
-            if ($isMutating) {
-                $sendParams.VerifyTenantBinding = $true
+            if ($credentialPolicy -eq 'GraphBearer') {
+                $sendParams.TokenSource = $Context.TokenSource
+                $sendParams.ExpectedAuthority = $Context.GraphBaseUri
+                $sendParams.TargetTenantId = $Context.TenantId
+                if ($isMutating) {
+                    $sendParams.VerifyTenantBinding = $true
+                }
             }
+
+            # ---- One attempt = exactly one send ----
+            $result = & $send @sendParams
+
+            # ---- Runtime certainty, then release admission ----
+            # Complete-GraphThrottleGate's -Success switch drives additive-increase
+            # (AIMD restore); without it a qualified throttle never recovers.
+            $certainty = Get-GraphAttemptCertainty -StatusCode $result.StatusCode -ResponseReceived $result.ResponseReceived
+            $lastAttemptCertainty = $certainty
+
+            if ($null -ne $admission) { Complete-GraphThrottleGate -Admission $admission -Success:($certainty -eq 'Succeeded') }
+            $admission = $null
         }
-
-        # ---- One attempt = exactly one send ----
-        $result = & $send @sendParams
-
-        # ---- Runtime certainty, then release admission ----
-        # Complete-GraphThrottleGate's -Success switch drives additive-increase
-        # (AIMD restore); without it a qualified throttle never recovers.
-        $certainty = Get-GraphAttemptCertainty -StatusCode $result.StatusCode -ResponseReceived $result.ResponseReceived
-        $lastAttemptCertainty = $certainty
-
-        if ($null -ne $admission) { Complete-GraphThrottleGate -Admission $admission -Success:($certainty -eq 'Succeeded') }
+        catch {
+            if ($null -ne $admission) {
+                Complete-GraphThrottleGate -Admission $admission
+                $admission = $null
+            }
+            throw
+        }
 
         # ---- Decision ----
 

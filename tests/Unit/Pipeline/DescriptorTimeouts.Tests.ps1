@@ -71,7 +71,12 @@ Describe 'Per-operation transport timeouts' {
                     -Injections @{ Send = $Send; Delay = { param($Seconds) }; Jitter = { 0.0 } }
             }
 
-            $script:clamped.Headers | Should -BeLessOrEqual 30 -Because 'a 600s phase timeout cannot outlive a 30s operation deadline'
+            # Two phases declared under a 30s deadline: each gets at most half, so one
+            # attempt cannot take phases x remaining. Capping each at the FULL remaining
+            # budget would allow ~60s here, and ~900s for three phases under the 300s default.
+            $script:clamped.Headers | Should -BeLessOrEqual 15 -Because 'the deadline budget is divided across the declared phases, not given to each'
+            $script:clamped.Body | Should -BeLessOrEqual 15
+            ($script:clamped.Headers + $script:clamped.Body) | Should -BeLessOrEqual 30 -Because 'the phases run sequentially and together must fit the deadline'
             $script:clamped.Headers | Should -BeGreaterThan 0 -Because 'zero is read as infinite by several stacks'
         }
 
@@ -101,6 +106,46 @@ Describe 'Per-operation transport timeouts' {
                         -Injections @{ Send = $Send; Delay = { param($Seconds) }; Jitter = { 0.0 } }
                 }
             } | Should -Not -Throw
+        }
+    }
+
+    Context 'admission accounting' {
+
+        It 'releases the throttle admission when the sender throws' {
+            # Proven to leak before this guard existed: Wait-GraphThrottleGate takes a slot,
+            # and the only releases were the normal-completion path and the mid-throttle
+            # deadline path - so any throw in between kept the slot forever. The coordinator
+            # starts at InitialConcurrency = 2, so two failures on one scope exhaust it for the
+            # session and every later operation reports back-pressure, blaming Graph for a slot
+            # this module never returned.
+            InModuleScope GraphKit {
+                $descriptor = @{
+                    Type = 'T'; Operation = 'O'; Method = 'GET'; PathTemplate = '/x'
+                    CredentialPolicy = 'None'; ResponseKind = 'Json'; ReplayPolicy = 'Safe'
+                    ThrottleClass = 'Read'; ResourceFamily = ('LeakTest-' + [guid]::NewGuid())
+                }
+                $context = [PSCustomObject]@{ Cloud = 'Global'; GraphBaseUri = [uri]'https://graph.microsoft.com'; TenantId = 'tid'; ClientId = 'cid'; TokenSource = $null }
+                $scope = New-GraphThrottleScope -Context $context -Descriptor $descriptor
+                $coordinator = Get-GraphThrottleCoordinator
+
+                $throwing = {
+                    param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy,
+                          $TokenSource, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding, $TenantBindingProver)
+                    throw 'simulated transport or MSAL failure'
+                }
+
+                foreach ($i in 1..3) {
+                    try {
+                        $null = Invoke-GraphRetry -Context $context -Descriptor $descriptor -Uri ([uri]'https://graph.microsoft.com/v1.0/x') `
+                            -Method GET -Headers @{} -Body $null -DeadlineSeconds 20 `
+                            -CancellationToken ([System.Threading.CancellationToken]::None) `
+                            -Injections @{ Send = $throwing; Delay = { param($Seconds) }; Jitter = { 0.0 } }
+                    }
+                    catch { }
+                }
+
+                $coordinator.GetInFlight($scope.LeafKey) | Should -Be 0 -Because 'a throwing send must not keep its admission slot'
+            }
         }
     }
 
