@@ -1,4 +1,18 @@
 BeforeAll {
+    # PowerShell renders an exception in a box whose left gutter is a '|' on every wrapped
+    # line, so "with DIFFERENT bytes" arrives as "with DIFFERENT" + newline + " | bytes".
+    # Collapsing whitespace alone is not enough - it leaves "DIFFERENT | bytes" and the
+    # assertion still fails. The wrap point depends on the runner's terminal width, so this
+    # passed on a wide macOS terminal and failed on Linux and Windows.
+    #
+    # Strip the newline+gutter sequence FIRST (it needs the newlines), then collapse.
+    function ConvertTo-FlatConsoleText {
+        param([object] $Output)
+        $text = ($Output | Out-String)
+        $text = $text -replace '\r?\n\s*\|\s*', ' '
+        return ($text -replace '\s+', ' ').Trim()
+    }
+
     # Assert-GateResult is the safety net the whole CI run hangs on: if it is wrong, every
     # other gate in this repository can pass while testing nothing. It was itself untested
     # until a legitimate platform skip made it report "the suite did not pass" for a suite
@@ -29,9 +43,7 @@ BeforeAll {
     function Invoke-Gate {
         param([string] $ResultPath, [int] $MinimumTests = 500, [int] $AllowedSkips = 0)
         $out = & pwsh -NoProfile -File $script:gate -ResultPath $ResultPath -MinimumTests $MinimumTests -AllowedSkips $AllowedSkips 2>&1
-        # Console output wraps at the terminal width, which differs per runner, so collapse
-        # whitespace to keep multi-word assertions wrap-independent.
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out -join ' ') -replace '\s+', ' ') }
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (ConvertTo-FlatConsoleText -Output $out) }
     }
 }
 

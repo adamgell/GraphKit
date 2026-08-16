@@ -1,4 +1,18 @@
 BeforeAll {
+    # PowerShell renders an exception in a box whose left gutter is a '|' on every wrapped
+    # line, so "with DIFFERENT bytes" arrives as "with DIFFERENT" + newline + " | bytes".
+    # Collapsing whitespace alone is not enough - it leaves "DIFFERENT | bytes" and the
+    # assertion still fails. The wrap point depends on the runner's terminal width, so this
+    # passed on a wide macOS terminal and failed on Linux and Windows.
+    #
+    # Strip the newline+gutter sequence FIRST (it needs the newlines), then collapse.
+    function ConvertTo-FlatConsoleText {
+        param([object] $Output)
+        $text = ($Output | Out-String)
+        $text = $text -replace '\r?\n\s*\|\s*', ' '
+        return ($text -replace '\s+', ' ').Trim()
+    }
+
     # Publish-GraphKitPackage is the one place where "what we tested" and "what we ship" can
     # silently diverge. Its refusals are the product; each is mutation-tested here by
     # constructing exactly the situation it must reject.
@@ -40,10 +54,7 @@ BeforeAll {
             else { $args += "-$k"; $args += [string] $Params[$k] }
         }
         $out = & pwsh -NoProfile -File $script:publish @args 2>&1
-        # Console output wraps at the terminal width, which differs per runner - so a
-        # multi-word phrase can be split across lines and a -BeLike/-Match on it fails on
-        # one OS and passes on another. Collapse whitespace so assertions are wrap-independent.
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out | Out-String) -replace '\s+', ' ') }
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (ConvertTo-FlatConsoleText -Output $out) }
     }
 }
 
