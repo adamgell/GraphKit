@@ -29,6 +29,7 @@
 
     # Intrinsic replay policy. Attempt certainty is determined at runtime and is NOT stored here.
     ReplayPolicy        = 'NeverReplay'
+    Impact              = 'Medium'   # an app assignment change is disruptive and reversible: apps can install where they were not intended, or stop reaching devices that need them, but nothing is destroyed
     Condition           = $null
     Reconciliation      = $null
 

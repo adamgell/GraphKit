@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would wedge a CI job instead of failing it. Requiring a named switch also records the intent to
   destroy in the command itself, where a code review can see it. A non-mutating operation
   declaring an impact is rejected at load.
+- Assignment writes for the remaining policy types, closing a read/write asymmetry:
+  `DeviceConfiguration.Assign` and `ConfigurationPolicy.AssignBeta`. Assignment *reads* already
+  existed for both, so a caller could see assignments it had no way to change. All assignment
+  writes are live-verified end to end - create, assign, read back, delete - against a lab tenant.
+- Every write now declares `Impact`, enforced by a descriptor invariant, and every assignment write
+  is required to ship with the read that makes it safe to use, because Graph's `/assign` is a
+  replace and omitted assignments are removed.
 - Three device write descriptors (64 operations): `ManagedDevice.Retire` and `ManagedDevice.Delete`
   (`Medium` - disruptive but recoverable) and `ManagedDevice.Wipe` (`High`). Wipe requires a
   request body even though Graph accepts an empty one, because `keepUserData` defaults to false

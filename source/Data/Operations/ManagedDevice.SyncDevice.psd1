@@ -14,6 +14,13 @@
     corrupted by a duplicate sync, but "nothing bad happens" is not the same property as "the
     engine can prove it already committed", and conflating them is how a genuinely unsafe
     operation gets marked Safe later by analogy.
+
+    PERMISSION VERIFIED, OPERATION NOT. Called live against a lab device, this returned HTTP 403
+    with a token carrying DeviceManagementManagedDevices.ReadWrite.All - which is exactly what
+    confirms the declaration above is correct rather than over-strict: ReadWrite is not enough, and
+    PrivilegedOperations.All really is required. The lab app does not hold that scope, so the
+    operation itself has never executed successfully. Granting it is the only way to close that,
+    and it should be a deliberate decision, not a convenience.
 #>
 @{
     SchemaVersion       = 1
@@ -38,6 +45,8 @@
     SupportsDelta       = $false
 
     ReplayPolicy        = 'NeverReplay'
+
+    Impact              = 'Low'   # asking a device to check in changes no configuration and loses no data; it is the least consequential write in the catalog
     Condition           = $null
     Reconciliation      = $null
 

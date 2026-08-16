@@ -13,6 +13,16 @@
     and keepEnrollmentData default to false server-side, so an empty body is the most destructive
     possible call - and it is the one a caller writes by accident. Forcing the body makes the
     caller state what they intend to keep.
+
+    PERMISSION VERIFIED, OPERATION DELIBERATELY NOT. The sibling device actions return 403 with a
+    ReadWrite.All token, confirming PrivilegedOperations.All is genuinely required. This one will
+    not be live-verified at all: there is no safe way to prove a factory reset works except by
+    factory-resetting something.
+
+    What IS verified live is the GATE. Against a real device id in the lab tenant, -WhatIf printed
+    the request and sent nothing, and the call without -Force was refused with
+    GraphKit.HighImpactConfirmationRequired. The protection is proven even though the operation is
+    not.
 #>
 @{
     SchemaVersion       = 1

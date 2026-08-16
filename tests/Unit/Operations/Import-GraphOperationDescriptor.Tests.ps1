@@ -139,7 +139,10 @@ Describe 'Import-GraphOperationDescriptor' {
             $d['Concurrency'].ContainsKey('Header') | Should -BeTrue
             $d['Concurrency'].ContainsKey('Required') | Should -BeTrue
             $d['Concurrency'].ContainsKey('AllowWildcard') | Should -BeTrue
-            $d.Keys.Count | Should -Be 32
+            # A deliberate tripwire, not a brittle assertion: it forces anyone adding a descriptor
+        # field to come here and say so. 32 -> 33 when the optional 'Impact' field was added for
+        # the write gate.
+        $d.Keys.Count | Should -Be 33
         }
 
         It 'loads ManagedDevice.List with NextLink paging fields' {

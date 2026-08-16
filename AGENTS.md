@@ -126,6 +126,47 @@ Treat `build.ps1`, `build.yaml`, and `RequiredModules.psd1` as authoritative for
 - Treat `@odata.nextLink` as opaque, validate its Graph authority before forwarding authorization, and continue through empty pages carrying a next link.
 - Never log, commit, export, or place in vault evidence tenant IDs, client IDs, credentials, secrets, bearer tokens, or PII.
 
+## Write Operations
+
+The catalog was read-only except for one assignment until 2026-08-16. It now carries eight writes,
+and the rules that keep them safe are enforced in code and tests rather than left to reviewers.
+
+**Mutation is declared, never inferred from the HTTP verb.** `ReplayPolicy = 'Safe'` means the
+operation changes nothing, and that is what `Invoke-GraphOperation` gates on. Two descriptors are
+POSTs that mutate nothing - `AppInstallSummaryReport.Get` and `DeviceReport.Export` post a body to
+obtain a report - so a verb-based gate would prompt on reads and teach callers that the prompt is
+noise.
+
+**Every write declares an `Impact`** (`Low`/`Medium`/`High`), enforced by a descriptor invariant
+because the default is the permissive direction: an undeclared Impact reads as not-High, so a
+destructive operation added without one silently skips the confirmation. `High` means irreversible
+data loss and requires an explicit `-Force`.
+
+**`-Force` does not prompt, by design.** The first version called `ShouldContinue`, which does not
+reliably throw in a non-interactive host - it *blocks on stdin*. A test run hung past ten minutes
+with six stuck processes. A wedged CI job is worse than a failed one. Requiring a named switch also
+records the intent to destroy in the command itself, where shell history and a code review can see
+it. Do not "improve" this back into a prompt.
+
+**`ConfirmImpact` cannot do this job.** It is a property of the *cmdlet*, and `Invoke-GraphOperation`
+is one cmdlet serving every descriptor, so it cannot vary per operation. Its default `Medium`
+against the default `$ConfirmPreference` of `High` means `ShouldProcess` returns true *without
+prompting*.
+
+**Graph's `/assign` is a REPLACE.** Whatever is omitted is unassigned, so a caller who posts one
+assignment intending to add it silently removes every other. Every assignment write must ship
+alongside the read that lets a caller fetch the current set first - enforced by a paired-descriptor
+invariant.
+
+**A write's declared permission is a claim only the service can settle.** `ManagedDevice.SyncDevice`
+returns 403 with a `DeviceManagementManagedDevices.ReadWrite.All` token, which is what proves
+`PrivilegedOperations.All` is genuinely required rather than over-declared. The three device actions
+are permission-verified but operation-unverified; the lab app lacks that scope.
+
+**`ManagedDevice.Wipe` will not be live-verified.** There is no safe way to prove a factory reset
+works except by factory-resetting something. Its *gate* is verified against a real device id: `-WhatIf`
+sends nothing and the un-forced call is refused. Verify the protection, not the destruction.
+
 ## Important Files
 
 Current:

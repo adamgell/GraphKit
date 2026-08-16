@@ -184,3 +184,57 @@ Describe 'Directory settings need both halves to be interpretable' {
     }
 }
 
+Describe 'The write surface stays coherent as it grows' {
+
+    BeforeAll {
+        $script:writes = @($script:catalog | Where-Object { $_.ReplayPolicy -ne 'Safe' })
+    }
+
+    It 'gives every write a Write throttle class' {
+        # Writes and reads share a throttle budget only if someone forgets this. Graph meters them
+        # separately, so a write counted against the read budget makes back-pressure appear on the
+        # wrong scope and the AIMD controller throttles the wrong thing.
+        foreach ($w in $script:writes) {
+            $w.ThrottleClass | Should -Be 'Write' -Because "$($w.Type)/$($w.Operation) mutates"
+        }
+    }
+
+    It 'declares an Impact on every write' {
+        # An undeclared Impact is treated as not-High, so a destructive operation added without one
+        # silently skips the -Force requirement. The default is the permissive direction, which is
+        # exactly why the declaration has to be mandatory for writes rather than optional.
+        foreach ($w in $script:writes) {
+            $w.Impact | Should -Not -BeNullOrEmpty -Because "$($w.Type)/$($w.Operation) must state how bad it is if run by mistake"
+            $w.Impact | Should -BeIn @('Low', 'Medium', 'High')
+        }
+    }
+
+    It 'pairs every assignment write with the read that makes it safe to use' {
+        # Graph's /assign is a REPLACE: whatever is omitted is unassigned. A caller who cannot read
+        # the current set before posting will silently destroy assignments they never saw. Shipping
+        # the write without the read is therefore shipping a footgun.
+        $pairs = @{
+            'DeviceCompliancePolicy/Assign'     = 'DeviceCompliancePolicyAssignment/List'
+            'DeviceConfiguration/Assign'        = 'DeviceConfigurationAssignment/List'
+            'ConfigurationPolicy/AssignBeta'    = 'ConfigurationPolicyAssignment/ListBeta'
+            'MobileApp/Assign'                  = 'MobileAppAssignment/List'
+        }
+        foreach ($write in $pairs.Keys) {
+            $w = $write -split '/'
+            $r = $pairs[$write] -split '/'
+            ($script:catalog | Where-Object { $_.Type -eq $w[0] -and $_.Operation -eq $w[1] }) |
+                Should -Not -BeNullOrEmpty -Because "$write must exist"
+            ($script:catalog | Where-Object { $_.Type -eq $r[0] -and $_.Operation -eq $r[1] }) |
+                Should -Not -BeNullOrEmpty -Because "$write is a REPLACE and needs $($pairs[$write]) to be usable safely"
+        }
+    }
+
+    It 'never marks a write ReplayPolicy Safe' {
+        # Safe means the retry engine may re-send after an ambiguous failure. For a write with no
+        # reconcilable identity that is a duplicate mutation, not a retry.
+        foreach ($w in $script:writes) {
+            $w.ReplayPolicy | Should -BeIn @('Conditional', 'Reconciliable', 'NeverReplay')
+        }
+    }
+}
+

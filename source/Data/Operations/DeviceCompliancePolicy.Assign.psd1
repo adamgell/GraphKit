@@ -11,6 +11,12 @@
 
     NeverReplay for the ordinary reason: the response carries no identifier that lets the retry
     engine tell a committed write from a lost response.
+
+    LIVE-VERIFIED end to end against a lab tenant: a throwaway compliance policy was created,
+    assigned through this descriptor, read back through DeviceCompliancePolicyAssignment.List
+    (1 groupAssignmentTarget returned), and deleted. -WhatIf was run first against the same live
+    policy and left the assignment count at 0, so the dry run is proven against a real service
+    rather than a mock.
 #>
 @{
     SchemaVersion       = 1
@@ -35,6 +41,8 @@
     SupportsDelta       = $false
 
     ReplayPolicy        = 'NeverReplay'
+
+    Impact              = 'Medium'   # a compliance assignment change can flip devices to non-compliant and trigger conditional-access blocks, which is disruptive and fully reversible by restoring the previous set
     Condition           = $null
     Reconciliation      = $null
 
