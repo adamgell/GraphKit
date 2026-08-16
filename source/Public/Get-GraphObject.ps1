@@ -193,8 +193,16 @@ function Get-GraphObject {
 
     # 9. A non-Succeeded outcome throws, naming the Outcome and Certainty, so a failure is never
     #    mistaken for an empty result.
+    #
+    #    The throw carries the HTTP status and Graph error code, and attaches the whole result
+    #    envelope as TargetObject. Previously it threw a bare string: the status code was
+    #    recorded in telemetry but unreachable from the error, so a caller could not tell
+    #    permission-denied from any other failure without re-issuing the request through
+    #    -PassThruResult purely to read a number it had already been told. A consumer
+    #    classifying a 403 as "skipped, needs a scope" rather than "failed" is doing exactly
+    #    what this module's certainty model asks of it, and it should not need a second call.
     if ($result.Outcome -ne 'Succeeded') {
-        throw "Get-GraphObject failed for '{0}/{1}': Outcome '{2}', Certainty '{3}'." -f $Type, $Operation, $result.Outcome, $result.Certainty
+        $PSCmdlet.ThrowTerminatingError((New-GraphOperationFailureRecord -Result $result -Type $Type -Operation $Operation))
     }
 
     # 10. -PassThruResult is envelope-only output; rows and envelopes are never mixed.

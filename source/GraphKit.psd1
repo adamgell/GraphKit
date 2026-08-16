@@ -164,7 +164,15 @@ This is an early release: the command surface is small and may change before 1.0
         # RequireLicenseAcceptance = $false
 
         # External dependent modules of this module
-        # ExternalModuleDependencies = @()
+        # Both RequiredModules entries are satisfied from PSGallery, never from whatever
+        # repository GraphKit itself is installed from. Without this declaration, PowerShellGet
+        # resolving a local or private repository demands the dependencies exist in that SAME
+        # repository and fails the install - which a consumer cannot fix from their side.
+        # Reported with a live repro by a downstream consumer packaging against a local repo.
+        ExternalModuleDependencies = @(
+            'Microsoft.Graph.Authentication'
+            'Microsoft.PowerShell.SecretManagement'
+        )
 
     } # End of PSData hashtable
 

@@ -1,33 +1,52 @@
 ﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="8" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="00:03:24">
-  <environment nunit-version="2.5.8.0" machine-name="BigMac26.home.gell.one" os-version="25.4.0" platform="Darwin" user-domain="" cwd="/Users/Adam.Gell/repo/GraphKit" clr-version="10.0.11" user="Adam.Gell" />
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="11" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-16" time="03:19:23">
+  <environment nunit-version="2.5.8.0" os-version="25.4.0" user="Adam.Gell" machine-name="BigMac26.home.gell.one" user-domain="" cwd="/Users/Adam.Gell/repo/GraphKit" clr-version="10.0.11" platform="Darwin" />
   <culture-info current-culture="en-US" current-uiculture="en-US" />
-  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.7689" asserts="0" description="Pester">
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="0.7196" asserts="0" description="Pester">
     <results>
-      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Pipeline/DescriptorTimeouts.Tests.ps1" executed="True" result="Success" success="True" time="0.7689" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Pipeline/DescriptorTimeouts.Tests.ps1">
+      <test-suite type="TestFixture" name="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/Get-GraphObject.Tests.ps1" executed="True" result="Success" success="True" time="0.7196" asserts="0" description="/Users/Adam.Gell/repo/GraphKit/tests/Unit/Operations/Get-GraphObject.Tests.ps1">
         <results>
-          <test-suite type="TestFixture" name="Per-operation transport timeouts" executed="True" result="Success" success="True" time="0.1915" asserts="0" description="Per-operation transport timeouts">
+          <test-suite type="TestFixture" name="Get-GraphObject" executed="True" result="Success" success="True" time="0.2451" asserts="0" description="Get-GraphObject">
             <results>
-              <test-suite type="TestFixture" name="Per-operation transport timeouts.plumbing" executed="True" result="Success" success="True" time="0.1249" asserts="0" description="Per-operation transport timeouts.plumbing">
+              <test-suite type="TestFixture" name="Get-GraphObject.Row stamping" executed="True" result="Success" success="True" time="0.1463" asserts="0" description="Get-GraphObject.Row stamping">
                 <results>
-                  <test-case description="passes declared timeouts to the sender" name="Per-operation transport timeouts.plumbing.passes declared timeouts to the sender" time="0.092" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="clamps a declared timeout to the remaining operation deadline" name="Per-operation transport timeouts.plumbing.clamps a declared timeout to the remaining operation deadline" time="0.0116" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="passes NO timeout parameters when the descriptor declares none" name="Per-operation transport timeouts.plumbing.passes NO timeout parameters when the descriptor declares none" time="0.0078" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="stamps every row with the type name and provenance fields" name="Get-GraphObject.Row stamping.stamps every row with the type name and provenance fields" time="0.0947" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="reads a single object (non-paging) through the handler strategy and stamps one row" name="Get-GraphObject.Row stamping.reads a single object (non-paging) through the handler strategy and stamps one row" time="0.0376" asserts="0" success="True" result="Success" executed="True" />
                 </results>
               </test-suite>
-              <test-suite type="TestFixture" name="Per-operation transport timeouts.admission accounting" executed="True" result="Success" success="True" time="0.1388" asserts="0" description="Per-operation transport timeouts.admission accounting">
+              <test-suite type="TestFixture" name="Get-GraphObject.Failure semantics" executed="True" result="Success" success="True" time="0.1789" asserts="0" description="Get-GraphObject.Failure semantics">
                 <results>
-                  <test-case description="releases the throttle admission when the sender throws" name="Per-operation transport timeouts.admission accounting.releases the throttle admission when the sender throws" time="0.0118" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="throws on a Failed/Indeterminate outcome, naming both the Outcome and Certainty" name="Get-GraphObject.Failure semantics.throws on a Failed/Indeterminate outcome, naming both the Outcome and Certainty" time="0.0267" asserts="0" success="True" result="Success" executed="True" />
                 </results>
               </test-suite>
-              <test-suite type="TestFixture" name="Per-operation transport timeouts.validation" executed="True" result="Success" success="True" time="0.1865" asserts="0" description="Per-operation transport timeouts.validation">
+              <test-suite type="TestFixture" name="Get-GraphObject.Output modes" executed="True" result="Success" success="True" time="0.2035" asserts="0" description="Get-GraphObject.Output modes">
                 <results>
-                  <test-case description="rejects an unknown Timeouts key rather than ignoring it" name="Per-operation transport timeouts.validation.rejects an unknown Timeouts key rather than ignoring it" time="0.0231" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="rejects a non-positive timeout" name="Per-operation transport timeouts.validation.rejects a non-positive timeout" time="0.0049" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="rejects a timeout above the ceiling, which is how a slipped digit reads" name="Per-operation transport timeouts.validation.rejects a timeout above the ceiling, which is how a slipped digit reads" time="0.0043" asserts="0" success="True" result="Success" executed="True" />
-                  <test-case description="accepts a valid Timeouts block" name="Per-operation transport timeouts.validation.accepts a valid Timeouts block" time="0.0054" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="returns the envelope only with -PassThruResult and never emits rows" name="Get-GraphObject.Output modes.returns the envelope only with -PassThruResult and never emits rows" time="0.013" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="emits no rows for an empty result set" name="Get-GraphObject.Output modes.emits no rows for an empty result set" time="0.0104" asserts="0" success="True" result="Success" executed="True" />
                 </results>
               </test-suite>
+              <test-suite type="TestFixture" name="Get-GraphObject.Paging" executed="True" result="Success" success="True" time="0.2213" asserts="0" description="Get-GraphObject.Paging">
+                <results>
+                  <test-case description="pages a NextLink collection through Invoke-GraphPaging and honours -PageCap" name="Get-GraphObject.Paging.pages a NextLink collection through Invoke-GraphPaging and honours -PageCap" time="0.0166" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Get-GraphObject.Descriptor resolution" executed="True" result="Success" success="True" time="0.237" asserts="0" description="Get-GraphObject.Descriptor resolution">
+                <results>
+                  <test-case description="defaults -Operation to List when only -Type is given" name="Get-GraphObject.Descriptor resolution.defaults -Operation to List when only -Type is given" time="0.0141" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Get-GraphObject.Input validation" executed="True" result="Success" success="True" time="0.2412" asserts="0" description="Get-GraphObject.Input validation">
+                <results>
+                  <test-case description="rejects supplying both -Context and -ProfileId" name="Get-GraphObject.Input validation.rejects supplying both -Context and -ProfileId" time="0.0025" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+          <test-suite type="TestFixture" name="Register-GraphArgumentCompleter" executed="True" result="Success" success="True" time="0.3017" asserts="0" description="Register-GraphArgumentCompleter">
+            <results>
+              <test-case description="registers (or re-registers) without throwing at import" name="Register-GraphArgumentCompleter.registers (or re-registers) without throwing at import" time="0.0065" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="completes -Type from the catalog type set" name="Register-GraphArgumentCompleter.completes -Type from the catalog type set" time="0.0407" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="completes -Operation filtered by the already-bound -Type" name="Register-GraphArgumentCompleter.completes -Operation filtered by the already-bound -Type" time="0.0083" asserts="0" success="True" result="Success" executed="True" />
             </results>
           </test-suite>
         </results>

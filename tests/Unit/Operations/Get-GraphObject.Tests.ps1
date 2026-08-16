@@ -217,3 +217,72 @@ Describe 'Register-GraphArgumentCompleter' {
         $results | Should -Contain 'Get'
     }
 }
+
+Describe 'Get-GraphObject failure carries the status code' {
+
+    # Reported by a downstream consumer after a live run: on a failed read the HTTP status was
+    # recorded in telemetry but unreachable from the thrown error, because the throw was a bare
+    # string. A consumer could not tell permission-denied from any other failure without
+    # re-issuing the whole request through -PassThruResult to read a number it had already been
+    # given - against a customer tenant.
+    #
+    # Tested against the private builder rather than through Get-GraphObject. Driving it end to
+    # end needs a context, a token source with a working Acquire, and a transport, and the
+    # dispatch runs through a scriptblock built before a Pester mock applies - so a mock on the
+    # handler intercepts nothing and the "unit" test silently issues a REAL request, then
+    # asserts against whatever the tenant returned. That is how six iterations of this test
+    # passed a live 401 off as a staged 403.
+
+    BeforeDiscovery {
+        $script:cases = @(
+            @{ Status = 403; Expected = 'PermissionDenied'; Why = 'permission-denied must be distinguishable, so a consumer can report Skipped rather than Failed' }
+            @{ Status = 401; Expected = 'AuthenticationError'; Why = 'a token problem is the operator''s to fix, not a missing scope' }
+            @{ Status = 404; Expected = 'ObjectNotFound'; Why = 'absent is not failed' }
+            @{ Status = 429; Expected = 'LimitsExceeded'; Why = 'throttling is retryable; a generic failure is not' }
+            @{ Status = 503; Expected = 'ResourceUnavailable'; Why = 'server-side and transient' }
+            @{ Status = 400; Expected = 'InvalidResult'; Why = 'the default for anything unclassified' }
+        )
+    }
+
+    It 'maps HTTP <Status> to <Expected>' -ForEach $script:cases {
+        $category = InModuleScope GraphKit -Parameters @{ Status = $Status } {
+            $result = [PSCustomObject]@{
+                Outcome   = 'Failed'
+                Certainty = 'Known'
+                Telemetry = @([PSCustomObject]@{ Attempt = 1; StatusCode = $Status; GraphErrorCode = 'SomeCode' })
+            }
+            (New-GraphOperationFailureRecord -Result $result -Type 'T' -Operation 'List').CategoryInfo.Category
+        }
+        [string] $category | Should -Be $Expected -Because $Why
+    }
+
+    It 'puts the status and Graph error code in the message and the envelope on TargetObject' {
+        $record = InModuleScope GraphKit {
+            $result = [PSCustomObject]@{
+                Outcome   = 'Failed'
+                Certainty = 'Known'
+                Telemetry = @([PSCustomObject]@{ Attempt = 1; StatusCode = 403; GraphErrorCode = 'AccessDenied' })
+            }
+            New-GraphOperationFailureRecord -Result $result -Type 'ConditionalAccessPolicy' -Operation 'List'
+        }
+
+        $record.Exception.Message | Should -BeLike '*HTTP 403*'
+        $record.Exception.Message | Should -BeLike "*Graph error 'AccessDenied'*"
+        $record.FullyQualifiedErrorId | Should -Be 'GraphKit.OperationFailed.403'
+        # The envelope must survive onto the error, or telemetry is lost with the exception.
+        $record.TargetObject.Outcome | Should -Be 'Failed'
+        @($record.TargetObject.Telemetry)[-1].StatusCode | Should -Be 403
+    }
+
+    It 'still produces a usable record when there is no telemetry at all' {
+        # A failure before any attempt (deadline expired while waiting on the throttle gate)
+        # leaves no telemetry. The record must still build rather than throw while reporting.
+        $record = InModuleScope GraphKit {
+            $result = [PSCustomObject]@{ Outcome = 'DeadlineExpired'; Certainty = 'Indeterminate'; Telemetry = @() }
+            New-GraphOperationFailureRecord -Result $result -Type 'T' -Operation 'List'
+        }
+        $record.FullyQualifiedErrorId | Should -Be 'GraphKit.OperationFailed.0'
+        $record.Exception.Message | Should -BeLike '*DeadlineExpired*'
+        $record.Exception.Message | Should -Not -BeLike '*HTTP*' -Because 'no attempt was made, so no status should be claimed'
+    }
+}
