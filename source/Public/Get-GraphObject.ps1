@@ -8,10 +8,24 @@
         only -Type is given), executes the request through the GraphKit-owned transport and retry
         engine, then projects the result envelope's Data rows onto the success stream. Each row is
         stamped with a 'GraphKit.<Type>' PSTypeName plus _Tenant, _RetrievedUtc, _GraphPath and
-        _ApiVersion provenance. Any non-Succeeded outcome throws (the message names the Outcome
-        and Certainty) so a failure can never be mistaken for an empty result. Use -PassThruResult
-        to receive the single GraphKit.OperationResult envelope instead of rows; rows and envelopes
-        are never mixed on one stream.
+        _ApiVersion provenance.
+
+        **_Tenant is the ProfileId, which the operator chose.** It is a label, not an opaque
+        identifier, and operators commonly name profiles after the customer. It is therefore
+        NOT safe by construction: any consumer whose exports, snapshots or evidence must carry
+        no clear-text tenant identifiers has to strip or pseudonymise _Tenant at its own
+        boundary rather than assume this module produced something anonymous. Choosing an
+        opaque ProfileId at registration achieves the same thing at the other end.
+
+        Any non-Succeeded outcome throws. The error is an ErrorRecord, not a bare string: its
+        CategoryInfo.Category is mapped from the HTTP status (403 PermissionDenied, 401
+        AuthenticationError, 404 ObjectNotFound, 429 LimitsExceeded, 5xx ResourceUnavailable),
+        its message names the status and the Graph error code, and its TargetObject is the whole
+        result envelope so telemetry survives onto the exception. Branch on
+        CategoryInfo.Category rather than parsing the message - a consumer distinguishing
+        "skipped, needs a scope" from "failed" should not need a second request to a customer
+        tenant to do it. Use -PassThruResult to receive the single GraphKit.OperationResult
+        envelope instead of rows; rows and envelopes are never mixed on one stream.
 
     .EXAMPLE
         Get-GraphObject -ProfileId contoso -Type MobileApp
