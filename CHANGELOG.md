@@ -5,6 +5,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-17
+
+### Fixed
+
+- **The descriptor declaration is now authoritative over row data.** `Export-GraphResult`'s
+  envelope sanitiser name-matched the whole envelope including `.Data`, so `passwordCredentials`
+  matched its `credential` pattern and was redacted wholesale - taking `endDateTime` and `keyId`
+  with it. Neither a dotted declaration nor `-NoRedact` escaped it, because neither was what
+  redacted. Telemetry and Provenance are still sanitised; `.Data` is governed by
+  `SensitiveProperties`. Raw rows keep the name-based pass, since there is no descriptor to defer
+  to.
+- An envelope whose rows carry secret-looking property names while declaring none now **warns**,
+  naming them and pointing at the descriptor, rather than being silently redacted or silently
+  exported.
+
+### Changed
+
+- `ServicePrincipal.List` declares credential **value** fields rather than the arrays, so
+  credential metadata survives an export while the secret does not.
+
 ## [0.2.0] - 2026-08-16
 
 ### Added

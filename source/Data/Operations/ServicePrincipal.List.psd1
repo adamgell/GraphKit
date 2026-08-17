@@ -49,7 +49,17 @@
     ResourceFamily      = 'Directory.ServicePrincipal'
     ThrottleClass       = 'Read'
 
-    SensitiveProperties = @('passwordCredentials', 'keyCredentials')
+    # Declared at the VALUE fields, not the arrays. Declaring 'passwordCredentials' wholesale
+    # replaced the entire array with [REDACTED] and took endDateTime, startDateTime and keyId
+    # with it - which is exactly the metadata a credential-hygiene check reads, and it never
+    # reads the secret. Redacting the identifying data alongside the secret makes the export
+    # useless for the one job it is for.
+    SensitiveProperties = @(
+        'passwordCredentials.secretText'
+        'passwordCredentials.hint'
+        'keyCredentials.key'
+        'keyCredentials.customKeyIdentifier'
+    )
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(

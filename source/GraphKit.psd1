@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.2.0'
+ModuleVersion = '0.2.1'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,59 +130,41 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.2.0
+0.2.1
 
-A minor bump rather than a patch: three changes alter the output or the calling contract of
-commands that shipped in 0.1.1, and the catalog grew from 55 operations to 69.
+A correctness fix to 0.2.0's export redaction, found by a consumer asking a precise question the
+day 0.2.0 shipped.
 
-BREAKING-ISH - existing callers should read these three:
-- Every export format now redacts declared secret-bearing properties. Previously only -As Json
-  redacted, while -As Csv, -As Markdown and the VaultEvidence rows.json wrote rows raw. Use
-  -NoRedact for the previous behaviour.
-- CSV cells beginning = + - @ are prefixed with an apostrophe so a spreadsheet does not execute
-  them as formulas. Strings only; negative numbers are untouched.
-- Invoke-GraphOperation now supports -WhatIf, and operations declared High impact require -Force.
-  Nothing prompts by default, so unattended writes still run - but a High-impact call without
-  -Force now fails instead of executing.
+FIXED - the descriptor declaration is now authoritative over row data.
+Export-GraphResult's envelope sanitiser name-matched the WHOLE envelope including .Data, so
+'passwordCredentials' matched its 'credential' pattern and was replaced with [REDACTED] wholesale
+- taking endDateTime, startDateTime and keyId with it. A credential-hygiene check reads exactly
+that metadata and never the secret, so the export was useless for its one purpose. Neither a
+narrower dotted declaration nor -NoRedact escaped it, because neither was what redacted.
 
-WRITE OPERATIONS - the catalog is no longer read-only.
-Eight writes ship, each declaring an Impact (Low/Medium/High) that governs how hard it is to run
-by accident. What counts as mutating is declared by the descriptor's ReplayPolicy, never inferred
-from the HTTP verb, because two descriptors are POSTs that change nothing. ManagedDevice.Wipe is
-the only High-impact operation and requires -Force; -Force bypasses that confirmation and nothing
-else. Every assignment write ships with the read that makes it usable, because Graph's /assign is
-a REPLACE and omitted assignments are removed.
+That is the precise failure descriptor-declared redaction was introduced to end: a pattern written
+for envelope TELEMETRY applied to row DATA, the same shape as the nine innocuous
+DeviceCompliancePolicy password* settings it once flagged. Two redaction layers disagreeing means
+the declared one is not authoritative, and a declaration callers cannot rely on is worse than none.
 
-Added: ManagedDevice.SyncDevice / Retire / Delete / Wipe, DeviceCompliancePolicy.Assign,
-DeviceConfiguration.Assign, ConfigurationPolicy.AssignBeta.
+Now: for an envelope, everything EXCEPT .Data is sanitised - Telemetry and Provenance are where
+URIs, filters and tokens actually appear - and the descriptor's SensitiveProperties govern .Data.
+Raw rows keep the name-based pass, deliberately: there is no descriptor to defer to.
 
-FIXED - a wrong answer that looked like a right one:
-- A PathTemplate that fixes a query option now extends it with '&' instead of a second '?'.
-  Resolve-GraphUri always joined with '?', so a fixed option plus a caller-supplied one produced
-  '?$expand=a?$filter=b' - not two options, since the second '?' becomes part of the first
-  option's value. Graph answered 200 and IGNORED the filter, returning a complete collection that
-  read as a filtered one.
-- Get-GraphOperation returns a deep copy. It previously handed out cached catalog objects, so a
-  caller mutating one changed the descriptor every later operation used, CredentialPolicy
-  included.
-- Actions may declare no request body. The action strategy demanded one from every action, which
-  excluded most of the write surface: Intune device actions are bodyless POSTs and deletes carry
-  no body at all.
+Dropping the net silently would have traded one failure for another, so an envelope whose rows
+carry secret-looking property names while declaring nothing now WARNS, naming the properties and
+pointing at the descriptor. It does not redact them, and it stays quiet for the operations that
+return no secrets, so it does not become noise people learn to suppress.
 
-ADDED - descriptors, 55 -> 69:
-- The Administrative Template walk: GroupPolicyConfiguration / GroupPolicyDefinitionValue /
-  GroupPolicyPresentationValue (ListBeta). The two child operations fix a load-bearing $expand in
-  their path; without it the rows come back 200 with no indication of which setting they
-  configure.
-- ConfigurationPolicyAssignment.ListBeta, closing a silent gap - assignment reads existed for
-  compliance, device configuration and mobile apps, so a reconciliation across policy types
-  contributed nothing for Settings Catalog and still reported success.
-- AuthorizationPolicy.Get, DirectorySetting.List and DirectorySettingTemplate.List. The templates
-  are not optional: /settings returns only INSTANTIATED settings, so an absent row means the
-  template default applies - not that the tenant is unconfigured.
-- Descriptors may declare SensitiveProperties and Impact, both validated at load.
+CHANGED - ServicePrincipal.List declares value fields, not arrays:
+passwordCredentials.secretText, passwordCredentials.hint, keyCredentials.key,
+keyCredentials.customKeyIdentifier. Credential metadata now survives an export while the secret
+does not, which is what a hygiene check needs.
 
-Requires PowerShell 7.4+. 721 tests, 0 skipped, green on Windows, Linux and macOS across
+If you were relying on 0.2.0 redacting an UNDECLARED secret in row data, it no longer does - you
+now get a warning instead. Declare it on the operation descriptor; -NoRedact is not the fix.
+
+Requires PowerShell 7.4+. 742 tests, 0 skipped, green on Windows, Linux and macOS across
 PowerShell 7.4 and 7.6.
 '@
 

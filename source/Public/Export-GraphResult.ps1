@@ -304,8 +304,31 @@ function Export-GraphResult {
             # usually correct - most operations return no secrets - but it is indistinguishable
             # from an operation whose declaration was forgotten, and the export reads as
             # sanitised either way. Name it once so the reader can tell which they are holding.
-            Write-Verbose ('Export-GraphResult: the operation declared no SensitiveProperties, so nothing was redacted. ' +
-                           'If this operation can return secrets, add them to its descriptor rather than relying on the export.')
+            # DETECT, do not redact. The sanitiser no longer name-matches .Data, because doing so
+            # replaced whole containers - 'passwordCredentials' matched 'credential' and took
+            # endDateTime and keyId with it - and a declaration the export can override is not
+            # authoritative. But dropping the net silently would trade one failure for another,
+            # so the names are still checked and only WARNED about.
+            #
+            # This fires on the case that actually matters: row data that looks secret-bearing
+            # from an operation that declares nothing. It stays quiet for the ~60 operations
+            # returning no secrets, so it does not become noise people learn to suppress. The
+            # remedy it names is the descriptor, which is where the fix belongs.
+            $suspect = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($r in $rows) {
+                $names = if ($r -is [System.Collections.IDictionary]) { @($r.Keys) } else { @($r.PSObject.Properties.Name) }
+                foreach ($n in $names) {
+                    if ([string] $n -match '(?i)(secrettext|\bsecret\b|accesstoken|\btoken\b|assertion|passwordhash|privatekey)') {
+                        $null = $suspect.Add([string] $n)
+                    }
+                }
+            }
+            if ($suspect.Count -gt 0) {
+                Write-Warning ("Export-GraphResult: '{0}' declares no SensitiveProperties, but the rows carry {1} - which look secret-bearing and are being exported in the clear. Declare them on the operation descriptor; -NoRedact is not the fix." -f $Name, (($suspect | Sort-Object) -join ', '))
+            }
+            else {
+                Write-Verbose 'Export-GraphResult: the operation declared no SensitiveProperties, so nothing was redacted.'
+            }
         }
         elseif (-not $isEnvelopeInput -and $rows.Count -gt 0) {
             # Raw rows carry no provenance, so nothing can be declared and nothing is redacted.
@@ -430,7 +453,47 @@ function Export-GraphResult {
                     }
                 }
 
-                $sanitized = ConvertTo-GraphSanitizedObject -InputObject $toSerialize
+                # The sanitiser must NOT touch .Data when a declaration governs it.
+                #
+                # It name-matches 'credential|token|secret|...' across whatever it is given, and
+                # it was being given the whole envelope - so `passwordCredentials` came back
+                # [REDACTED] on an application or service-principal export REGARDLESS of the
+                # descriptor, taking endDateTime and keyId with it. A credential-hygiene check
+                # reads exactly that metadata and never the secret, so the export was useless to
+                # it. Neither a narrower dotted declaration nor -NoRedact escaped it, because
+                # neither is what was redacting.
+                #
+                # That is the precise failure descriptor-declared redaction was introduced to
+                # end: a pattern written for envelope TELEMETRY applied to row DATA, the same
+                # shape as the nine innocuous DeviceCompliancePolicy password* settings it once
+                # flagged. Two redaction layers disagreeing means the declared one is not
+                # authoritative, and a declaration nobody can rely on is worse than none.
+                #
+                # So: for an ENVELOPE, sanitise everything EXCEPT Data - Telemetry and Provenance
+                # are where URIs, filters and tokens actually appear - and let the descriptor's
+                # SensitiveProperties govern Data, which has already been applied above.
+                #
+                # RAW rows keep the sanitiser, deliberately. There is no descriptor to defer to,
+                # so name-matching is the only protection available, and the export already warns
+                # that nothing was declared.
+                $sanitized = if ($isEnvelopeInput) {
+                    @(foreach ($env in @($toSerialize)) {
+                        if ($null -eq $env) { continue }
+                        $clean = [ordered]@{}
+                        foreach ($prop in $env.PSObject.Properties) {
+                            $clean[$prop.Name] = if ($prop.Name -eq 'Data') {
+                                $prop.Value
+                            } else {
+                                ConvertTo-GraphSanitizedObject -InputObject $prop.Value
+                            }
+                        }
+                        $out = [pscustomobject] $clean
+                        $out.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+                        $out
+                    })
+                } else {
+                    ConvertTo-GraphSanitizedObject -InputObject $toSerialize
+                }
                 $json = if (@($sanitized).Count -eq 0) { '[]' } else { ($sanitized | ConvertTo-Json -Depth 20) }
                 Set-Content -LiteralPath $filePath -Value $json -Encoding utf8
             }

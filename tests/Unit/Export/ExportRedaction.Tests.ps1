@@ -208,7 +208,10 @@ Describe 'SensitiveProperties descriptor validation' {
             $declared["$($op.Type)/$($op.Operation)"] = @($op.SensitiveProperties)
         }
         $declared['DeviceManagementScript/List'] | Should -Contain 'scriptContent'
-        $declared['ServicePrincipal/List'] | Should -Contain 'passwordCredentials'
+        # Value-scoped, not array-scoped: declaring the ARRAY replaced it wholesale and removed
+        # endDateTime/startDateTime/keyId - exactly the metadata a credential-hygiene check reads.
+        $declared['ServicePrincipal/List'] | Should -Contain 'passwordCredentials.secretText'
+        $declared['ServicePrincipal/List'] | Should -Contain 'keyCredentials.key'
         $declared['ConfigurationPolicySetting/ListBeta'] | Should -Contain 'settingInstance.groupSettingCollectionValue'
     }
 }
@@ -304,8 +307,108 @@ Describe 'Export defects found by the 0.2.0 review' {
         Export-GraphResult -Result $env -As Json -Path $script:dir -Name deny
         $json = Get-Content -LiteralPath (Join-Path $script:dir 'deny.json') -Raw
 
-        $json | Should -Not -BeLike '*AAA.BBB.CCC*'
+        # CHANGED in the 0.2.1 fix: the sanitiser no longer name-matches .Data, because doing so
+        # overrode the descriptor and redacted whole containers. Row-level secrets are now the
+        # DECLARATION's job, and an undeclared secret-looking property warns rather than being
+        # silently replaced. Telemetry is still sanitised - that is where the pattern belongs.
+        $json | Should -BeLike '*AAA.BBB.CCC*' -Because 'nothing was declared, so nothing in Data is redacted'
         $json | Should -BeLike '*2027-01-01*' -Because 'a certificate EXPIRY is not a secret'
+    }
+}
+
+Describe 'The descriptor declaration is authoritative over row data' {
+    # 0.2.1. On 0.2.0 the envelope sanitiser name-matched the WHOLE envelope including .Data, so
+    # 'passwordCredentials' matched 'credential' and was replaced wholesale - taking endDateTime,
+    # startDateTime and keyId with it. A credential-hygiene check reads exactly that metadata and
+    # never the secret, so the export was useless for its one purpose. Neither a narrower dotted
+    # declaration nor -NoRedact escaped it, because neither was what redacted.
+    #
+    # Two redaction layers disagreeing means the declared one is not authoritative, and a
+    # declaration callers cannot rely on is worse than no declaration at all.
+
+    BeforeEach {
+        $script:dir = Join-Path $TestDrive ([guid]::NewGuid())
+        $null = New-Item -ItemType Directory -Path $script:dir -Force
+    }
+
+    BeforeAll {
+        # Inside BeforeAll, not at Describe scope: Pester 6 does not surface a function declared
+        # directly in a Describe body to the It blocks within it.
+        function New-CredEnvelope {
+            param([string[]] $Declared)
+            $e = [PSCustomObject]@{
+                Data = @(@{ id = 'app1'
+                            passwordCredentials = @(@{ keyId = 'k-1'; endDateTime = '2027-01-01'; secretText = 'SEKRIT' }) })
+                Outcome = 'Succeeded'; Certainty = 'Known'
+                Telemetry = @(@{ SanitizedUri = 'https://x/y'; AccessToken = 'TELEMETRY-TOKEN' })
+                Provenance = @{ ProfileId = 'p'; SensitiveProperties = $Declared }
+            }
+            $e.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+            return $e
+        }
+    }
+
+    It 'redacts a credential VALUE while preserving the metadata beside it' {
+        # The behaviour TenantPulse's TP.ENT.0019 needs, and the shipped ServicePrincipal.List
+        # declaration now matches this shape.
+        Export-GraphResult -Result (New-CredEnvelope @('passwordCredentials.secretText')) `
+            -As Json -Path $script:dir -Name v
+        $json = Get-Content -LiteralPath (Join-Path $script:dir 'v.json') -Raw
+
+        $json | Should -Not -BeLike '*SEKRIT*'
+        $json | Should -BeLike '*2027-01-01*' -Because 'endDateTime is what a hygiene check reads'
+        $json | Should -BeLike '*k-1*'        -Because 'keyId identifies which credential'
+    }
+
+    It 'still sanitises Telemetry, which is what the name pattern is actually for' {
+        Export-GraphResult -Result (New-CredEnvelope @('passwordCredentials.secretText')) `
+            -As Json -Path $script:dir -Name t
+        (Get-Content -LiteralPath (Join-Path $script:dir 't.json') -Raw) |
+            Should -Not -BeLike '*TELEMETRY-TOKEN*'
+    }
+
+    It 'honours an array-level declaration when that is genuinely what was declared' {
+        Export-GraphResult -Result (New-CredEnvelope @('passwordCredentials')) `
+            -As Json -Path $script:dir -Name a
+        $json = Get-Content -LiteralPath (Join-Path $script:dir 'a.json') -Raw
+        $json | Should -Not -BeLike '*SEKRIT*'
+        $json | Should -Not -BeLike '*2027-01-01*' -Because 'declaring the array means the array'
+    }
+
+    It 'warns rather than silently exporting undeclared secret-looking rows' {
+        # Dropping the name-based net entirely would trade one silent failure for another. It now
+        # DETECTS and warns, naming the descriptor as the remedy - no false redaction.
+        # An ENVELOPE with no declaration - not raw rows, which have their own separate warning.
+        # This is the case that regressed: the operation WAS identified, its descriptor simply
+        # declares nothing, and before this the sanitiser quietly covered for that.
+        $e = [PSCustomObject]@{
+            Data = @(@{ id = 'r1'; secretText = 'RAW' })
+            Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @()
+            Provenance = @{ ProfileId = 'p' }
+        }
+        $e.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+
+        $warnings = @()
+        Export-GraphResult -Result $e -As Json -Path $script:dir -Name w `
+            -WarningVariable warnings -WarningAction SilentlyContinue
+
+        ($warnings -join ' ') | Should -BeLike '*secretText*' -Because 'the warning must name what it saw'
+        ($warnings -join ' ') | Should -BeLike '*descriptor*'  -Because 'and where the fix belongs'
+        (Get-Content -LiteralPath (Join-Path $script:dir 'w.json') -Raw) | Should -BeLike '*RAW*' -Because 'it warns, it does not redact'
+    }
+
+    It 'stays quiet for an operation that returns no secrets' {
+        # If this warned on ordinary exports it would become noise people suppress, and the one
+        # time it mattered would be suppressed too.
+        $warnings = @()
+        $e = [PSCustomObject]@{
+            Data = @(@{ id = 'd1'; deviceName = 'LAPTOP-1'; complianceState = 'compliant' })
+            Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @()
+            Provenance = @{ ProfileId = 'p' }
+        }
+        $e.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+        Export-GraphResult -Result $e -As Json -Path $script:dir -Name q -WarningVariable warnings -WarningAction SilentlyContinue
+        ($warnings -join ' ') | Should -Not -BeLike '*secret*'
     }
 }
 
