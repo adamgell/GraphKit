@@ -66,6 +66,25 @@ function ConvertTo-GraphRedactedRow {
     # caller is still using.
     $copy = [ordered]@{}
 
+    # ARRAYS must recurse element-wise before anything else.
+    #
+    # Without this branch an array fell through to the PSObject path, where
+    # $array.PSObject.Properties yields .NET ARRAY METADATA - Length, Rank, IsReadOnly and
+    # SyncRoot. SyncRoot IS the array, so the entire unredacted subtree was copied verbatim into
+    # the output, and the row shape changed on top of it:
+    #
+    #   "settingInstance": { "Length": 2, "SyncRoot": [ { "groupSettingCollectionValue": "<PSK>" } ] }
+    #
+    # A Wi-Fi PSK landed in the VaultEvidence rows.json in the clear, in a file that reads as
+    # redacted, with no warning. No shipped declaration crosses an array today - which is the only
+    # reason this was latent rather than live - but it fires the moment one does.
+    if ($Row -is [System.Collections.IEnumerable] -and $Row -isnot [string] -and $Row -isnot [System.Collections.IDictionary]) {
+        $items = @(foreach ($item in $Row) { ConvertTo-GraphRedactedRow -Row $item -SensitiveProperties $SensitiveProperties })
+        # The comma keeps a single-element array an array; without it the pipeline unrolls it and
+        # the row silently changes shape - the same trap that broke the descriptor deep copy.
+        return , $items
+    }
+
     $properties = if ($Row -is [System.Collections.IDictionary]) {
         @($Row.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Value = $Row[$_] } })
     }

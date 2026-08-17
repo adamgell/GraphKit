@@ -230,18 +230,41 @@ Describe 'Multi-level path parameterization' {
         } | Should -Throw -ExpectedMessage "*requires path parameter 'definitionValueId'*"
     }
 
-    It 'escapes a token value so it cannot forge a path segment or a query' {
+    It 'rejects a token value that is a dot-segment, and escapes everything else' {
+        # This test previously asserted that '../../admin' came back ESCAPED as '..%2F..%2Fadmin',
+        # and it passed - while the actual vulnerability was a BARE '..', which has no slash to
+        # escape. EscapeDataString leaves '.' alone (RFC 3986 unreserved) and [uri] then collapses
+        # dot-segments, so id='..' deleted the segment it was substituted into and turned a
+        # single-item GET into a collection GET. The test proved a property adjacent to the one
+        # that mattered.
+        foreach ($bad in @('..', '.', '../..', 'a/../b')) {
+            {
+                InModuleScope GraphKit -ArgumentList $script:TwoTokenDescriptor, $script:BaseUri, $bad {
+                    param($Descriptor, $BaseUri, $Bad)
+                    Resolve-GraphUri -Descriptor $Descriptor -Parameters @{ id = $Bad; definitionValueId = 'DV' } -BaseUri $BaseUri
+                }
+            } | Should -Throw -ExpectedMessage '*would change which resource is addressed*' -Because "'$bad' is a dot-segment"
+        }
+    }
+
+    It 'does not reject an id that merely contains dots' {
+        # The guard must not be so broad that legitimate ids fail. Over-rejection here would be a
+        # silent outage for any tenant whose ids contain dots.
         $uri = InModuleScope GraphKit -ArgumentList $script:TwoTokenDescriptor, $script:BaseUri {
             param($Descriptor, $BaseUri)
-            Resolve-GraphUri -Descriptor $Descriptor -Parameters @{ id = '../../admin'; definitionValueId = 'x?$top=1' } -BaseUri $BaseUri
+            Resolve-GraphUri -Descriptor $Descriptor -Parameters @{ id = 'a..b'; definitionValueId = 'x.y.z' } -BaseUri $BaseUri
         }
+        $uri.AbsoluteUri | Should -BeLike '*/a..b/definitionValues/x.y.z/*'
+    }
 
-        # AbsoluteUri, not ToString(): ToString() renders a friendlier unescaped form, so
-        # asserting on it would show traversal that is not actually on the wire - and would
-        # equally hide it if it were.
-        $uri.AbsoluteUri | Should -Not -BeLike '*/../*'
-        $uri.AbsoluteUri | Should -BeLike '*..%2F..%2Fadmin*'
-        ([regex]::Matches($uri.AbsoluteUri, '\?')).Count | Should -Be 1 -Because 'the fixed $expand is the only query; a token value must not open another'
+    It 'still escapes a query attempt inside a token value' {
+        $uri = InModuleScope GraphKit -ArgumentList $script:TwoTokenDescriptor, $script:BaseUri {
+            param($Descriptor, $BaseUri)
+            Resolve-GraphUri -Descriptor $Descriptor -Parameters @{ id = 'ok'; definitionValueId = 'x?$top=1' } -BaseUri $BaseUri
+        }
+        # AbsoluteUri, not ToString(): ToString() renders a friendlier unescaped form and would
+        # hide the very thing under test.
+        ([regex]::Matches($uri.AbsoluteUri, '\?')).Count | Should -Be 1
         $uri.AbsoluteUri | Should -Not -BeLike '*$top=1*'
     }
 }

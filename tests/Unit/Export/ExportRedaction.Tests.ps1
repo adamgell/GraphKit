@@ -212,3 +212,100 @@ Describe 'SensitiveProperties descriptor validation' {
         $declared['ConfigurationPolicySetting/ListBeta'] | Should -Contain 'settingInstance.groupSettingCollectionValue'
     }
 }
+
+Describe 'Export defects found by the 0.2.0 review' {
+
+    BeforeEach {
+        $script:dir = Join-Path $TestDrive ([guid]::NewGuid())
+        $null = New-Item -ItemType Directory -Path $script:dir -Force
+    }
+
+    It 'neutralises a formula hidden behind leading <Name>' -ForEach @(
+        @{ Name = 'tab';   Prefix = "`t" }
+        @{ Name = 'CR';    Prefix = "`r" }
+        @{ Name = 'space'; Prefix = ' ' }
+    ) {
+        # Excel and LibreOffice strip leading whitespace before parsing, so these executed while
+        # looking neutralised. The check tested $value[0] and all three walked past it.
+        $row = [PSCustomObject]@{ deviceName = ($Prefix + '=HYPERLINK("http://evil","click")') }
+        Export-GraphResult -Result @($row) -As Csv -Path $script:dir -Name inj -WarningAction SilentlyContinue
+        (Get-Content -LiteralPath (Join-Path $script:dir 'inj.csv') -Raw) | Should -BeLike "*'*=HYPERLINK*"
+    }
+
+    It 'keeps real columns in Markdown when rows are hashtables' {
+        # The Csv branch got an IDictionary guard after this exact bug; Markdown never did, so a
+        # hashtable row produced columns named IsReadOnly/Keys/SyncRoot with every value crushed
+        # into one cell. It bites hardest where NO declaration exists, because redaction otherwise
+        # converts rows to PSCustomObjects first - i.e. the majority of operations.
+        Export-GraphResult -Result @(@{ id = 'h1'; displayName = 'Hash Row'; enabled = $true }) `
+            -As Markdown -Path $script:dir -Name md -WarningAction SilentlyContinue
+        $md = Get-Content -LiteralPath (Join-Path $script:dir 'md.md') -Raw
+
+        $md | Should -BeLike '*displayName*'
+        $md | Should -BeLike '*Hash Row*'
+        $md | Should -Not -BeLike '*SyncRoot*'
+        $md | Should -Not -BeLike '*IsReadOnly*'
+    }
+
+    It 'unions Markdown columns across heterogeneous rows' {
+        # Columns came from $rows[0] alone, so a field absent from the first row vanished from the
+        # table for every row.
+        Export-GraphResult -Result @(@{ id = '1' }, @{ id = '2'; extra = 'kept' }) `
+            -As Markdown -Path $script:dir -Name het -WarningAction SilentlyContinue
+        (Get-Content -LiteralPath (Join-Path $script:dir 'het.md') -Raw) | Should -BeLike '*extra*'
+    }
+
+    It 'redacts a declared property that sits inside an ARRAY' {
+        # Arrays fell through to the PSObject branch, where $array.PSObject.Properties yields .NET
+        # array metadata - and SyncRoot IS the array, so the whole unredacted subtree was copied
+        # into the output, in a file that reads as redacted.
+        $env = [PSCustomObject]@{
+            Data = @(@{ id = 'p1'; settingInstance = @(
+                        @{ settingDefinitionId = 'wifi'; groupSettingCollectionValue = 'SUPERSECRETPSK' }) })
+            Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @()
+            Provenance = @{ ProfileId = 'probe'; SensitiveProperties = @('settingInstance.groupSettingCollectionValue') }
+        }
+        $env.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+        Export-GraphResult -Result $env -As Json -Path $script:dir -Name arr
+        $json = Get-Content -LiteralPath (Join-Path $script:dir 'arr.json') -Raw
+
+        $json | Should -Not -BeLike '*SUPERSECRETPSK*'
+        $json | Should -Not -BeLike '*SyncRoot*' -Because 'array metadata must never replace the row'
+        $json | Should -BeLike '*wifi*' -Because 'the sibling identifying the setting must survive'
+    }
+
+    It 'does not export the tenant id in provenance, but keeps row-level ids' {
+        # AGENTS.md:127 forbids exporting tenant ids, and these files are shared with customers.
+        # Row-level tenantId is different data the reader may legitimately need, so the scrub is
+        # scoped to Provenance rather than done by name-matching across the whole envelope.
+        $env = [PSCustomObject]@{
+            Data = @(@{ id = 'd1'; tenantId = 'row-level-value' })
+            Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @()
+            Provenance = @{ ProfileId = 'ivy24'; TenantId = '11111111-2222-3333-4444-555555555555' }
+        }
+        $env.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+        Export-GraphResult -Result $env -As Json -Path $script:dir -Name prov
+        $json = Get-Content -LiteralPath (Join-Path $script:dir 'prov.json') -Raw
+
+        $json | Should -Not -BeLike '*11111111-2222-3333-4444-555555555555*'
+        $json | Should -BeLike '*row-level-value*'
+        $json | Should -BeLike '*ivy24*' -Because 'ProfileId identifies the export without being a directory id'
+    }
+
+    It 'redacts credential vocabulary the denylist used to miss, without over-redacting' {
+        # ApiKey / ClientAssertion / Thumbprint were written verbatim while the docstring claimed
+        # secrets can never reach the file. A bare 'key' and 'cert*' were deliberately NOT added:
+        # they would redact certificateExpirationDate and any settings row with a key field.
+        $env = [PSCustomObject]@{
+            Data = @(@{ clientAssertion = 'AAA.BBB.CCC'; certificateExpirationDate = '2027-01-01' })
+            Outcome = 'Succeeded'; Certainty = 'Known'; Telemetry = @(); Provenance = @{ ProfileId = 'p' }
+        }
+        $env.PSObject.TypeNames.Insert(0, 'GraphKit.OperationResult')
+        Export-GraphResult -Result $env -As Json -Path $script:dir -Name deny
+        $json = Get-Content -LiteralPath (Join-Path $script:dir 'deny.json') -Raw
+
+        $json | Should -Not -BeLike '*AAA.BBB.CCC*'
+        $json | Should -BeLike '*2027-01-01*' -Because 'a certificate EXPIRY is not a secret'
+    }
+}
+

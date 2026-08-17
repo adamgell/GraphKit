@@ -156,7 +156,22 @@ function Export-GraphResult {
             [int] $Depth = 0
         )
 
-        $sensitivePattern = '(?i)(token|secret|bearer|password|authorization|credential|\$filter|\$search|\bquery\b|\bsig\b|signature)'
+        # A DENYLIST, and the docstring above claims secrets can never reach the file - so every
+        # term missing from it is a hole in a stated guarantee. Added after review found ApiKey,
+        # ClientAssertion and Thumbprint written verbatim: this module's own vocabulary is full of
+        # pfx/thumbprint/assertion, so those were the likeliest fields to appear and the least
+        # likely to be caught.
+        # NOTE this sanitiser runs over the WHOLE envelope, .Data included - so every term added
+        # here also name-matches against real row data. That is the over-redaction trap the
+        # descriptor-declared redaction exists to avoid: a pattern written for the envelope once
+        # matched nine innocuous DeviceCompliancePolicy password* settings.
+        #
+        # So the additions are deliberately narrow. 'assertion', 'thumbprint', 'pfx', 'apikey',
+        # 'jwt' and 'passphrase' are credential vocabulary with no benign meaning in Intune row
+        # data. A bare 'key' and 'cert*' were tried and REJECTED: they would redact
+        # certificateExpirationDate and any settings row with a 'key' field, which is worse than
+        # the hole they close.
+        $sensitivePattern = '(?i)(token|secret|bearer|password|authorization|credential|assertion|thumbprint|\bpfx\b|\bapi[-_]?key\b|\bjwt\b|passphrase|\$filter|\$search|\bquery\b|\bsig\b|signature)'
 
         if ($Depth -gt 20 -or $null -eq $InputObject) {
             return $null
@@ -282,6 +297,16 @@ function Export-GraphResult {
                 $envelopes = $redactedEnvelopes
             }
         }
+        elseif ($isEnvelopeInput -and $rows.Count -gt 0) {
+            # An envelope with no declaration is NOT the same as raw rows, and it used to be
+            # silent because the branch below is gated on -not $isEnvelopeInput. The operation
+            # was identified; its descriptor simply declares no SensitiveProperties. That is
+            # usually correct - most operations return no secrets - but it is indistinguishable
+            # from an operation whose declaration was forgotten, and the export reads as
+            # sanitised either way. Name it once so the reader can tell which they are holding.
+            Write-Verbose ('Export-GraphResult: the operation declared no SensitiveProperties, so nothing was redacted. ' +
+                           'If this operation can return secrets, add them to its descriptor rather than relying on the export.')
+        }
         elseif (-not $isEnvelopeInput -and $rows.Count -gt 0) {
             # Raw rows carry no provenance, so nothing can be declared and nothing is redacted.
             # Saying so matters: a silent no-op here looks identical to a successful redaction,
@@ -360,7 +385,12 @@ function Export-GraphResult {
 
                     foreach ($entry in $entries) {
                         $value = $entry.Value
-                        if ($value -is [string] -and $value.Length -gt 0 -and $value[0] -in @('=', '+', '-', '@')) {
+                        # Test the first NON-WHITESPACE character. Excel and LibreOffice strip a
+                        # leading tab, CR or space before parsing, so "<TAB>=cmd|calc" executes
+                        # while looking harmless here - checking $value[0] let all three through.
+                        # Verified: <TAB>, <CR> and space prefixes were all written unprefixed.
+                        $firstMeaningful = if ($value -is [string]) { ($value -replace '^[\s\u0000-\u001F]+', '') } else { '' }
+                        if ($value -is [string] -and $firstMeaningful.Length -gt 0 -and $firstMeaningful[0] -in @('=', '+', '-', '@')) {
                             $cells[$entry.Name] = "'" + $value
                         }
                         else {
@@ -374,6 +404,32 @@ function Export-GraphResult {
 
             'Json' {
                 $toSerialize = if ($isEnvelopeInput) { $envelopes.ToArray() } else { $rows.ToArray() }
+                # AGENTS.md:127 - never export tenant or client ids. Provenance carried the full
+                # tenant GUID verbatim into every JSON export, and these files are shared with
+                # customers.
+                #
+                # Scrubbed BEFORE the sanitiser, not after: the sanitiser reshapes the envelope
+                # and the Provenance is no longer reachable as a property afterwards - the first
+                # attempt looked correct, ran without error, and left the GUID in the file.
+                #
+                # Done here rather than by adding 'tenant' to the name pattern, because that
+                # pattern also sees row data and a device or policy row can legitimately carry a
+                # tenantId the reader needs.  ProfileId is deliberately kept: it says which
+                # profile produced the export without being a directory identifier.
+                foreach ($item in @($toSerialize)) {
+                    if ($null -eq $item) { continue }
+                    $prov = $null
+                    if ($item -is [System.Collections.IDictionary]) { $prov = $item['Provenance'] }
+                    elseif ($item.PSObject.Properties['Provenance']) { $prov = $item.PSObject.Properties['Provenance'].Value }
+                    if ($prov -isnot [System.Collections.IDictionary]) { continue }
+                    foreach ($k in @($prov.Keys)) {
+                        if ($k -in @('TenantId', 'ActualTenantId', 'ClientId', 'AppId') -and
+                            -not [string]::IsNullOrWhiteSpace([string] $prov[$k])) {
+                            $prov[$k] = '[REDACTED]'
+                        }
+                    }
+                }
+
                 $sanitized = ConvertTo-GraphSanitizedObject -InputObject $toSerialize
                 $json = if (@($sanitized).Count -eq 0) { '[]' } else { ($sanitized | ConvertTo-Json -Depth 20) }
                 Set-Content -LiteralPath $filePath -Value $json -Encoding utf8
@@ -383,12 +439,34 @@ function Export-GraphResult {
                 $markdown = if ($rows.Count -eq 0) {
                     "# Graph result`n`n_No data rows._"
                 } else {
-                    $columns = @($rows[0].PSObject.Properties.Name)
+                    # Rows arrive as hashtables whenever the transport parsed with -AsHashtable,
+                    # and $row.PSObject.Properties on a hashtable enumerates Count/Keys/Values
+                    # rather than the entries - producing a table whose columns are IsReadOnly,
+                    # Keys, SyncRoot and whose values are space-joined into one cell. The Csv
+                    # branch was given this guard after the same bug; Markdown never was. It bites
+                    # exactly when NO declaration exists, because redaction otherwise converts
+                    # rows to PSCustomObjects first - so it hits the majority of operations.
+                    #
+                    # Columns are unioned across ALL rows, not taken from $rows[0]: heterogeneous
+                    # rows silently dropped columns that the first row happened to lack.
+                    function Get-RowEntry {
+                        param($R, [string] $Name)
+                        if ($R -is [System.Collections.IDictionary]) { return $R[$Name] }
+                        $prop = $R.PSObject.Properties[$Name]
+                        if ($prop) { return $prop.Value }
+                        return $null
+                    }
+                    $columns = [System.Collections.Generic.List[string]]::new()
+                    foreach ($r in $rows) {
+                        $names = if ($r -is [System.Collections.IDictionary]) { @($r.Keys) } else { @($r.PSObject.Properties.Name) }
+                        foreach ($n in $names) { if (-not $columns.Contains([string] $n)) { $columns.Add([string] $n) } }
+                    }
+                    $columns = @($columns)
                     $header = '| ' + ($columns -join ' | ') + ' |'
                     $separator = '| ' + (($columns | ForEach-Object { '---' }) -join ' | ') + ' |'
                     $bodyLines = foreach ($row in $rows) {
                         $cells = foreach ($column in $columns) {
-                            $value = $row.PSObject.Properties[$column].Value
+                            $value = Get-RowEntry -R $row -Name $column
                             if ($null -eq $value) { '' } else { "$value".Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ') }
                         }
                         '| ' + ($cells -join ' | ') + ' |'

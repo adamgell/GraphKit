@@ -238,3 +238,48 @@ Describe 'The write surface stays coherent as it grows' {
     }
 }
 
+Describe 'Safe POSTs are pinned, because the loader cannot settle them' {
+
+    It 'has exactly the POST operations known to mutate nothing' {
+        # POST is ambiguous - some mutate, some only obtain a report - so the loader enforces the
+        # Safe rule for PUT/PATCH/DELETE only. This list is the compensating control: a new
+        # ReplayPolicy 'Safe' POST has to be added here deliberately, by someone who thought about
+        # whether it really changes nothing.
+        #
+        # If this test fails because you added a Safe POST: do not just append to the list. A POST
+        # marked Safe skips ShouldProcess AND the -Force gate, and -WhatIf will perform it for
+        # real. Confirm the operation genuinely has no side effect first.
+        $safePosts = @($script:catalog |
+            Where-Object { $_.Method -eq 'POST' -and $_.ReplayPolicy -eq 'Safe' } |
+            ForEach-Object { "$($_.Type)/$($_.Operation)" } | Sort-Object)
+
+        $safePosts | Should -Be @('AppInstallSummaryReport/Get', 'DeviceReport/Export')
+    }
+
+    It 'rejects a PUT, PATCH or DELETE that claims to be Safe' {
+        $dir = Join-Path $TestDrive ([guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $dir -Force
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+        $tpl = Get-Content (Join-Path $repoRoot 'source/Data/Operations/ManagedDevice.Delete.psd1') -Raw
+        $path = Join-Path $dir 'Bad.Delete.psd1'
+        ($tpl -replace "ReplayPolicy        = 'NeverReplay'", "ReplayPolicy        = 'Safe'") |
+            Set-Content -LiteralPath $path -Encoding utf8
+        InModuleScope GraphKit -Parameters @{ Path = $path } {
+            { Import-GraphOperationDescriptor -Path $Path } | Should -Throw -ExpectedMessage "*not permitted for a DELETE*"
+        }
+    }
+
+    It 'rejects an out-of-enum Impact, which used to load clean and disarm the wipe gate' {
+        $dir = Join-Path $TestDrive ([guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $dir -Force
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+        $tpl = Get-Content (Join-Path $repoRoot 'source/Data/Operations/ManagedDevice.Wipe.psd1') -Raw
+        foreach ($bad in @("'HIGH '", "'Critical'")) {
+            $path = Join-Path $dir ("Bad{0}.Wipe.psd1" -f [guid]::NewGuid().ToString('N'))
+            ($tpl -replace "Impact              = 'High'", "Impact              = $bad") |
+                Set-Content -LiteralPath $path -Encoding utf8
+            InModuleScope GraphKit -Parameters @{ Path = $path } {
+                { Import-GraphOperationDescriptor -Path $Path } | Should -Throw -ExpectedMessage "*must be one of Low, Medium, High*"
+            }
+        }
+    }
+}
+

@@ -48,6 +48,24 @@ function Resolve-GraphUri {
             throw "Path parameter '{0}' for operation '{1}/{2}' has no value." -f $tokenName, $Descriptor.Type, $Descriptor.Operation
         }
 
+        # A token value must not contain a dot-segment. EscapeDataString does NOT escape '.'
+        # (it is RFC 3986 unreserved), and [uri] then COLLAPSES dot-segments, so an id of '..'
+        # deletes the segment it was substituted into:
+        #
+        #     /deviceManagement/deviceConfigurations/{id}   id='..'
+        #       -> https://graph.microsoft.com/beta/deviceManagement/
+        #
+        # A single-item GET silently becomes a COLLECTION GET, so an export scoped to one policy
+        # quietly contains every policy in the tenant. Two of these walk past the /beta prefix
+        # entirely. Nothing about the response signals the substitution went wrong.
+        #
+        # The earlier traversal test missed this because it used '../..', where the SLASH gets
+        # escaped to %2F and .NET preserves it - so the assertion passed while testing a case
+        # that was never vulnerable. A bare '..' has no slash to escape.
+        if ($tokenValue -eq '.' -or $tokenValue -eq '..' -or $tokenValue -match '(^|/)\.\.?($|/)') {
+            throw "Path parameter '{0}' for operation '{1}/{2}' contains a path segment ('{3}') that would change which resource is addressed." -f $tokenName, $Descriptor.Type, $Descriptor.Operation, $tokenValue
+        }
+
         $path = $path.Replace($match.Value, [uri]::EscapeDataString($tokenValue))
     }
 
@@ -89,6 +107,10 @@ function Resolve-GraphUri {
     #    consumed by its own stage of the pipeline.
     $queryParts = [System.Collections.Generic.List[string]]::new()
     foreach ($parameterName in $Parameters.Keys) {
+        # Guard the type before calling a string method on it: a hashtable key of 5 threw
+        # "[System.Int32] does not contain a method named 'StartsWith'" instead of anything a
+        # caller could act on.
+        if ($parameterName -isnot [string]) { continue }
         if (-not $parameterName.StartsWith('$')) {
             continue
         }

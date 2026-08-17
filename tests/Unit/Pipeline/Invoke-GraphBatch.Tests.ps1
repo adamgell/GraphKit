@@ -115,7 +115,7 @@ Describe 'Invoke-GraphBatch' {
         }
 
         It 'rejects a write whose descriptor is not Safe' {
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'NeverReplay' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'NeverReplay'; Method = 'POST'; PathTemplate = '/write' } }
 
             {
                 Invoke-GraphBatch -Context $script:Context -Requests @(
@@ -126,7 +126,7 @@ Describe 'Invoke-GraphBatch' {
 
         It 'allows a write subrequest proven Safe by its descriptor' {
             Reset-BatchState
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write' } }
             $script:BatchQueue.Enqueue((New-BatchEnvelope @((New-BatchResponse '1' 204))))
 
             Mock Invoke-GraphRetry -ModuleName GraphKit { return $script:BatchQueue.Dequeue() }
@@ -143,7 +143,7 @@ Describe 'Invoke-GraphBatch' {
     Context 'Write replay safety' {
         It 'never replays a successful write subrequest when retrying failed reads' {
             Reset-BatchState
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write' } }
 
             $script:BatchQueue.Enqueue((New-BatchEnvelope @(
                         (New-BatchResponse '1' 204),
@@ -269,6 +269,68 @@ Describe 'Batch refuses to carry a mutating subrequest' {
                 )
             } | Should -Throw -Because "$verb must not bypass the batch write guard"
         }
+    }
+}
+
+Describe 'The batch guard cannot be forged' {
+    # The guard checked only the NAMED descriptor's ReplayPolicy while forwarding the caller's
+    # Method and Uri verbatim, so any Safe read descriptor was a skeleton key to any verb at any
+    # URL. Three tests existed for this guard and all three passed, because every one declared its
+    # subrequest honestly - and the mock returned a descriptor carrying ONLY ReplayPolicy, mocking
+    # away the very fields a forgery abuses. The tests could not have caught it.
+
+    BeforeAll {
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).ProviderPath
+        $built = Get-ChildItem (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+        Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force
+        $script:ctx = [PSCustomObject]@{
+            ProfileId = 'forge-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
+            TokenSource = $null; TenantId = [guid]::Empty
+        }
+    }
+
+    It 'refuses a subrequest whose METHOD differs from its declared descriptor' {
+        {
+            Invoke-GraphBatch -Context $script:ctx -Requests @(
+                @{ Id = '1'; Method = 'POST'
+                   Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices'
+                   Type = 'ManagedDevice'; Operation = 'List' })
+        } | Should -Throw -ExpectedMessage '*whose method is GET, but sends POST*'
+    }
+
+    It 'refuses a subrequest whose PATH does not match its declared descriptor' {
+        # The forgery that reaches the path check: DeviceReport/Export is POST and Safe, so the
+        # method matches and only the path can catch it. Declaring ManagedDevice/List instead
+        # would trip the METHOD check first and never exercise this one.
+        # Assert the SPECIFIC guard message. A bare -Throw passed even with the guard deleted,
+        # because this probe context has no token source and the call throws anyway - the test was
+        # green for the wrong reason and a mutation proved it.
+        {
+            Invoke-GraphBatch -Context $script:ctx -Requests @(
+                @{ Id = '1'; Method = 'POST'
+                   Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/abc/wipe'
+                   Body = @{ keepEnrollmentData = $false }
+                   Type = 'DeviceReport'; Operation = 'Export' })
+        } | Should -Throw -ExpectedMessage '*does not match the path template*'
+    }
+
+    It 'still accepts an honest subrequest whose id varies' {
+        # The path check compares SHAPE, not the literal path - {id} must still match any id, or
+        # every parameterized read in a batch would break.
+        # Assert it gets PAST the guard, not that it succeeds: this probe context deliberately
+        # carries no token source, so the call must fail at credential policy. Asserting
+        # -Not -Throw here would be testing the fixture, not the guard.
+        $err = $null
+        try {
+            Invoke-GraphBatch -Context $script:ctx -Requests @(
+                @{ Id = '1'; Method = 'GET'
+                   Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/any-id-here' })
+        } catch { $err = $_.Exception.Message }
+
+        $err | Should -Not -BeLike '*does not match the path template*' -Because 'a varying id must still match the shape'
+        $err | Should -Not -BeLike '*must match the request*'
+        $err | Should -BeLike '*token source*' -Because 'it should reach credential policy, which is past the guard'
     }
 }
 

@@ -45,7 +45,13 @@ $script:GraphOperationArrayFields = @(
 # Closed enums: field name -> allowed values.
 $script:GraphOperationEnumFields = @(
     'OperationKind', 'ApiVersion', 'Stability', 'PagingStrategy', 'ReplayPolicy',
-    'CredentialPolicy', 'RedirectPolicy', 'IdentityRequirement', 'ThrottleClass'
+    'CredentialPolicy', 'RedirectPolicy', 'IdentityRequirement', 'ThrottleClass',
+    # 'Impact' MUST stay in this list. It had an entry in $GraphOperationEnums but not here,
+    # and this is the list the validation loop iterates - so the enum was dead code for its
+    # entire life. A descriptor could declare Impact = 'HIGH ' (trailing space) or 'Critical'
+    # and load clean, while the gate's -eq 'High' test failed: a factory reset silently
+    # downgraded to an ordinary write needing no -Force. Declaring an enum is not enforcing it.
+    'Impact'
 )
 
 $script:GraphOperationEnums = @{
@@ -227,6 +233,38 @@ function Import-GraphOperationDescriptor {
         if ($descriptor.ContainsKey('ReplayPolicy') -and $descriptor['ReplayPolicy'] -eq 'Safe') {
             $violations.Add("Field 'Impact' is '$($descriptor['Impact'])' but ReplayPolicy is 'Safe'; a non-mutating operation cannot be destructive.")
         }
+    }
+
+    # PUT, PATCH and DELETE must never be ReplayPolicy 'Safe'.
+    #
+    # Invoke-GraphOperation derives mutating-ness ENTIRELY from ReplayPolicy - Method and
+    # ThrottleClass are never consulted - so one wrong token disarms both the ShouldProcess gate
+    # and the High-impact -Force gate at once, and -WhatIf then performs the real write instead
+    # of previewing it. Nothing caught that before.
+    #
+    # Only these three verbs are enforced, and POST deliberately is NOT. The first version of
+    # this rule also treated ThrottleClass 'Write' as proof of mutation and immediately rejected
+    # a legitimate descriptor: DeviceReport.Export is a POST that is Safe AND Write, correctly,
+    # because ThrottleClass describes how GRAPH METERS the call while ReplayPolicy describes
+    # whether replaying it is harmless. Those are independent facts and conflating them is a
+    # false positive that would push a maintainer to weaken the rule.
+    #
+    # POST is genuinely ambiguous - some POSTs mutate, some only obtain a report - which is the
+    # reason ReplayPolicy is declared rather than inferred. It cannot be settled here, so it is
+    # pinned by an invariant test listing the POSTs known to be safe instead; adding another
+    # requires someone to change that list on purpose.
+    $verb = if ($descriptor.ContainsKey('Method')) { ([string] $descriptor['Method']).ToUpperInvariant() } else { '' }
+
+    if ($verb -in @('PUT', 'PATCH', 'DELETE') -and
+        $descriptor.ContainsKey('ReplayPolicy') -and $descriptor['ReplayPolicy'] -eq 'Safe') {
+        $violations.Add(
+            (("ReplayPolicy 'Safe' is not permitted for a {0} operation. " +
+              'Safe disables the ShouldProcess and -Force gates entirely.') -f $verb))
+    }
+
+    # A GET metered against the write budget skews back-pressure onto the wrong scope.
+    if ($verb -eq 'GET' -and $descriptor.ContainsKey('ThrottleClass') -and $descriptor['ThrottleClass'] -eq 'Write') {
+        $violations.Add("ThrottleClass 'Write' is not permitted for a GET operation.")
     }
 
     if ($descriptor.ContainsKey('CredentialPolicy') -and $descriptor['CredentialPolicy'] -eq 'None') {

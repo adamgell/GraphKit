@@ -125,6 +125,34 @@ function Invoke-GraphBatch {
                 throw "Batch subrequest '$id' is a write ($method) whose descriptor ReplayPolicy is '$($descriptor.ReplayPolicy)'; only Safe writes may be batched."
             }
 
+            # The named descriptor must MATCH the request actually being sent. Checking only the
+            # descriptor's ReplayPolicy made the guard forgeable: Method and Uri came from the
+            # caller and were forwarded verbatim, so naming any Safe read descriptor let an
+            # arbitrary verb reach an arbitrary Graph URL. Demonstrated -
+            #
+            #     Method='POST'  Uri='.../managedDevices/{id}/wipe'
+            #     Type='ManagedDevice'  Operation='List'      <- Safe read
+            #
+            # passed the guard and put a device wipe in the batch body. Every Safe descriptor in
+            # the catalog was a skeleton key, and the guard stopped only callers who told the
+            # truth about what they were sending.
+            $declaredMethod = ([string] $descriptor.Method).ToUpperInvariant()
+            if ($declaredMethod -ne $method) {
+                throw "Batch subrequest '$id' declares '$($item.Type)/$($item.Operation)', whose method is $declaredMethod, but sends $method. The descriptor must match the request."
+            }
+
+            # Compare the PATH SHAPE, not the literal path: the template carries {tokens} that the
+            # caller has already substituted. Turning the template into an anchored regex means a
+            # subrequest must target the endpoint its descriptor actually describes, while any id
+            # is still accepted. [^/]+ so a token cannot span a segment boundary and reach a
+            # different endpoint.
+            $templatePath = ([string] $descriptor.PathTemplate) -replace '\?.*$', ''
+            $pattern = '^' + ([regex]::Escape($templatePath) -replace '\\\{[^{}]+\\\}', '[^/]+') + '/?$'
+            $actualPath = $uri.AbsolutePath -replace '^/(v1\.0|beta)', ''
+            if ($actualPath -notmatch $pattern) {
+                throw "Batch subrequest '$id' targets '$actualPath', which does not match the path template '$templatePath' of the descriptor it declares ('$($item.Type)/$($item.Operation)')."
+            }
+
             $replaySafe = $true
         }
 
