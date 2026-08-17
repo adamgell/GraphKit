@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-16
+
 ### Added
 
 - Descriptors may declare `SensitiveProperties`: the response properties an operation is known

@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.2'
+ModuleVersion = '0.2.0'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,71 +130,59 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.1.2
+0.2.0
 
-Export hardening. Closes the last three findings from an external security review; all five are
-now fixed.
+A minor bump rather than a patch: three changes alter the output or the calling contract of
+commands that shipped in 0.1.1, and the catalog grew from 55 operations to 69.
 
-Changed - these alter the output of Export-GraphResult:
-- EVERY format now redacts secret-bearing properties. Previously only -As Json redacted, while
-  -As Csv, -As Markdown and the VaultEvidence rows.json wrote rows raw.
-- What is redacted is DECLARED by the operation, not inferred from property names. Descriptors
-  name the properties their responses carry secrets in, and dotted paths are supported so a
-  nested branch can be redacted without losing its siblings. Name-matching was measured against
-  live responses and rejected: it redacts nine DeviceCompliancePolicy password-policy settings -
-  configuration, not credentials - while missing scriptContent and Settings Catalog values
-  entirely, producing an export that reads as sanitised and is not.
+BREAKING-ISH - existing callers should read these three:
+- Every export format now redacts declared secret-bearing properties. Previously only -As Json
+  redacted, while -As Csv, -As Markdown and the VaultEvidence rows.json wrote rows raw. Use
+  -NoRedact for the previous behaviour.
 - CSV cells beginning = + - @ are prefixed with an apostrophe so a spreadsheet does not execute
-  them. Strings only; negative numbers are untouched.
-- Exporting rows without an envelope warns that no declaration is available, rather than
-  redacting nothing silently.
-- Get-GraphOperation returns a deep copy. It previously handed out the cached catalog objects,
-  so a caller mutating one changed the descriptor every later operation in that session used -
-  including its CredentialPolicy.
+  them as formulas. Strings only; negative numbers are untouched.
+- Invoke-GraphOperation now supports -WhatIf, and operations declared High impact require -Force.
+  Nothing prompts by default, so unattended writes still run - but a High-impact call without
+  -Force now fails instead of executing.
 
-Added:
-- Export-GraphResult -NoRedact writes rows exactly as the service returned them, for when the
-  actual value is the point.
-- Descriptors may declare SensitiveProperties, validated at load.
+WRITE OPERATIONS - the catalog is no longer read-only.
+Eight writes ship, each declaring an Impact (Low/Medium/High) that governs how hard it is to run
+by accident. What counts as mutating is declared by the descriptor's ReplayPolicy, never inferred
+from the HTTP verb, because two descriptors are POSTs that change nothing. ManagedDevice.Wipe is
+the only High-impact operation and requires -Force; -Force bypasses that confirmation and nothing
+else. Every assignment write ships with the read that makes it usable, because Graph's /assign is
+a REPLACE and omitted assignments are removed.
 
-Operations declaring secrets today: DeviceManagementScript.List (scriptContent),
-ServicePrincipal.List (passwordCredentials, keyCredentials) and
-ConfigurationPolicySetting.ListBeta (settingInstance.groupSettingCollectionValue). A declaration
-covers only what someone thought of - an operation returning a secret nobody declared is still
-exported.
+Added: ManagedDevice.SyncDevice / Retire / Delete / Wipe, DeviceCompliancePolicy.Assign,
+DeviceConfiguration.Assign, ConfigurationPolicy.AssignBeta.
 
-Fixed - a correctness bug in URI building:
+FIXED - a wrong answer that looked like a right one:
 - A PathTemplate that fixes a query option now extends it with '&' instead of a second '?'.
-  Resolve-GraphUri always joined with '?', so a descriptor with a fixed option plus a
-  caller-supplied one produced '?$expand=a?$filter=b'. That is not two options - the second '?'
-  becomes part of the first option's value, so Graph answers 200 and IGNORES the filter,
-  returning a complete collection that reads as a filtered one. Only Organization/GetMdmAuthority
-  fixed an option before this release, and it was safe purely because it accepts no caller
-  options at all.
-- A caller-supplied option that the descriptor already fixes is now rejected by name, instead of
-  being emitted twice for Graph to reject with an error naming the option rather than the
-  descriptor responsible.
+  Resolve-GraphUri always joined with '?', so a fixed option plus a caller-supplied one produced
+  '?$expand=a?$filter=b' - not two options, since the second '?' becomes part of the first
+  option's value. Graph answered 200 and IGNORED the filter, returning a complete collection that
+  read as a filtered one.
+- Get-GraphOperation returns a deep copy. It previously handed out cached catalog objects, so a
+  caller mutating one changed the descriptor every later operation used, CredentialPolicy
+  included.
+- Actions may declare no request body. The action strategy demanded one from every action, which
+  excluded most of the write surface: Intune device actions are bodyless POSTs and deletes carry
+  no body at all.
 
-Added - four read-only beta descriptors, taking the catalog from 55 to 59:
-- GroupPolicyConfiguration.ListBeta, GroupPolicyDefinitionValue.ListBeta and
-  GroupPolicyPresentationValue.ListBeta - the three-level Administrative Template walk. The two
-  child operations fix a load-bearing $expand in their path, because without it the rows are ids
-  with no indication of which setting they configure: a 200 response that cannot be interpreted.
-  GroupPolicyPresentationValue takes TWO path parameters, 'id' and 'definitionValueId'.
-- ConfigurationPolicyAssignment.ListBeta - assignments for a Settings Catalog policy. This closes
-  a silent gap: assignment descriptors existed for compliance policies, device configurations and
-  mobile apps, so a reconciliation across policy types contributed nothing for Settings Catalog
-  and still reported success.
+ADDED - descriptors, 55 -> 69:
+- The Administrative Template walk: GroupPolicyConfiguration / GroupPolicyDefinitionValue /
+  GroupPolicyPresentationValue (ListBeta). The two child operations fix a load-bearing $expand in
+  their path; without it the rows come back 200 with no indication of which setting they
+  configure.
+- ConfigurationPolicyAssignment.ListBeta, closing a silent gap - assignment reads existed for
+  compliance, device configuration and mobile apps, so a reconciliation across policy types
+  contributed nothing for Settings Catalog and still reported success.
+- AuthorizationPolicy.Get, DirectorySetting.List and DirectorySettingTemplate.List. The templates
+  are not optional: /settings returns only INSTANTIATED settings, so an absent row means the
+  template default applies - not that the tenant is unconfigured.
+- Descriptors may declare SensitiveProperties and Impact, both validated at load.
 
-All four are live-verified against POPULATED responses. The lab tenant's own administrative
-templates turned out to be unpopulated shells - every one had zero definitionValues, which was
-checked rather than assumed (a bogus parent id returns ResourceNotFound, so the endpoint does
-distinguish missing from empty) - so a fixture policy was created there to exercise the walk
-properly. Each descriptor header records the row shape that came back, and that the $expand is
-load-bearing is measured rather than argued: the same requests without it return HTTP 200 and the
-identical rows minus the 'definition' / 'presentation' keys.
-
-Requires PowerShell 7.4+. 687 tests, 0 skipped, green on Windows, Linux and macOS across
+Requires PowerShell 7.4+. 721 tests, 0 skipped, green on Windows, Linux and macOS across
 PowerShell 7.4 and 7.6.
 '@
 

@@ -7,12 +7,15 @@
     so this is disruptive rather than destructive. Medium means -WhatIf works and nothing prompts
     by default - the same treatment as any other write.
 
-    PERMISSION VERIFIED, OPERATION NOT. Called live against a lab device, this returned HTTP 403
-    with a token carrying DeviceManagementManagedDevices.ReadWrite.All - which is exactly what
-    confirms the declaration above is correct rather than over-strict: ReadWrite is not enough, and
-    PrivilegedOperations.All really is required. The lab app does not hold that scope, so the
-    operation itself has never executed successfully. Granting it is the only way to close that,
-    and it should be a deliberate decision, not a convenience.
+    FULLY LIVE-VERIFIED against a real enrolled device, which was genuinely retired and then
+    re-enrolled by the operator. -WhatIf ran first against that same device and sent nothing; the
+    real call returned HTTP 204 Succeeded. Sibling evidence backs the permission independently:
+    ManagedDevice.SyncDevice uses the identical bodyless path and returned 403 before
+    PrivilegedOperations.All was granted, 204 after.
+
+    This is the one operation in the catalog whose verification had a cost someone had to agree to
+    pay, and it is worth stating why it was worth paying: a retire that silently no-ops looks
+    exactly like a retire that worked, and no unit test can tell the difference.
 #>
 @{
     SchemaVersion       = 1

@@ -15,12 +15,11 @@
     engine can prove it already committed", and conflating them is how a genuinely unsafe
     operation gets marked Safe later by analogy.
 
-    PERMISSION VERIFIED, OPERATION NOT. Called live against a lab device, this returned HTTP 403
-    with a token carrying DeviceManagementManagedDevices.ReadWrite.All - which is exactly what
-    confirms the declaration above is correct rather than over-strict: ReadWrite is not enough, and
-    PrivilegedOperations.All really is required. The lab app does not hold that scope, so the
-    operation itself has never executed successfully. Granting it is the only way to close that,
-    and it should be a deliberate decision, not a convenience.
+    FULLY LIVE-VERIFIED, and the before/after is what makes the declared permission trustworthy.
+    Called against a real lab device it returned HTTP 403 with a token carrying only
+    DeviceManagementManagedDevices.ReadWrite.All; after PrivilegedOperations.All was granted the
+    same call returned HTTP 204 Succeeded. So the declaration is neither wrong nor over-strict -
+    ReadWrite genuinely is not enough - and the bodyless action path is proven end to end.
 #>
 @{
     SchemaVersion       = 1
