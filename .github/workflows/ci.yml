@@ -75,9 +75,9 @@ jobs:
         shell: pwsh
         run: pwsh -File ./build.ps1 -ResolveDependency -Tasks noop
 
-      - name: Build
+      - name: Pack candidate
         shell: pwsh
-        run: pwsh -File ./build.ps1 -Tasks build
+        run: pwsh -File ./build.ps1 -Tasks pack
 
       - name: Test
         shell: pwsh
@@ -93,4 +93,4 @@ jobs:
           if ($resultFiles.Count -gt 1) {
               throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
           }
-          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 600 -AllowedSkips 0
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 753 -AllowedSkips 0
