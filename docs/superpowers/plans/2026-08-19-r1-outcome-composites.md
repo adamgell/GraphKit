@@ -47,6 +47,17 @@ The existing check functions already define the compact row contracts:
 
 The first four composite plans must also carry provider provenance and structured gaps outside the compact rule rows. They must distinguish an authoritative empty result from a partial result with zero rows.
 
+**Outcome invariants and provenance:** `Collected` has no gaps or top-level failure class;
+its row set may be empty only when the provider proves authoritative emptiness. At the
+shared record-constructor layer, `Partial` requires at least one structured gap and carries
+gap failure classes rather than a top-level failure class; the collector/provider-plan
+boundary additionally normalizes a zero-row `Partial` to an explicit `Failed` outcome.
+`Failed` and `Skipped` have no usable rows, a non-empty reason code, and a supported
+top-level failure class. `Operations` is an ordered object array of child-operation labels;
+the dataset manifest remains authoritative for the dataset's exact
+`{Type, Operation, ApiVersion}` tuple, while every gap preserves its child scope, operation,
+API version, failure class, reason code, and detail.
+
 ---
 
 ### Task 1: Define the provider outcome and gap contract
@@ -93,15 +104,13 @@ Each gap is:
 }
 ```
 
-Supported failure classes are exactly `DescriptorPending`, `PlatformUnavailable`, `PermissionDenied`, `LicenseRequired`, `GateUnknown`, `DependencyUnavailable`, `AuthenticationFailed`, `DeadlineExpired`, `Cancelled`, `InvalidProviderData`, `ProviderFailed`, and `Indeterminate`.
-
-- [ ] Write failing tests for `Collected`, `Partial`, `Failed`, and `Skipped` records.
-- [ ] Write failing tests that reject missing `Status`, invalid status values, invalid failure classes, and a `Partial` record without at least one gap.
-- [ ] Write failing tests that prove a `Collected` record has no failure class or gaps.
-- [ ] Implement constructors and validation using existing PowerShell record conventions, not public PowerShell classes.
-- [ ] Add explicit schema-version migration for existing snapshots. Older readers must reject unknown versions; they must not infer status from historical reason text.
-- [ ] Run the focused TenantPulse outcome and snapshot tests.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Write failing tests for `Collected`, `Partial`, `Failed`, and `Skipped` records.
+- [x] Write failing tests that reject missing `Status`, invalid status values, invalid failure classes, and a `Partial` record without at least one gap.
+- [x] Write failing tests that prove a `Collected` record has no failure class or gaps.
+- [x] Implement constructors and validation using existing PowerShell record conventions, not public PowerShell classes.
+- [x] Add explicit schema-version migration for existing snapshots. Older readers must reject unknown versions; they must not infer status from historical reason text.
+- [x] Run the focused TenantPulse outcome and snapshot tests.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** Focused tests prove the two-dimensional status/failure-class contract and deterministic serialized field order. Existing released snapshot fixtures continue to load through the explicit migration path.
 
@@ -127,14 +136,12 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - `Unknown` produces `Skipped` with `FailureClass = GateUnknown`.
 - Gate resolution must use collected license evidence or an explicitly injected provider; it must not guess from a missing dataset.
 - A permission denial from a Graph operation remains `PermissionDenied`, not `LicenseRequired`.
-- No unknown gate may evaluate as `Pass`.
-
-- [ ] Write failing tests for available, unavailable, and unknown `EntraP2` states.
-- [ ] Write failing tests that distinguish permission denial from a proven license failure.
-- [ ] Implement deterministic gate resolution and provider-outcome mapping.
-- [ ] Update PIM evaluation to consume the new gate result without changing its permanent-active assignment rule.
-- [ ] Run focused gate and PIM tests.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Write failing tests for available, unavailable, and unknown `EntraP2` states.
+- [x] Write failing tests that distinguish permission denial from a proven license failure.
+- [x] Implement deterministic gate resolution and provider-outcome mapping.
+- [x] Update PIM evaluation to consume the new gate result without changing its permanent-active assignment rule.
+- [x] Run focused gate and PIM tests.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** `TP.ENT.0022` can report a proven license skip or unknown gate without pretending the PIM dataset was collected, and existing PIM rows still evaluate identically when the gate is available.
 
@@ -160,14 +167,17 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - A composite with no rows is `Collected` only when every child proves the authoritative empty state.
 - A composite with any unresolved child is `Partial` when usable authoritative rows exist, otherwise `Failed` or `Skipped` according to the provider outcome.
 - Manifest order remains dependency-first and deterministic.
-
-- [ ] Add failing tests for one successful composite child and one failed child with retained rows and a structured gap.
-- [ ] Add failing tests for an authoritative empty composite versus a zero-row partial composite.
-- [ ] Add failing tests for dependency failure propagation and cycle rejection.
-- [ ] Implement plan dispatch through a narrow provider-plan registry keyed by dataset name. Do not add a generic GraphKit strategy.
-- [ ] Keep all plan calls sequential and pass the resolved immutable Graph context through each call.
-- [ ] Run focused collection and snapshot tests.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- Dispatch precedence is explicit: when the dataset-keyed provider-plan registry contains the
+  dataset, its plan runs even if the manifest row is still `Pending`; only an unregistered
+  dataset takes the `Pending`/`Skipped` fallback. After the package and live gates pass, the
+  map flag is removed and the same registry plan remains the implementation path.
+- [x] Add failing tests for one successful composite child and one failed child with retained rows and a structured gap.
+- [x] Add failing tests for an authoritative empty composite versus a zero-row partial composite.
+- [x] Add failing tests for dependency failure propagation and cycle rejection.
+- [x] Implement plan dispatch through a narrow provider-plan registry keyed by dataset name. Do not add a generic GraphKit strategy.
+- [x] Keep all plan calls sequential and pass the resolved immutable Graph context through each call.
+- [x] Run focused collection and snapshot tests.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** The collector and snapshot layer preserve rows, gaps, operation provenance, and deterministic ordering across partial and failed composite collection.
 
@@ -190,17 +200,19 @@ Get-PulseGateStatus -Gate 'EntraP2'
 1. Resolve and validate the released `DeviceManagementRoleDefinition.List` and `DeviceManagementRoleAssignment.List` descriptors.
 2. Identify group-backed role assignments.
 3. Resolve each required group through the released `Group.Get` select path.
-4. Emit one compact row per distinct group and preserve role names.
+4. Emit exactly one compact row per distinct group ID. The existing scalar
+   `roleDefinitionName` field is the deterministic, ordinally sorted, comma-separated union
+   of every distinct role name associated with that group; no role assignment is discarded.
 5. Preserve every failed child lookup as a gap.
-6. Treat no group-backed assignments as an authoritative collected empty result only after the assignment collection completed successfully.
+6. Treat no group-backed assignments as an authoritative collected empty result only after the assignment collection completed successfully. If an assignment lacks the role-definition relation, preserve an assignment-scoped provider-data gap rather than inventing a role name.
 
-- [ ] Write fixtures for protected groups, unprotected groups, duplicate group references, no group-backed assignments, missing group flags, and a failed child lookup.
-- [ ] Write failing tests for deterministic row ordering and gap scope.
-- [ ] Implement the plan with sequential `Get-GraphObject` calls and existing read-only descriptor validation.
-- [ ] Run focused plan and check tests.
-- [ ] Perform a controlled Ivy24 read to verify the actual role-assignment and group response shapes and required permissions.
+- [x] Write fixtures for protected groups, unprotected groups, duplicate group references, no group-backed assignments, missing group flags, and a failed child lookup.
+- [x] Write failing tests for deterministic row ordering and gap scope.
+- [x] Implement the plan with sequential `Get-GraphObject` calls and existing read-only descriptor validation.
+- [x] Run focused plan and check tests.
+- [x] Perform a controlled Ivy24 read to verify the actual role-assignment and group response shapes and required permissions.
 - [ ] Only after package and live evidence, remove `Pending` from `intuneRbacGroupProtection` and update the check's status documentation.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** TP.INT.0013 cannot turn a failed group lookup into a zero-row `Pass`, and its compact rule behavior remains unchanged for complete inputs.
 
@@ -226,15 +238,13 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - Keep all four LAPS criteria on the same policy.
 - Resolve BitLocker from the child setting `device_vendor_msft_bitlocker_systemdrivesencryptiontype_osencryptiontypedropdown_name_1`; do not treat the parent enablement option as the full-encryption value.
 - Preserve every policy's compact row, including false values.
-- Preserve failed policy-setting reads as scoped gaps.
-
-- [ ] Write fixtures for full encryption, used-space-only encryption, missing child setting, mixed LAPS policy compliance, wrong template identity, and partial per-policy reads.
-- [ ] Write failing tests for strict Boolean/field-presence behavior.
-- [ ] Implement the shared sequential policy plan and the two value resolvers.
-- [ ] Run focused plan and check tests.
+- [x] Write fixtures for full encryption, used-space-only encryption, missing child setting, mixed LAPS policy compliance, wrong template identity, and partial per-policy reads.
+- [x] Write failing tests for strict Boolean/field-presence behavior.
+- [x] Implement the shared sequential policy plan and the two value resolvers.
+- [x] Run focused plan and check tests.
 - [ ] Reverify the BitLocker child setting mapping and LAPS template identity against Ivy24.
 - [ ] Only after package and live evidence, remove `Pending` from both map entries and update their documentation.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** BitLocker and LAPS findings reflect only values resolved from the same policy they describe, and a partial settings walk cannot become a false `Fail` or `Pass`.
 
@@ -258,15 +268,13 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - Resolve template/version/deprecation state through an official reusable primitive. If Microsoft exposes no supportable method, return `Skipped` with `PlatformUnavailable` and record the recheck trigger instead of creating a fake descriptor.
 - Emit native Booleans for `hasAssignment` and `isDeprecated`.
 - Treat zero baselines as the existing `NotApplicable` check result, not as a hidden pass.
-- Preserve scoped gaps for any missing assignment or version child.
-
-- [ ] Write fixtures for assigned/current, unassigned/current, assigned/deprecated, mixed rows, zero rows, non-Boolean values, and partial child reads.
-- [ ] Write failing tests that reject string `'false'` and missing Boolean fields.
-- [ ] Implement the plan over proven primitives.
-- [ ] Run focused plan and check tests.
+- [x] Write fixtures for assigned/current, unassigned/current, assigned/deprecated, mixed rows, zero rows, non-Boolean values, and partial child reads.
+- [x] Write failing tests that reject string `'false'` and missing Boolean fields.
+- [x] Implement the plan over proven primitives.
+- [x] Run focused plan and check tests.
 - [ ] Perform the controlled Ivy24 read and permission verification.
 - [ ] Remove `Pending` only if the complete policy, assignment, and version contract is proven; otherwise record `PlatformUnavailable`.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** TP.INT.0029 reports only authoritative assignment/version state and never coerces an invalid provider value into a security result.
 
@@ -288,13 +296,11 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - Probe beta against Ivy24 with a read-only request.
 - Prove method, path, response shape, API version, application permission, and tenant behavior.
 - If all are proven, add a `Singleton.Default` GraphKit descriptor, pin the exact package, remove `Pending`, and map the result to `Collected` or `Failed` with the specific provider class.
-- If any required contract is unsupported, remove `DescriptorPending` and map the dataset to `Skipped` with `FailureClass = PlatformUnavailable`, including the exact evidence and re-evaluation trigger.
-
-- [ ] Write the provider and catalog tests before changing the map.
-- [ ] Run the controlled Ivy24 probe.
-- [ ] Implement exactly one of the two evidence-backed dispositions.
-- [ ] Run focused GraphKit and TenantPulse tests.
-- [ ] Commit the task without running formatters, linters, or the full repository suite.
+- [x] Write the provider and catalog tests before changing the map.
+- [x] Run the controlled Ivy24 probe.
+- [x] Implement exactly one of the two evidence-backed dispositions.
+- [x] Run focused GraphKit and TenantPulse tests.
+- [x] Commit the task without running formatters, linters, or the full repository suite.
 
 **Acceptance:** TP.INT.0009 no longer claims that an unavailable GraphKit release is the reason for the outcome. It is either live-proven through an exact descriptor or explicitly platform-unavailable.
 
