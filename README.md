@@ -62,12 +62,11 @@ Dependencies and build tools are restored through the repository scripts. Run th
 
 ```powershell
 ./build.ps1 -ResolveDependency -Tasks noop
-./build.ps1 -Tasks build
-./build.ps1 -Tasks test
 ./build.ps1 -Tasks pack
+./build.ps1 -Tasks test
 ```
 
-The `pack` task produces the package from the tested build output. Generated artifacts are written under `output/` and should not be edited directly.
+The `pack` task begins with `Clean`, so package before testing. The `test` task then proves the exact package-producing build and writes the NUnit result consumed by the release gate. Generated artifacts are written under `output/` and must not be edited directly.
 
 ## Project layout
 

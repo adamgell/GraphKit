@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-GraphKit is planned as an app-only, multi-tenant Microsoft Graph execution and analysis layer with explicit Intune and Entra operation semantics. It is not a generic Graph SDK or an OAuth implementation. Its core value is reliable request execution: immutable tenant contexts, operation metadata, semantics-aware retry/throttling, permission analysis, and evidence export.
+GraphKit is an app-only, multi-tenant Microsoft Graph execution and analysis layer with explicit Intune and Entra operation semantics. It is not a generic Graph SDK or an OAuth implementation. Its core value is reliable request execution: immutable tenant contexts, operation metadata, semantics-aware retry/throttling, permission analysis, and evidence export.
 
-**Repository status:** design-approved, scaffolded, and implemented through phase 4 of the v1 plan, with phase 1 verified against a live tenant on 2026-08-15.
+**Current release status:** GraphKit `0.2.2` is the immutable stable package on PSGallery. Phases 1-5 are implemented; live verification remains recorded separately per auth mode, descriptor, and operation because implementation is not evidence of service behavior.
 
 Phase 1 (Core): descriptor catalog and strategy registry, immutable contexts and locked atomic profile store, four token sources with single-flight, owned transport with tenant-proof binding, semantics-aware retry, scoped throttle with AIMD admission (starting conservatively and ramping to the cap), URI security, paging, batch, vault credential resolution, and the MSAL import guard. Phases 2-4 ship `Get-GraphObject` with tab completion, four-state permission analysis, and `Export-GraphResult` with an evidence DTO allowlist.
 
@@ -27,7 +27,7 @@ Two things about the container are worth knowing before repeating it. `Microsoft
 
 Run the suite through `./build.ps1 -Tasks test`, never `Invoke-Pester ./tests` directly: the changelog checks are Sampler-generated and depend on build-injected variables, so a bare Pester run reports two false failures.
 
-**`.github/workflows/ci.yml` exists but has never run.** The repository is local-only with no git remote, by the owner's decision, so the matrix it describes - PowerShell 7.4/7.6 across Windows, Ubuntu and macOS - has never executed. Everything green in this repository was proven on macOS plus one manual Windows pass. Treat the workflow as a specification of the intended gate rather than as evidence that it holds. Deterministic CI, when it runs, gates on the whole Pester result. 615 deterministic tests are green under `./build.ps1 -Tasks test`; `tests/QA/Assert-GateResult.ps1` enforces the expected-minimum-count gate. Test suites now include `tests/Adapter/LoopbackSender.Tests.ps1` (the real HttpClient against an in-process HttpListener) and `tests/Concurrency/TokenIsolation.Tests.ps1`.
+**Remote CI contract.** `.github/workflows/ci.yml` runs PowerShell 7.4 and 7.6 across Windows, Ubuntu, and macOS. A source revision is CI-verified only when all six matrix jobs pass for that exact SHA; workflow existence or an older successful run is not evidence. Locally, 753 deterministic tests must pass under `./build.ps1 -Tasks test`, with zero failures, errors, or skips, and `tests/QA/Assert-GateResult.ps1` enforces the same minimum-count floor used by CI and package verification.
 
 **Phase 5 (cutover) is complete except for two operator actions.** All eight steps ran and were verified against the Ivy24 lab tenant: legacy-caller inventory, `Import-GraphLegacyProfile`, a private versioned package channel with publish/pin/install, a live read through the *installed* package, a GraphKit-backed data plane in IHA behind a default-off flag, reads and a reverted mutating write through it, and a full credential-generation rollover ending in the old generation's revocation. Catalog coverage of IHA's declared surface is 27 of 27 at the API version it actually calls. What remains is not effort: purging deleted directory data is an operator action by policy, and IHA's legacy auth layer must not be deleted until the repoint flag is enabled and verified on the customer tenants, because deleting it first would remove the fallback that makes the repoint reversible. Read `docs/cutover/2026-08-15-phase5-cutover.md` before touching any of it; it records why the remaining blocks are structural rather than remaining effort.
 
@@ -47,7 +47,7 @@ These are standalone scripts, deliberately not module functions: converting the 
 
 ## Architecture & Data Flow
 
-Planned flow:
+Runtime flow:
 
 1. `Register-GraphTenant` persists non-secret profile metadata; credentials stay in `Microsoft.PowerShell.SecretManagement`.
 2. `Get-GraphContext` resolves a profile into an immutable runtime context before parallel work begins.
@@ -78,35 +78,24 @@ Get-GraphObject -Context $context -Type ManagedDevice
 
 ## Key Directories
 
-Current:
-
-- `docs/superpowers/specs/` — approved design decisions and the present source of truth.
-- `scripts/` — standalone operational scripts copied from IntuneHealthAutomation. Not module functions, and not the future `source/Public/`.
-- `tests/` — Pester tests for those scripts. Resolves the script under test via `Split-Path $PSScriptRoot -Parent`, so `tests/` and `scripts/` must remain siblings.
-Scaffolded (2026-08-15):
-
-- `source/Public/` — exported PowerShell functions; one command per file (scaffold placeholders only for now).
-- `source/Private/` — request, retry, URI, throttle, and evidence helpers (scaffold placeholder only for now).
-- `source/Data/Operations/` — `.psd1` operation descriptors governing behavior.
+- `docs/superpowers/specs/` — approved design decisions and product contracts.
+- `source/Public/` — exported PowerShell commands, one command per file.
+- `source/Private/` — transport, auth, retry, URI, throttle, paging, batching, and evidence helpers.
+- `source/Data/Operations/` — versioned `.psd1` operation descriptors.
 - `source/Formats/` — PowerShell formatting definitions.
-- `tests/Unit/` — deterministic retry and policy tests using injected dependencies and virtual time.
-- `tests/QA/` — repository/module quality checks; currently `BuiltModule.tests.ps1` (phase 1.1 gate) plus Sampler-generated module checks.
-- `output/` — generated package output; do not edit it directly.
-
-Planned for later increments:
-
-- `tests/Adapter/` — HTTP-result normalization and loopback-server tests.
-- `tests/Concurrency/` — real-runspace throttle and isolation tests.
+- `tests/Unit/` — deterministic policy and pipeline tests.
+- `tests/Adapter/` — real-HTTP loopback adapter tests.
+- `tests/Concurrency/` — real-runspace isolation and throttle tests.
+- `tests/QA/` — repository, package, import, and whole-result gates.
+- `scripts/` — standalone operational, cutover, and publication scripts.
+- `output/` — generated build/package output; never edit it directly.
 
 ## Development Commands
 
 ```powershell
-./build.ps1 -ResolveDependency -Tasks noop   # restore Sampler/Pester/ModuleBuilder and runtime deps
-./build.ps1 -Tasks build                     # Clean + Build_Module_ModuleBuilder + changelog
-./build.ps1 -Tasks test                      # Pester_Tests_Stop_On_Fail + coverage threshold
-./build.ps1 -Tasks pack                      # build + package_module_nupkg
-Invoke-Pester ./tests/New-ClientServicePrincipalCBA.Tests.ps1 -Output Detailed
-Invoke-Pester ./tests/QA/BuiltModule.tests.ps1   # phase 1.1 gate: built package in clean pwsh
+./build.ps1 -ResolveDependency -Tasks noop   # restore exact build/runtime dependencies
+./build.ps1 -Tasks pack                      # Clean + build + package candidate
+./build.ps1 -Tasks test                      # test the package-producing build
 ```
 
 Treat `build.ps1`, `build.yaml`, and `RequiredModules.psd1` as authoritative for exact task names.
@@ -195,13 +184,13 @@ Current:
 - Operational prerequisite, not a module dependency: a registered SecretManagement vault extension. Its absence must fail at import with an actionable message, not at first token acquisition.
 - Module format: authored public/private scripts compiled into one `.psm1` under `output/`, with non-code assets copied separately.
 - No Node, Bun, npm, or other package-manager workflow is defined.
-- No PSScriptAnalyzer, formatter, lockfile, version file, or CI configuration exists yet.
+- PSScriptAnalyzer is restored as a build dependency but is not a separate repository gate; no formatter, lockfile, or version file is defined. `.github/workflows/ci.yml` defines the six-job CI matrix.
 
 ## Testing & QA
 
 `tests/New-ClientServicePrincipalCBA.Tests.ps1` exists and passes (57 tests, 12 contexts). Every test corresponds to a defect that actually occurred while creating the Ivy24 registration, and they share one failure mode: **the script reported success while not having done the thing.** Two are AST-based and worth reusing as patterns — one asserts no code sits inside a block comment (113 lines containing the entire permission-granting pipeline once did, so registrations had permissions configured and zero granted), the other asserts no variable is read that is never assigned (`$GraphAppId` and `$context` both silently expanded to empty strings without `Set-StrictMode`). Both were mutation-tested: each detector was confirmed to fail when its bug is reintroduced.
 
-When module implementation begins, commit real `*.Tests.ps1` files and preserve these approved contracts:
+Implementation and deterministic tests are present; preserve these approved contracts as subsequent phases add or revise coverage:
 
 - Unit-test retry policy against normalized transport results, not mocked HTTP exception shapes.
 - Cover attempt counts, delay precedence, deadlines, cancellation, scoped throttle state, one refresh after `401`, no replay after `202`, no ambiguous-write replay, and batch retry selection.
