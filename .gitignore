@@ -11,3 +11,5 @@ output/
 *.coverage.xml
 testResults/
 docs/
+# Isolated feature worktrees
+.worktrees/
