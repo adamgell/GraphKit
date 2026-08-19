@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.2.1'
+ModuleVersion = '0.2.2'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -130,42 +130,36 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.2.1
+0.2.2
 
-A correctness fix to 0.2.0's export redaction, found by a consumer asking a precise question the
-day 0.2.0 shipped.
+Thirteen read-only Graph descriptors so TenantPulse can drop descriptor-pending on the
+checks that were waiting on this catalog. Official GETs only; no Walk composites.
 
-FIXED - the descriptor declaration is now authoritative over row data.
-Export-GraphResult's envelope sanitiser name-matched the WHOLE envelope including .Data, so
-'passwordCredentials' matched its 'credential' pattern and was replaced with [REDACTED] wholesale
-- taking endDateTime, startDateTime and keyId with it. A credential-hygiene check reads exactly
-that metadata and never the secret, so the export was useless for its one purpose. Neither a
-narrower dotted declaration nor -NoRedact escaped it, because neither was what redacted.
+ADDED
+- RoleAssignmentScheduleInstance.List and RoleEligibilityScheduleInstance.List
+  (/roleManagement/directory/..., v1.0) for TP.ENT.0022.
+- CrossTenantAccessPolicy.GetDefault (/policies/crossTenantAccessPolicy/default, v1.0)
+  for TP.ENT.0023. The default singleton, not the parent policy object.
+- ApplePushNotificationCertificate.Get (v1.0, certificate declared sensitive),
+  AndroidManagedStoreAccountEnterpriseSettings.Get (beta), and
+  MobileThreatDefenseConnector.List (v1.0) for TP.INT.0019/0022/0024.
+- OperationApprovalPolicy.List, IntuneBrandingProfile.List, and
+  WindowsFeatureUpdateProfile.List (beta) for TP.INT.0008/0011/0012.
+- WindowsAutopilotDeploymentProfile.List (beta, $expand=assignments is the operation
+  identity) for TP.INT.0026.
+- DeviceManagementRoleDefinition.List, DeviceManagementRoleAssignment.List
+  (/deviceManagement/roleAssignments, v1.0), and Group.Get (v1.0, $select of
+  isAssignableToRole/isManagementRestricted) as primitives for TP.INT.0013.
 
-That is the precise failure descriptor-declared redaction was introduced to end: a pattern written
-for envelope TELEMETRY applied to row DATA, the same shape as the nine innocuous
-DeviceCompliancePolicy password* settings it once flagged. Two redaction layers disagreeing means
-the declared one is not authoritative, and a declaration callers cannot rely on is worse than none.
+NOT SHIPPED
+- DataProcessorServiceForWindowsFeaturesOnboarding.Get (TP.INT.0009): resource page
+  exists on beta, official GET method page does not.
 
-Now: for an envelope, everything EXCEPT .Data is sanitised - Telemetry and Provenance are where
-URIs, filters and tokens actually appear - and the descriptor's SensitiveProperties govern .Data.
-Raw rows keep the name-based pass, deliberately: there is no descriptor to defer to.
+Already in the catalog, so no new descriptor: AuthorizationPolicy.Get and
+DirectorySetting.List (TP.ENT.0012/0013/0015/0016); ConfigurationPolicy.ListBeta plus
+settings/assignment siblings (TP.INT.0014/0015/0029).
 
-Dropping the net silently would have traded one failure for another, so an envelope whose rows
-carry secret-looking property names while declaring nothing now WARNS, naming the properties and
-pointing at the descriptor. It does not redact them, and it stays quiet for the operations that
-return no secrets, so it does not become noise people learn to suppress.
-
-CHANGED - ServicePrincipal.List declares value fields, not arrays:
-passwordCredentials.secretText, passwordCredentials.hint, keyCredentials.key,
-keyCredentials.customKeyIdentifier. Credential metadata now survives an export while the secret
-does not, which is what a hygiene check needs.
-
-If you were relying on 0.2.0 redacting an UNDECLARED secret in row data, it no longer does - you
-now get a warning instead. Declare it on the operation descriptor; -NoRedact is not the fix.
-
-Requires PowerShell 7.4+. 742 tests, 0 skipped, green on Windows, Linux and macOS across
-PowerShell 7.4 and 7.6.
+Requires PowerShell 7.4+.
 '@
 
         # Prerelease string of this module

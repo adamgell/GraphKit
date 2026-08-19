@@ -5,6 +5,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-18
+
+### Added
+
+- Thirteen read-only descriptors that unblock TenantPulse checks waiting on
+  `descriptor-pending`. All are official Graph GETs; none invent a Walk composite.
+  - `RoleAssignmentScheduleInstance.List` and `RoleEligibilityScheduleInstance.List`
+    (`/roleManagement/directory/...`, v1.0) for TP.ENT.0022.
+  - `CrossTenantAccessPolicy.GetDefault` (`/policies/crossTenantAccessPolicy/default`,
+    v1.0) for TP.ENT.0023. That is the default singleton, not the parent policy object.
+  - `ApplePushNotificationCertificate.Get` (v1.0, `certificate` declared sensitive),
+    `AndroidManagedStoreAccountEnterpriseSettings.Get` (beta), and
+    `MobileThreatDefenseConnector.List` (v1.0) for TP.INT.0019/0022/0024.
+  - `OperationApprovalPolicy.List`, `IntuneBrandingProfile.List`, and
+    `WindowsFeatureUpdateProfile.List` (all beta) for TP.INT.0008/0011/0012.
+  - `WindowsAutopilotDeploymentProfile.List` (beta, `$expand=assignments` is the
+    operation identity) for TP.INT.0026.
+  - `DeviceManagementRoleDefinition.List`, `DeviceManagementRoleAssignment.List`
+    (`/deviceManagement/roleAssignments`, v1.0), and `Group.Get` (v1.0, `$select`
+    of `isAssignableToRole`/`isManagementRestricted`) as primitives for TP.INT.0013.
+- `AuthorizationPolicy.Get` and `DirectorySetting.List` already existed; they cover
+  TP.ENT.0012/0013/0015/0016. `ConfigurationPolicy.ListBeta` plus settings/assignment
+  siblings already cover BitLocker/LAPS/baseline enumeration (TP.INT.0014/0015/0029).
+- `DataProcessorServiceForWindowsFeaturesOnboarding.Get` is not shipped: the resource
+  page exists on beta, the official GET method page does not.
+
 ## [0.2.1] - 2026-08-17
 
 ### Fixed

@@ -283,3 +283,75 @@ Describe 'Safe POSTs are pinned, because the loader cannot settle them' {
     }
 }
 
+Describe 'The TenantPulse-unblocking reads keep their official paths' {
+
+    It 'keeps PIM schedule instances under /roleManagement/directory' {
+        # The root /roleAssignmentScheduleInstances path is not a Graph GET. A descriptor
+        # that drops the /roleManagement/directory prefix would 404 on every tenant and
+        # look like "no PIM" rather than a wrong catalog entry.
+        $assignment = $script:catalog | Where-Object { $_.Type -eq 'RoleAssignmentScheduleInstance' -and $_.Operation -eq 'List' }
+        $eligibility = $script:catalog | Where-Object { $_.Type -eq 'RoleEligibilityScheduleInstance' -and $_.Operation -eq 'List' }
+
+        $assignment | Should -Not -BeNullOrEmpty
+        $eligibility | Should -Not -BeNullOrEmpty
+        $assignment.PathTemplate | Should -Be '/roleManagement/directory/roleAssignmentScheduleInstances'
+        $eligibility.PathTemplate | Should -Be '/roleManagement/directory/roleEligibilityScheduleInstances'
+        $assignment.ApiVersion | Should -Be 'v1.0'
+        $eligibility.ApiVersion | Should -Be 'v1.0'
+    }
+
+    It 'reads the CTA default configuration, not the parent policy object' {
+        # GET /policies/crossTenantAccessPolicy has no b2bCollaborationInbound. TP.ENT.0023
+        # classifies restrictiveness from the default singleton. Pointing GetDefault at the
+        # parent would return 200 with a shape that cannot be evaluated, which is worse than
+        # a missing descriptor.
+        $d = $script:catalog | Where-Object { $_.Type -eq 'CrossTenantAccessPolicy' -and $_.Operation -eq 'GetDefault' }
+        $d | Should -Not -BeNullOrEmpty
+        $d.PathTemplate | Should -Be '/policies/crossTenantAccessPolicy/default'
+        $d.OperationKind | Should -Be 'Singleton'
+        $d.HandlerStrategyId | Should -Be 'Singleton.Default'
+        $d.PagingStrategy | Should -Be 'None'
+        $d.ApiVersion | Should -Be 'v1.0'
+    }
+
+    It 'keeps the $expand on WindowsAutopilotDeploymentProfile/List' {
+        # Without $expand=assignments Graph omits the relationship. Every profile then looks
+        # unassigned and TP.INT.0026 Fails a tenant that has assignments. The expand is the
+        # operation's identity, not a caller option.
+        $d = $script:catalog | Where-Object { $_.Type -eq 'WindowsAutopilotDeploymentProfile' -and $_.Operation -eq 'List' }
+        $d | Should -Not -BeNullOrEmpty
+        $d.PathTemplate | Should -BeLike '/deviceManagement/windowsAutopilotDeploymentProfiles*$expand=assignments*'
+        $d.ApiVersion | Should -Be 'beta'
+    }
+
+    It 'keeps the $select on Group/Get' {
+        # isAssignableToRole and isManagementRestricted are omitted unless selected. A Get
+        # without $select returns 200 and looks unprotected, which is a silent false Fail
+        # for TP.INT.0013.
+        $d = $script:catalog | Where-Object { $_.Type -eq 'Group' -and $_.Operation -eq 'Get' }
+        $d | Should -Not -BeNullOrEmpty
+        $d.PathTemplate | Should -BeLike '/groups/{id}*$select=*'
+        $d.PathTemplate | Should -BeLike '*isAssignableToRole*'
+        $d.PathTemplate | Should -BeLike '*isManagementRestricted*'
+        $d.OperationKind | Should -Be 'Singleton'
+        $d.PagingStrategy | Should -Be 'None'
+    }
+
+    It 'ships no Walk composite as a catalog operation' {
+        # GraphKit has no Walk handler. A Type ending Walk or an Operation named Walk would
+        # load only if someone invented a strategy, or fail at load. Either way the catalog
+        # does not pretend to flatten a multi-call fan-out.
+        $walks = @($script:catalog | Where-Object { $_.Type -like '*Walk' -or $_.Operation -eq 'Walk' })
+        $walks | Should -BeNullOrEmpty
+    }
+
+    It 'declares the APNs certificate blob sensitive' {
+        $d = $script:catalog | Where-Object { $_.Type -eq 'ApplePushNotificationCertificate' -and $_.Operation -eq 'Get' }
+        $d | Should -Not -BeNullOrEmpty
+        @($d.SensitiveProperties) | Should -Contain 'certificate'
+        $d.OperationKind | Should -Be 'Singleton'
+        $d.ApiVersion | Should -Be 'v1.0'
+    }
+}
+
+
