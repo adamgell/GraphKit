@@ -1,7 +1,7 @@
 # GraphKit and TenantPulse product program design
 
 **Date:** 2026-08-19  
-**Status:** Design approved; written specification pending user review  
+**Status:** Approved for implementation planning  
 **Scope:** GraphKit and TenantPulse, including the recorded deferred end state  
 **Delivery model:** Vertical release trains
 
