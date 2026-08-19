@@ -12,12 +12,12 @@
     #    }
     #}
 
-    InvokeBuild                 = 'latest'
-    PSScriptAnalyzer            = 'latest'
-    Pester                      = 'latest'
-    ModuleBuilder               = 'latest'
-    ChangelogManagement         = 'latest'
-    Sampler                     = 'latest'
+    InvokeBuild                 = '5.14.23'
+    PSScriptAnalyzer            = '1.25.0'
+    Pester                      = '6.1.0'
+    ModuleBuilder               = '3.1.8'
+    ChangelogManagement         = '3.1.0'
+    Sampler                     = '0.120.1'
 
 
 
