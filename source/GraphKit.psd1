@@ -54,7 +54,6 @@ PowerShellVersion = '7.4'
 RequiredModules = @(
     # MSAL delivery vehicle only - Connect-MgGraph is never called. See the design spec.
     @{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' }
-    @{ ModuleName = 'Microsoft.PowerShell.SecretManagement'; ModuleVersion = '1.1.2' }
 )
 
 # Assemblies that must be loaded prior to importing this module
@@ -169,15 +168,11 @@ Requires PowerShell 7.4+.
         # RequireLicenseAcceptance = $false
 
         # External dependent modules of this module
-        # Both RequiredModules entries are satisfied from PSGallery, never from whatever
-        # repository GraphKit itself is installed from. Without this declaration, PowerShellGet
-        # resolving a local or private repository demands the dependencies exist in that SAME
-        # repository and fails the install - which a consumer cannot fix from their side.
-        # Reported with a live repro by a downstream consumer packaging against a local repo.
-        ExternalModuleDependencies = @(
-            'Microsoft.Graph.Authentication'
-            'Microsoft.PowerShell.SecretManagement'
-        )
+        # Do not mark Microsoft.Graph.Authentication external: Publish-Module omits external
+        # modules from the package nuspec, leaving a clean installer with no MSAL dependency
+        # metadata. SecretManagement is intentionally not a RequiredModule; vault-backed paths
+        # validate it on demand so non-vault flows do not install or load it.
+        # ExternalModuleDependencies = @()
 
     } # End of PSData hashtable
 

@@ -85,6 +85,18 @@ Describe 'Get-GraphVaultCredential' {
                 }
             } | Should -Throw -ExpectedMessage '*SecretManagement*Register-SecretVault*'
         }
+
+        It 'fails actionably at first vault use when SecretManagement is not installed' {
+            Mock Get-Command -ModuleName GraphKit -ParameterFilter { $Name -eq 'Get-SecretVault' } { return $null }
+
+            {
+                InModuleScope GraphKit {
+                    Get-GraphVaultCredential -Credential @{ VaultName = 'missing'; SecretName = 'client-secret' } -AuthMethod ClientSecret
+                }
+            } | Should -Throw -ExpectedMessage '*Microsoft.PowerShell.SecretManagement*Install-Module*'
+
+            Should-NotInvoke Get-SecretVault -ModuleName GraphKit
+        }
     }
 
     Context 'BearerToken' {

@@ -22,7 +22,9 @@
 
 
 
-    # GraphKit runtime dependencies. Declared here so CI resolves them for the build.
+    # Dependencies resolved for build and test. Graph Authentication is also the hard runtime
+    # dependency; SecretManagement remains here so CI exercises vault paths while the module
+    # loads and validates it only when a vault-backed credential is used.
     'Microsoft.Graph.Authentication'        = '2.38.1'
     'Microsoft.PowerShell.SecretManagement' = '1.1.2'
 }

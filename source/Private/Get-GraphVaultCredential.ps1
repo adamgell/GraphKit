@@ -154,6 +154,11 @@ function Assert-GraphVaultRegistered {
         throw "No SecretManagement vault name was supplied. Register a vault with 'Register-SecretVault -Name <vault> -ModuleName <module>' (for example, install an extension with 'Install-Module Microsoft.PowerShell.SecretStore') and reference it in the credential, or pass -VaultName."
     }
 
+    $getVault = Get-Command -Name Get-SecretVault -CommandType Function, Cmdlet -ErrorAction Ignore
+    if ($null -eq $getVault) {
+        throw "GraphKit vault-backed credentials require Microsoft.PowerShell.SecretManagement. Install the tested minimum with 'Install-Module Microsoft.PowerShell.SecretManagement -MinimumVersion 1.1.2', then install and register a vault extension with Register-SecretVault. Non-vault GraphKit flows do not require this module."
+    }
+
     $vault = Get-SecretVault -Name $VaultName -ErrorAction SilentlyContinue
     if ($null -eq $vault) {
         throw "The SecretManagement vault '$VaultName' is not registered. Install a vault extension (for example, 'Install-Module Microsoft.PowerShell.SecretStore') and register it with 'Register-SecretVault -Name $VaultName -ModuleName <ModuleName>', or register the vault you intend to use. GraphKit resolves vault-backed credentials on demand and does not require a registered vault at import time."

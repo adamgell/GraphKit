@@ -23,7 +23,7 @@ Proving `ClientSecret` also demonstrated context independence directly against t
 
 The container run was worth more than the one auth mode it was built for, because it was the first time GraphKit ran on a **clean machine**. It immediately hit a bug no workstation could surface: `Enter-GraphProfileStoreLock` could not create its `.lock` sidecar because `~/.graphkit` did not exist yet, and the retry loop caught that `DirectoryNotFoundException` and reported it as "another GraphKit process may be writing" - a confident diagnosis of the wrong problem, on the very first `Register-GraphTenant` any new user would ever run. Every developer machine had passed through that state months earlier. **When adding a gate, prefer one that starts from nothing.**
 
-Two things about the container are worth knowing before repeating it. `Microsoft.PowerShell.SecretManagement` is a hard `RequiredModules` entry, so it must be installed even for managed identity, which has no stored secret and never opens a vault; installing the module is not the same as registering a vault, and no vault extension was present, so lazy vault validation was still genuinely tested. Whether that dependency should be hard is an open question - the spec asks that managed identity, injected credentials, help, catalog inspection and CI all stay usable without a vault, and the module dependency is the one part of that which is not yet lazy.
+Two things about the container are worth knowing before repeating it. The immutable PSGallery `0.2.2` package was built while `Microsoft.PowerShell.SecretManagement` was a hard `RequiredModules` entry, so it had to be installed even for managed identity, which has no stored secret and never opens a vault. Next-release source removes that hard dependency: managed identity, injected credentials, help, catalog inspection and CI stay usable without SecretManagement, while vault-backed paths validate the module and registered extension on demand. This source hardening does not alter or republish the stable `0.2.2` artifact.
 
 Run the suite through `./build.ps1 -Tasks test`, never `Invoke-Pester ./tests` directly: the changelog checks are Sampler-generated and depend on build-injected variables, so a bare Pester run reports two false failures.
 
@@ -180,8 +180,8 @@ Current:
 - Build system: Sampler 0.120.1.
 - Module compilation: ModuleBuilder 3.1.8, pinned through Sampler; do not upgrade it independently.
 - Test framework: Pester 6.1.0.
-- Runtime dependencies: `Microsoft.Graph.Authentication` (pinned minimum; MSAL delivery vehicle only, `Connect-MgGraph` never called) and `Microsoft.PowerShell.SecretManagement` (required for every persisted credential).
-- Operational prerequisite, not a module dependency: a registered SecretManagement vault extension. Its absence must fail at import with an actionable message, not at first token acquisition.
+- Hard runtime dependency: `Microsoft.Graph.Authentication` (pinned minimum; MSAL delivery vehicle only, `Connect-MgGraph` never called).
+- Lazy vault dependency: `Microsoft.PowerShell.SecretManagement` (tested at 1.1.2) and a registered vault extension are required only when resolving or mutating a vault-backed credential. Their absence must fail at that boundary with an actionable message; non-vault import and catalog inspection must remain usable.
 - Module format: authored public/private scripts compiled into one `.psm1` under `output/`, with non-code assets copied separately.
 - No Node, Bun, npm, or other package-manager workflow is defined.
 - PSScriptAnalyzer is restored as a build dependency but is not a separate repository gate; no formatter, lockfile, or version file is defined. `.github/workflows/ci.yml` defines the six-job CI matrix.
