@@ -16,7 +16,7 @@
    - `/Users/Adam.Gell/repo/GraphKit/.worktrees/r1-outcome-composites`
    - `/Users/Adam.Gell/repo/TenantPulse/.worktrees/r1-outcome-composites`
 2. Do not modify either repository's `r0-source-truth` worktree. R0 invariant 10 forbids operation descriptors, settings assignments, outcome-model migration, and other R1 work there.
-3. Do not inspect, print, stage, copy, or commit any `.env` file.
+3. The repository owner may use a local `.env` file as an operator-only credential source. Never print, stage, commit, or include its values in artifacts or evidence.
 4. Do not invent Graph operation names or a generic GraphKit `Walk` strategy.
 5. GraphKit descriptors may be added only for official, reusable single-operation Microsoft Graph endpoints whose method, path, response shape, API version, permission, and tenant behavior are proven.
 6. Every Graph-backed dataset must resolve an exact `{Type, Operation, ApiVersion}` tuple from the exact GraphKit package used by TenantPulse.
@@ -322,7 +322,7 @@ Get-PulseGateStatus -Gate 'EntraP2'
 - [x] Verify package/build/source preservation and the whole-result test gates.
 - [x] Update every minimum-test ratchet from measured results.
 - [x] State implemented, deterministic, CI, live, and published evidence separately.
-- [x] Do not publish either package in this plan without a separate explicit publication approval; both candidates remain unpublished.
+- [x] Do not publish either package during plan execution without a separate explicit publication approval; later operator publication must be recorded in the release status.
 - [x] Commit the documentation and release-truth updates without running formatters, linters, or unrelated project-wide commands.
 
 **Acceptance:** The two repositories document the same exact producer-consumer package contract, every remaining pending or platform-unavailable path has evidence, and no documentation claims a live or published result that was not exercised.
