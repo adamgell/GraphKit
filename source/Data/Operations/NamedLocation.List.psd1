@@ -3,13 +3,10 @@
 
     Conditional-access named locations. Not available in every cloud, hence the narrower list.
 
-    The declared permission is Policy.Read.All, NOT Policy.Read.ConditionalAccess. Verified
-    against a live tenant on 2026-08-15: an app-only token whose roles claim demonstrably
-    contained Policy.Read.ConditionalAccess still received 403 AccessDenied "required scopes are
-    missing" from this endpoint, while the same call succeeded delegated. The narrower
-    conditional-access scope covers the policies collection but not namedLocations. Only a live
-    call finds this - the permission a descriptor declares is a claim about the service, and the
-    service is the only authority on it.
+    The declared permission is Policy.Read.All, NOT Policy.Read.ConditionalAccess. The narrower
+    scope was proved insufficient on 2026-08-15. The corrected declaration was then positively
+    verified app-only on 2026-08-29: the token carried Policy.Read.All and the endpoint returned
+    HTTP 200 with one row. Only a live call settles a descriptor's permission claim.
 #>
 @{
     SchemaVersion       = 1

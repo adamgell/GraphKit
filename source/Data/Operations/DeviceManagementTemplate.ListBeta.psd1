@@ -1,32 +1,34 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Device cleanup rule singleton.
+    Intune device-management templates, including the security-baseline template metadata a
+    consumer needs to distinguish a current template from a deprecated version. Policies and
+    their assignments remain separate operations; this collection supplies templateType,
+    versionInfo, and isDeprecated.
 
-    NOT LIVE-VERIFIED. Against the verification tenant on 2026-08-15 this returned 403 with an
-    app-only token holding DeviceManagementConfiguration.Read.All, so the declared permission is
-    a best guess and may be wrong in the same way NamedLocation and DeviceManagementScript were.
-    Confirm the required scope from the service's own 403 before relying on this descriptor.
+    LIVE-VERIFIED 2026-08-29 with an app-only token carrying
+    DeviceManagementConfiguration.Read.All: HTTP 200, seventeen rows, with versionInfo and
+    isDeprecated present in the returned shape.
 #>
 @{
     SchemaVersion       = 1
 
-    Type                = 'DeviceCleanupRule'
-    Operation           = 'Get'
-    OperationKind       = 'Singleton'
-    HandlerStrategyId   = 'Singleton.Default'
+    Type                = 'DeviceManagementTemplate'
+    Operation           = 'ListBeta'
+    OperationKind       = 'Collection'
+    HandlerStrategyId   = 'Collection.Default'
 
     ApiVersion          = 'beta'
     Stability           = 'BetaOnly'
-    BetaReason          = 'Managed-device cleanup settings are not exposed on v1.0.'
+    BetaReason          = 'Intune device-management templates are exposed only on beta.'
 
     Method              = 'GET'
-    PathTemplate        = '/deviceManagement/managedDeviceCleanupSettings'
+    PathTemplate        = '/deviceManagement/templates'
     RequestBodyKind     = $null
     ResponseKind        = 'Json'
-    PagingStrategy      = 'None'
+    PagingStrategy      = 'NextLink'
     RequiredPagingHeaders = @()
-    DeduplicationKey    = $null
+    DeduplicationKey    = 'id'
     SupportsAll         = $false
     SupportsDelta       = $false
 
@@ -42,7 +44,7 @@
     RedirectPolicy      = 'None'
     IdentityRequirement = 'Verified'
 
-    ResourceFamily      = 'Intune.ServiceConfig'
+    ResourceFamily      = 'Intune.SettingsCatalog'
     ThrottleClass       = 'Read'
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
