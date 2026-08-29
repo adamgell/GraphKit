@@ -42,6 +42,22 @@ Describe 'TenantPulse collection contracts proven live on 2026-08-29' {
         @($descriptor.RequiredPermissions.Value) | Should -Contain 'DeviceManagementConfiguration.Read.All'
     }
 
+    It 'ships the distinct Settings Catalog configuration-policy template collection' {
+        $descriptor = $script:catalog | Where-Object {
+            $_.Type -eq 'DeviceManagementConfigurationPolicyTemplate' -and $_.Operation -eq 'ListBeta'
+        }
+
+        $descriptor | Should -Not -BeNullOrEmpty
+        $descriptor.ApiVersion | Should -Be 'beta'
+        $descriptor.OperationKind | Should -Be 'Collection'
+        $descriptor.HandlerStrategyId | Should -Be 'Collection.Default'
+        $descriptor.PathTemplate | Should -Be '/deviceManagement/configurationPolicyTemplates'
+        $descriptor.PagingStrategy | Should -Be 'NextLink'
+        $descriptor.ReplayPolicy | Should -Be 'Safe'
+        $descriptor.ThrottleClass | Should -Be 'Read'
+        @($descriptor.RequiredPermissions.Value) | Should -Contain 'DeviceManagementConfiguration.Read.All'
+    }
+
     It 'ships the beta device-management intent collection that joins profiles to templates' {
         $descriptor = $script:catalog | Where-Object {
             $_.Type -eq 'DeviceManagementIntent' -and $_.Operation -eq 'ListBeta'
