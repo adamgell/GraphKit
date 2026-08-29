@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.2.2'
+ModuleVersion = '0.3.0'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -129,34 +129,33 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.2.2
+0.3.0
 
-Thirteen read-only Graph descriptors so TenantPulse can drop descriptor-pending on the
-checks that were waiting on this catalog. Official GETs only; no Walk composites.
+Integrated next package. The published PSGallery 0.2.2 artifact remains immutable.
 
-ADDED
-- RoleAssignmentScheduleInstance.List and RoleEligibilityScheduleInstance.List
-  (/roleManagement/directory/..., v1.0) for TP.ENT.0022.
-- CrossTenantAccessPolicy.GetDefault (/policies/crossTenantAccessPolicy/default, v1.0)
-  for TP.ENT.0023. The default singleton, not the parent policy object.
-- ApplePushNotificationCertificate.Get (v1.0, certificate declared sensitive),
-  AndroidManagedStoreAccountEnterpriseSettings.Get (beta), and
-  MobileThreatDefenseConnector.List (v1.0) for TP.INT.0019/0022/0024.
-- OperationApprovalPolicy.List, IntuneBrandingProfile.List, and
-  WindowsFeatureUpdateProfile.List (beta) for TP.INT.0008/0011/0012.
-- WindowsAutopilotDeploymentProfile.List (beta, $expand=assignments is the operation
-  identity) for TP.INT.0026.
-- DeviceManagementRoleDefinition.List, DeviceManagementRoleAssignment.List
-  (/deviceManagement/roleAssignments, v1.0), and Group.Get (v1.0, $select of
-  isAssignableToRole/isManagementRestricted) as primitives for TP.INT.0013.
+CHANGED
+- Microsoft.PowerShell.SecretManagement 1.1.2+ is resolved only at first vault use.
+  Non-vault import, managed identity, help, and catalog inspection no longer require it.
+- Vault commands are module-qualified and the boundary rejects an unavailable or too-old
+  SecretManagement module instead of accepting unrelated same-named functions.
+- Install-GraphKitPinned installs only hard Microsoft.Graph.Authentication by default for
+  0.3.0, offers -InstallSecretManagement for vault hosts, and preserves automatic
+  SecretManagement installation for immutable 0.2.2 pins.
 
-NOT SHIPPED
-- DataProcessorServiceForWindowsFeaturesOnboarding.Get (TP.INT.0009): resource page
-  exists on beta, official GET method page does not.
+ADDED AND LIVE-VERIFIED 2026-08-29
+- DeviceManagementUnifiedRoleAssignment.ListBeta with required roleDefinition/principals
+  expansion and DeviceManagementRBAC.Read.All.
+- DeviceManagementTemplate.ListBeta, DeviceManagementConfigurationPolicyTemplate.ListBeta,
+  and DeviceManagementIntent.ListBeta for legacy baseline and current Settings Catalog
+  template/version, assignment, lifecycle, and deprecation interpretation.
+- ManagedDeviceCleanupRule.ListBeta, the documented per-platform collection, replacing the
+  obsolete undocumented managedDeviceCleanupSettings singleton.
 
-Already in the catalog, so no new descriptor: AuthorizationPolicy.Get and
-DirectorySetting.List (TP.ENT.0012/0013/0015/0016); ConfigurationPolicy.ListBeta plus
-settings/assignment siblings (TP.INT.0014/0015/0029).
+VERIFICATION CORRECTION
+- NamedLocation.List is positively proven app-only with Policy.Read.All. The narrower
+  Policy.Read.ConditionalAccess scope remains insufficient.
+- DeviceManagementScript.List remains scope-gated: the service named
+  DeviceManagementScripts.Read.All in its 403, but no successful live response is claimed.
 
 Requires PowerShell 7.4+.
 '@

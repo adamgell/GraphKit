@@ -5,6 +5,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-29
+
+This commit prepares and locally verifies the `0.3.0` candidate. It does not publish the
+package; PSGallery `0.2.2` remains immutable.
+
+### Added
+
+- Five official beta collection descriptors, all positively verified app-only against Ivy24
+  on 2026-08-29:
+  - `DeviceManagementUnifiedRoleAssignment.ListBeta`, with fixed
+    `$expand=roleDefinition,principals` and `DeviceManagementRBAC.Read.All`.
+  - `DeviceManagementTemplate.ListBeta`, providing template version and deprecation metadata.
+  - `DeviceManagementConfigurationPolicyTemplate.ListBeta`, providing the distinct current
+    Settings Catalog template lifecycle, family, and native-version metadata.
+  - `DeviceManagementIntent.ListBeta`, providing the native assignment and template relation.
+  - `ManagedDeviceCleanupRule.ListBeta`, the documented per-platform cleanup-rules collection.
+
+### Changed
+
+- `Microsoft.PowerShell.SecretManagement` 1.1.2+ is now a lazy vault dependency rather than a
+  hard module dependency. Non-vault import, managed identity, help, and catalog inspection remain
+  usable without it. First vault use validates and imports an eligible version, and calls
+  `Get-SecretVault` and `Get-Secret` module-qualified so unrelated same-named functions cannot
+  satisfy the boundary.
+- `Install-GraphKitPinned.ps1` installs only hard `Microsoft.Graph.Authentication` by default for
+  `0.3.0`; `-InstallSecretManagement` pre-provisions vault support. A `0.2.2` pin still installs
+  SecretManagement automatically because that immutable published manifest requires it.
+- `NamedLocation.List` is now positively verified app-only with `Policy.Read.All`. The earlier
+  `Policy.Read.ConditionalAccess` 403 remains evidence that the narrower scope is insufficient.
+- The undocumented `DeviceCleanupRule.Get` singleton was removed and replaced by
+  `ManagedDeviceCleanupRule.ListBeta`. `DeviceManagementScript.List` remains declared from the
+  service's scope-specific 403 and documented response schema, but a successful live response
+  is still pending a token carrying `DeviceManagementScripts.Read.All`.
+
 ## [0.2.2] - 2026-08-18
 
 ### Added
@@ -134,4 +168,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - In case of vulnerabilities.
-

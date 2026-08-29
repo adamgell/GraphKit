@@ -109,9 +109,9 @@ else {
     }
 
     $gate = Join-Path $repoRoot 'tests/QA/Assert-GateResult.ps1'
-    & pwsh -NoProfile -File $gate -ResultPath $TestResultPath -MinimumTests 753 -AllowedSkips 0 | Write-Verbose
+    & pwsh -NoProfile -File $gate -ResultPath $TestResultPath -MinimumTests 772 -AllowedSkips 0 | Write-Verbose
     if ($LASTEXITCODE -ne 0) {
-        throw "The supplied test result did not pass the whole-result gate, so this package must not be published. Run: pwsh -File tests/QA/Assert-GateResult.ps1 -ResultPath '$TestResultPath' -MinimumTests 753"
+        throw "The supplied test result did not pass the whole-result gate, so this package must not be published. Run: pwsh -File tests/QA/Assert-GateResult.ps1 -ResultPath '$TestResultPath' -MinimumTests 772"
     }
 
     # The result must belong to this version, or it proves nothing about these bits.
