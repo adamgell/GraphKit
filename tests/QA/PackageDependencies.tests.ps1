@@ -5,7 +5,6 @@ BeforeAll {
     $script:sourceManifest = Import-PowerShellDataFile -Path (Join-Path $script:repoRoot 'source/GraphKit.psd1')
     $script:version = [string] $script:sourceManifest.ModuleVersion
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:version.nupkg"
-    $script:builtModulePath = Join-Path $script:repoRoot "output/module/GraphKit/$script:version"
     $script:graphAuthPath = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
 
     function Get-PackageDependencies {
@@ -37,7 +36,7 @@ BeforeAll {
         $graphKitDestination = Join-Path $modulePath "GraphKit/$script:version"
         $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
         $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
-        Copy-Item -Path (Join-Path $script:builtModulePath '*') -Destination $graphKitDestination -Recurse -Force
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $graphKitDestination)
         Copy-Item -Path (Join-Path $script:graphAuthPath '*') -Destination $graphAuthDestination -Recurse -Force
         return $modulePath
     }
@@ -48,14 +47,21 @@ BeforeAll {
         $isolatedManifest = Join-Path $ModulePath "GraphKit/$script:version/GraphKit.psd1"
         $probe = @"
 `$ErrorActionPreference = 'Stop'
+`$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
 Import-Module '$($isolatedManifest.Replace("'", "''"))' -Force -ErrorAction Stop
 `$operation = Get-GraphOperation -Type ManagedDevice -Operation List
 `$secretManagementLoaded = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
+# PowerShell re-adds its default module roots while resolving RequiredModules during import.
+# Reset the path after import, then refresh discovery so this is an availability proof rather
+# than a check against either the loaded-module table or stale module-analysis cache state.
+`$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
+`$secretManagementAvailable = [bool] (Get-Module Microsoft.PowerShell.SecretManagement -ListAvailable -Refresh)
 [pscustomobject]@{
     Imported                  = `$true
     ModuleBase                = (Get-Module GraphKit).ModuleBase
     OperationName             = "`$(`$operation.Type).`$(`$operation.Operation)"
     SecretManagementLoaded    = `$secretManagementLoaded
+    SecretManagementAvailable = `$secretManagementAvailable
 } | ConvertTo-Json -Compress
 "@
 
@@ -99,6 +105,7 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
         $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:version")
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
         $result.Data.SecretManagementLoaded | Should -BeFalse -Because 'catalog inspection does not use a vault'
+        $result.Data.SecretManagementAvailable | Should -BeFalse -Because 'the isolated package probe must not be able to discover the lazy vault dependency anywhere'
     }
 
 }

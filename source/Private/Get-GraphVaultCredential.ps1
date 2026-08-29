@@ -10,8 +10,9 @@
     only when a shape actually reads a vault, and fails with an actionable message
     naming SecretManagement and how to register a vault.
 
-    All SecretManagement commands (Get-Secret, Get-SecretVault) are invoked as
-    plain commands so tests can mock them scoped to the GraphKit module.
+    First vault use requires and imports Microsoft.PowerShell.SecretManagement 1.1.2 or
+    newer. Its Get-Secret and Get-SecretVault commands are always invoked module-qualified;
+    an unrelated function with the same name can never satisfy the dependency boundary.
 
     Shapes discriminated by -AuthMethod plus the keys present in -Credential:
       ClientSecret            vault secret              -> SecureString
@@ -143,6 +144,83 @@ function Resolve-GraphVaultName {
     return $vault
 }
 
+$script:GraphSecretManagementMinimumVersion = [version] '1.1.2'
+
+function Import-GraphSecretManagement {
+    [CmdletBinding()]
+    [OutputType([System.Management.Automation.PSModuleInfo])]
+    param()
+
+    $moduleName = 'Microsoft.PowerShell.SecretManagement'
+    $minimum = $script:GraphSecretManagementMinimumVersion
+
+    # A too-old loaded copy is an ambiguous command boundary even when a newer copy is also
+    # installed: module-qualified invocation names the module, not its version. Fail loudly
+    # instead of depending on PowerShell's loaded-module resolution order.
+    $loaded = @(Get-Module -Name $moduleName)
+    $oldLoaded = @($loaded | Where-Object { $_.Version -lt $minimum } | Sort-Object Version -Descending)
+    if ($oldLoaded.Count -gt 0) {
+        throw "$moduleName $minimum or newer is required for vault-backed credentials, but v$($oldLoaded[0].Version) is already loaded. Remove the old module from this process and install/import at least v$minimum before retrying."
+    }
+
+    $selected = @($loaded | Where-Object { $_.Version -ge $minimum } | Sort-Object Version -Descending | Select-Object -First 1)
+    if ($selected.Count -eq 0) {
+        $available = @(Get-Module -Name $moduleName -ListAvailable -Refresh | Sort-Object Version -Descending)
+        $candidate = @($available | Where-Object { $_.Version -ge $minimum } | Select-Object -First 1)
+        if ($candidate.Count -eq 0) {
+            if ($available.Count -gt 0) {
+                throw "$moduleName $minimum or newer is required for vault-backed credentials; the newest discoverable version is v$($available[0].Version). Upgrade it with 'Install-Module $moduleName -MinimumVersion $minimum -Force', then retry."
+            }
+            throw "GraphKit vault-backed credentials require $moduleName. Install the tested minimum with 'Install-Module $moduleName -MinimumVersion $minimum', then install and register a vault extension with Register-SecretVault. Non-vault GraphKit flows do not require this module."
+        }
+
+        try {
+            $selected = @(Import-Module -Name $candidate[0].Path -PassThru -ErrorAction Stop |
+                    Where-Object { $_.Name -eq $moduleName -and $_.Version -ge $minimum } |
+                    Sort-Object Version -Descending | Select-Object -First 1)
+        }
+        catch {
+            throw "Could not import $moduleName v$($candidate[0].Version) for vault-backed credentials: $($_.Exception.Message)"
+        }
+    }
+
+    if ($selected.Count -eq 0) {
+        throw "$moduleName was discovered but no loaded module met the required minimum version $minimum after import."
+    }
+
+    $vaultCommand = Get-Command -Name Get-SecretVault -Module $moduleName -CommandType Function, Cmdlet -ErrorAction Ignore
+    $secretCommand = Get-Command -Name Get-Secret -Module $moduleName -CommandType Function, Cmdlet -ErrorAction Ignore
+    if ($null -eq $vaultCommand -or $null -eq $secretCommand) {
+        throw "$moduleName v$($selected[0].Version) does not export both Get-SecretVault and Get-Secret; reinstall a complete module package before retrying."
+    }
+
+    return $selected[0]
+}
+
+function Invoke-GraphSecretManagementGetVault {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [System.Management.Automation.ActionPreference] $SecretErrorAction = 'SilentlyContinue'
+    )
+
+    Microsoft.PowerShell.SecretManagement\Get-SecretVault -Name $Name -ErrorAction $SecretErrorAction
+}
+
+function Invoke-GraphSecretManagementGetSecret {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Vault,
+        [Parameter(Mandatory)] [string] $Name,
+        [string] $Version,
+        [System.Management.Automation.ActionPreference] $SecretErrorAction = 'SilentlyContinue'
+    )
+
+    $params = @{ Vault = $Vault; Name = $Name; ErrorAction = $SecretErrorAction }
+    if (-not [string]::IsNullOrEmpty($Version)) { $params['Version'] = $Version }
+    Microsoft.PowerShell.SecretManagement\Get-Secret @params
+}
+
 function Assert-GraphVaultRegistered {
     [CmdletBinding()]
     param(
@@ -154,12 +232,8 @@ function Assert-GraphVaultRegistered {
         throw "No SecretManagement vault name was supplied. Register a vault with 'Register-SecretVault -Name <vault> -ModuleName <module>' (for example, install an extension with 'Install-Module Microsoft.PowerShell.SecretStore') and reference it in the credential, or pass -VaultName."
     }
 
-    $getVault = Get-Command -Name Get-SecretVault -CommandType Function, Cmdlet -ErrorAction Ignore
-    if ($null -eq $getVault) {
-        throw "GraphKit vault-backed credentials require Microsoft.PowerShell.SecretManagement. Install the tested minimum with 'Install-Module Microsoft.PowerShell.SecretManagement -MinimumVersion 1.1.2', then install and register a vault extension with Register-SecretVault. Non-vault GraphKit flows do not require this module."
-    }
-
-    $vault = Get-SecretVault -Name $VaultName -ErrorAction SilentlyContinue
+    $null = Import-GraphSecretManagement
+    $vault = Invoke-GraphSecretManagementGetVault -Name $VaultName -SecretErrorAction SilentlyContinue
     if ($null -eq $vault) {
         throw "The SecretManagement vault '$VaultName' is not registered. Install a vault extension (for example, 'Install-Module Microsoft.PowerShell.SecretStore') and register it with 'Register-SecretVault -Name $VaultName -ModuleName <ModuleName>', or register the vault you intend to use. GraphKit resolves vault-backed credentials on demand and does not require a registered vault at import time."
     }
@@ -178,16 +252,16 @@ function Get-GraphSecret {
         [string] $Version
     )
 
-    $params = @{ Vault = $Vault; Name = $Name; ErrorAction = 'SilentlyContinue' }
+    $params = @{ Vault = $Vault; Name = $Name; SecretErrorAction = 'SilentlyContinue' }
     if (-not [string]::IsNullOrEmpty($Version)) {
-        $getSecret = Get-Command Get-Secret -ErrorAction SilentlyContinue
+        $getSecret = Get-Command -Name Get-Secret -Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
         if ($null -eq $getSecret -or -not $getSecret.Parameters.ContainsKey('Version')) {
             throw "A secret version ('$Version') was requested for '$Name' but the loaded Microsoft.PowerShell.SecretManagement does not support per-secret versions. Store each version under a distinct secret name, or upgrade SecretManagement."
         }
         $params['Version'] = $Version
     }
 
-    $secret = Get-Secret @params
+    $secret = Invoke-GraphSecretManagementGetSecret @params
     if ($null -eq $secret) {
         throw "Secret '$Name' was not found in vault '$Vault'."
     }

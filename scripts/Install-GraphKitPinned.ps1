@@ -30,8 +30,14 @@
         Where to write the rollback record. Defaults next to the pin.
 
     .PARAMETER SkipDependencies
-        Do not install Microsoft.Graph.Authentication / SecretManagement. Use when they are
+        Do not install GraphKit dependencies. Use when both hard and optional dependencies are
         already managed on the host.
+
+    .PARAMETER InstallSecretManagement
+        Install Microsoft.PowerShell.SecretManagement 1.1.2 or newer for vault-backed
+        credentials. GraphKit packages after immutable version 0.2.2 load this dependency only
+        at first vault use, so it is optional on hosts that use only non-vault flows. Version
+        0.2.2 still installs it automatically because that published manifest requires it.
 
     .EXAMPLE
         ./scripts/Install-GraphKitPinned.ps1 -PinPath output/graphkit.pin.json
@@ -55,7 +61,9 @@ param(
     # absolute path from being mistaken for one.
     [string] $Source,
 
-    [switch] $SkipDependencies
+    [switch] $SkipDependencies,
+
+    [switch] $InstallSecretManagement
 )
 
 $ErrorActionPreference = 'Stop'
@@ -183,9 +191,17 @@ if ($PSCmdlet.ShouldProcess("$($pin.moduleName) $($pin.version)", "Install from 
     # that GraphKit must never ship a competing copy. Mirroring it into a private channel
     # would be shipping one.
     if (-not $SkipDependencies) {
-        $required = @{
-            'Microsoft.Graph.Authentication'        = [version] '2.38.1'
-            'Microsoft.PowerShell.SecretManagement' = [version] '1.1.2'
+        $required = [ordered] @{
+            'Microsoft.Graph.Authentication' = [version] '2.38.1'
+        }
+
+        # GraphKit 0.2.2 is immutable on PSGallery and its published manifest declares
+        # SecretManagement as a hard dependency. Preserve that install contract even though
+        # next-release packages resolve SecretManagement lazily at first vault use. For those
+        # packages, operators can still pre-provision the optional dependency explicitly.
+        $isImmutable022 = ([string] $pin.version) -eq '0.2.2'
+        if ($isImmutable022 -or $InstallSecretManagement) {
+            $required['Microsoft.PowerShell.SecretManagement'] = [version] '1.1.2'
         }
 
         foreach ($dep in $required.Keys) {

@@ -37,16 +37,17 @@ BeforeAll {
     # Default mocks that throw: a test that unexpectedly reaches a SecretManagement
     # command fails loudly instead of touching a real vault. Vault-backed tests
     # override these; managed identity never reaches them.
-    Mock Get-SecretVault -ModuleName GraphKit { throw 'Get-SecretVault must be mocked in this test.' }
-    Mock Get-Secret -ModuleName GraphKit { throw 'Get-Secret must be mocked in this test.' }
+    Mock Import-GraphSecretManagement -ModuleName GraphKit { [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretManagement'; Version = [version] '1.1.2' } }
+    Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { throw 'Get-SecretVault must be mocked in this test.' }
+    Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { throw 'Get-Secret must be mocked in this test.' }
 }
 
 Describe 'Get-GraphVaultCredential' {
 
     Context 'ClientSecret' {
         It 'resolves a client secret into a SecureString material' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { $script:SecureSecret }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:SecureSecret }
 
             $result = InModuleScope GraphKit {
                 Get-GraphVaultCredential -Credential @{ VaultName = 'v'; SecretName = 'client-secret' } -AuthMethod ClientSecret
@@ -57,14 +58,14 @@ Describe 'Get-GraphVaultCredential' {
             [System.Net.NetworkCredential]::new('', $result.Material).Password | Should -Be $script:ClientSecretPlain
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
             $result.PSTypeNames | Should -Contain 'GraphKit.CredentialMaterial'
-            Should-Invoke Get-SecretVault -ModuleName GraphKit -Times 1 -Exactly
-            Should-Invoke Get-Secret -ModuleName GraphKit -Times 1 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 1 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 1 -Exactly
         }
 
         It 'uses the -VaultName fallback when the credential carries no vault name' {
             $script:RecordedVault = $null
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit {
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit {
                 $script:RecordedVault = $Vault
                 $script:SecureSecret
             }
@@ -77,7 +78,7 @@ Describe 'Get-GraphVaultCredential' {
         }
 
         It 'fails actionably when the vault is not registered, naming SecretManagement and the remedy' {
-            Mock Get-SecretVault -ModuleName GraphKit { return $null }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { return $null }
 
             {
                 InModuleScope GraphKit {
@@ -87,7 +88,9 @@ Describe 'Get-GraphVaultCredential' {
         }
 
         It 'fails actionably at first vault use when SecretManagement is not installed' {
-            Mock Get-Command -ModuleName GraphKit -ParameterFilter { $Name -eq 'Get-SecretVault' } { return $null }
+            Mock Import-GraphSecretManagement -ModuleName GraphKit {
+                throw "GraphKit vault-backed credentials require Microsoft.PowerShell.SecretManagement. Install-Module Microsoft.PowerShell.SecretManagement -MinimumVersion 1.1.2."
+            }
 
             {
                 InModuleScope GraphKit {
@@ -95,14 +98,14 @@ Describe 'Get-GraphVaultCredential' {
                 }
             } | Should -Throw -ExpectedMessage '*Microsoft.PowerShell.SecretManagement*Install-Module*'
 
-            Should-NotInvoke Get-SecretVault -ModuleName GraphKit
+            Should-NotInvoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit
         }
     }
 
     Context 'BearerToken' {
         It 'resolves a bearer token into a plain-text string material' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { $script:BearerSecret }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:BearerSecret }
 
             $result = InModuleScope GraphKit {
                 Get-GraphVaultCredential -Credential @{ VaultName = 'v'; SecretName = 'bearer' } -AuthMethod BearerToken
@@ -117,8 +120,8 @@ Describe 'Get-GraphVaultCredential' {
 
     Context 'Certificate (PFX)' {
         It 'builds an X509Certificate2 from a PFX path and a vault-backed password' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { $script:SecurePassword }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:SecurePassword }
 
             $result = InModuleScope GraphKit -Parameters @{ Credential = @{
                     PfxPath  = $script:PfxPath
@@ -136,8 +139,8 @@ Describe 'Get-GraphVaultCredential' {
 
     Context 'Certificate (vault material)' {
         It 'builds an X509Certificate2 from PFX byte[] material' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { Write-Output -NoEnumerate $script:NoPasswordPfxBytes }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { Write-Output -NoEnumerate $script:NoPasswordPfxBytes }
 
             $result = InModuleScope GraphKit {
                 Get-GraphVaultCredential -Credential @{ VaultName = 'v'; CertificateName = 'cert' } -AuthMethod Certificate
@@ -149,8 +152,8 @@ Describe 'Get-GraphVaultCredential' {
         }
 
         It 'builds an X509Certificate2 from base64-encoded PFX material' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { $script:NoPasswordPfxBase64 }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:NoPasswordPfxBase64 }
 
             $result = InModuleScope GraphKit {
                 Get-GraphVaultCredential -Credential @{ VaultName = 'v'; CertificateName = 'cert' } -AuthMethod Certificate
@@ -161,8 +164,8 @@ Describe 'Get-GraphVaultCredential' {
         }
 
         It 'fails actionably for unusable certificate material, naming supported shapes' {
-            Mock Get-SecretVault -ModuleName GraphKit { New-TestVault }
-            Mock Get-Secret -ModuleName GraphKit { 'this is not a certificate' }
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { 'this is not a certificate' }
 
             {
                 InModuleScope GraphKit {
@@ -203,8 +206,8 @@ Describe 'Get-GraphVaultCredential' {
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -Be '7d6e5f44-9999-8888-7777-666655554444'
-            Should-Invoke Get-SecretVault -ModuleName GraphKit -Times 0 -Exactly
-            Should-Invoke Get-Secret -ModuleName GraphKit -Times 0 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }
 
         It 'returns null for a system-assigned identity with zero vault calls' {
@@ -215,8 +218,8 @@ Describe 'Get-GraphVaultCredential' {
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
-            Should-Invoke Get-SecretVault -ModuleName GraphKit -Times 0 -Exactly
-            Should-Invoke Get-Secret -ModuleName GraphKit -Times 0 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
+            Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }
     }
 }
