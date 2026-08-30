@@ -1,32 +1,35 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Device cleanup rule singleton.
+    Settings Catalog configuration-policy templates. This is a distinct resource from the
+    legacy /deviceManagement/templates collection: configuration-policy template references
+    on modern policies join to this collection and expose lifecycleState rather than the
+    legacy isDeprecated field.
 
-    NOT LIVE-VERIFIED. Against the verification tenant on 2026-08-15 this returned 403 with an
-    app-only token holding DeviceManagementConfiguration.Read.All, so the declared permission is
-    a best guess and may be wrong in the same way NamedLocation and DeviceManagementScript were.
-    Confirm the required scope from the service's own 403 before relying on this descriptor.
+    Microsoft documents the beta application-permission contract for this GET collection.
+    LIVE-VERIFIED 2026-08-29 with an app-only token carrying
+    DeviceManagementConfiguration.Read.All: HTTP 200, sixty-eight rows, with native version,
+    lifecycleState, and templateFamily present on every returned row.
 #>
 @{
     SchemaVersion       = 1
 
-    Type                = 'DeviceCleanupRule'
-    Operation           = 'Get'
-    OperationKind       = 'Singleton'
-    HandlerStrategyId   = 'Singleton.Default'
+    Type                = 'DeviceManagementConfigurationPolicyTemplate'
+    Operation           = 'ListBeta'
+    OperationKind       = 'Collection'
+    HandlerStrategyId   = 'Collection.Default'
 
     ApiVersion          = 'beta'
     Stability           = 'BetaOnly'
-    BetaReason          = 'Managed-device cleanup settings are not exposed on v1.0.'
+    BetaReason          = 'Settings Catalog configuration-policy templates are exposed only on beta.'
 
     Method              = 'GET'
-    PathTemplate        = '/deviceManagement/managedDeviceCleanupSettings'
+    PathTemplate        = '/deviceManagement/configurationPolicyTemplates'
     RequestBodyKind     = $null
     ResponseKind        = 'Json'
-    PagingStrategy      = 'None'
+    PagingStrategy      = 'NextLink'
     RequiredPagingHeaders = @()
-    DeduplicationKey    = $null
+    DeduplicationKey    = 'id'
     SupportsAll         = $false
     SupportsDelta       = $false
 
@@ -42,7 +45,7 @@
     RedirectPolicy      = 'None'
     IdentityRequirement = 'Verified'
 
-    ResourceFamily      = 'Intune.ServiceConfig'
+    ResourceFamily      = 'Intune.SettingsCatalog'
     ThrottleClass       = 'Read'
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')

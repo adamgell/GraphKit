@@ -3,9 +3,8 @@
         Verifies GraphKit itself on Windows. No tenant, no credentials, no IHA.
 
     .DESCRIPTION
-        GraphKit has been developed and tested entirely on macOS, and 624 deterministic tests
-        pass there. That proves less about Windows than the count suggests, because several
-        code paths are Windows-only and therefore have never executed anywhere:
+        GraphKit's cross-platform suite runs in the supported CI matrix. This script supplements
+        that suite with platform-specific paths that only Windows can prove:
 
           - the certificate-store credential resolver, which throws on non-Windows by design
           - certificate-store profile registration, likewise

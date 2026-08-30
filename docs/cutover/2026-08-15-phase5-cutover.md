@@ -1,5 +1,10 @@
 # Phase 5 Cutover — completion record, 2026-08-15
 
+> **Superseding operator status, 2026-08-29:** this is a historical execution record, not a
+> current `0.3.0` release checklist. No adopted legacy or customer-tenant runtime uses these
+> paths, so the retained fallback and operator actions described below are not present-day
+> migration blockers. Preserve the original account below as evidence of what was verified.
+
 > **Status as of 2026-08-16:** phase 5 is closed. GraphKit 0.1.0 and 0.1.1 are published to the
 > public PowerShell Gallery and consumed by the TenantPulse rebuild; an external security review
 > found no Critical or Important issues and all five of its Minor findings are fixed. The two

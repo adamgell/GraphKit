@@ -10,6 +10,14 @@ GraphKit is an app-only, multi-tenant Microsoft Graph execution and analysis lay
 
 It centralizes tenant profiles, credential resolution, token acquisition, Graph request execution, paging, batching, throttling, retry policy, permission analysis, and evidence export without becoming a generic Graph SDK or OAuth client.
 
+## Release status
+
+GraphKit `0.2.2` remains the immutable stable package on PSGallery. Current source builds the
+unpublished `0.3.0` integrated candidate; preparing or locally testing that candidate does not
+publish it and is not evidence of the six-job remote CI matrix. `0.3.0` makes SecretManagement
+lazy for non-vault flows and adds the live-proven TenantPulse collection descriptors described in
+`CHANGELOG.md`.
+
 ## What it provides
 
 - Immutable, tenant-specific execution contexts
@@ -28,8 +36,15 @@ GraphKit does not use `Connect-MgGraph` or `Invoke-MgGraphRequest` as its transp
 
 - PowerShell 7.4 or later
 - `Microsoft.Graph.Authentication` 2.38.1 or later, used as the MSAL delivery dependency
-- `Microsoft.PowerShell.SecretManagement` 1.1.2 or later
-- A registered SecretManagement vault when using stored credentials
+- `Microsoft.PowerShell.SecretManagement` 1.1.2 or later only when using vault-backed credentials;
+  `0.3.0` validates and imports it at first vault use
+- A registered SecretManagement vault extension when using stored credentials
+
+Published `0.2.2` still declares SecretManagement as a hard dependency. The pinned installer
+preserves that immutable package contract while treating SecretManagement as opt-in for `0.3.0`.
+Import, help, catalog inspection, managed identity, injected credentials, and Windows certificate-
+store credentials do not require SecretManagement in `0.3.0`. The certificate example below uses
+a vault reference and therefore exercises the optional vault path.
 
 ## Typical usage
 

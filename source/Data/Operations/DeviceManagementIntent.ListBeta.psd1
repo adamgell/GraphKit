@@ -1,27 +1,29 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    Conditional-access named locations. Not available in every cloud, hence the narrower list.
+    Intune device-management intents. Security-baseline profiles on this service surface carry
+    templateId and the native Boolean isAssigned; consumers join templateId to
+    DeviceManagementTemplate/ListBeta to determine whether the profile was created from a
+    deprecated template version.
 
-    The declared permission is Policy.Read.All, NOT Policy.Read.ConditionalAccess. The narrower
-    scope was proved insufficient on 2026-08-15. The corrected declaration was then positively
-    verified app-only on 2026-08-29: the token carried Policy.Read.All and the endpoint returned
-    HTTP 200 with one row. Only a live call settles a descriptor's permission claim.
+    LIVE-VERIFIED 2026-08-29 with an app-only token carrying
+    DeviceManagementConfiguration.Read.All. The returned intent shape carried templateId and
+    isAssigned and joined to the template collection for every intent in the verification tenant.
 #>
 @{
     SchemaVersion       = 1
 
-    Type                = 'NamedLocation'
-    Operation           = 'List'
+    Type                = 'DeviceManagementIntent'
+    Operation           = 'ListBeta'
     OperationKind       = 'Collection'
     HandlerStrategyId   = 'Collection.Default'
 
-    ApiVersion          = 'v1.0'
-    Stability           = 'Stable'
-    BetaReason          = $null
+    ApiVersion          = 'beta'
+    Stability           = 'BetaOnly'
+    BetaReason          = 'Device-management intents are exposed only on beta.'
 
     Method              = 'GET'
-    PathTemplate        = '/identity/conditionalAccess/namedLocations'
+    PathTemplate        = '/deviceManagement/intents'
     RequestBodyKind     = $null
     ResponseKind        = 'Json'
     PagingStrategy      = 'NextLink'
@@ -42,13 +44,13 @@
     RedirectPolicy      = 'None'
     IdentityRequirement = 'Verified'
 
-    ResourceFamily      = 'Directory.ConditionalAccess'
+    ResourceFamily      = 'Intune.SettingsCatalog'
     ThrottleClass       = 'Read'
 
     SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
     RequiredPermissions = @(
-        @{ Type = 'Application'; Value = 'Policy.Read.All' }
+        @{ Type = 'Application'; Value = 'DeviceManagementConfiguration.Read.All' }
     )
-    RequiredLicense     = @()
+    RequiredLicense     = @('Microsoft Intune')
     SupportedClouds     = @('Global', 'USGov', 'USGovDoD')
 }
