@@ -33,7 +33,7 @@ BeforeAll {
     }
 
     function New-PassingResult {
-        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 772)
+        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 777)
         $path = Join-Path $Root "NUnitXml_GraphKit_v$Version.Test.xml"
         @"
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
@@ -112,7 +112,7 @@ Describe 'Publish-GraphKitPackage refusals' {
         $failing = Join-Path $TestDrive 'NUnitXml_GraphKit_v9.9.9.Fail.xml'
         @'
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results name="GraphKit" total="772" errors="0" failures="4" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="12:00:00">
+<test-results name="GraphKit" total="777" errors="0" failures="4" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="12:00:00">
   <test-suite type="TestFixture" name="GraphKit" executed="True" result="Failure" success="False" time="1.0" asserts="0" />
 </test-results>
 '@ | Set-Content -LiteralPath $failing -Encoding utf8

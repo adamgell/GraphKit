@@ -5,10 +5,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-29
+## [0.3.0] - 2026-08-30
 
-This commit prepares and locally verifies the `0.3.0` candidate. It does not publish the
-package; PSGallery `0.2.2` remains immutable.
+GraphKit `0.3.0` was published to PSGallery at `2026-08-30T04:38:20.12Z`. The 207381-byte public
+archive SHA-256 is `45319d7cf4f8333697343ccf9c1089c7e04da87a8df62553cbc140089337536d`. Reviewed
+PR head `a0f0e92a054fe2976ca74a844f5de6161e1b8c67` merged to main as
+`a1b0b8d54c17671761ef5aee017a453b072d1fe9`; PR-head CI run `33292245900` and exact-main CI run
+`33292580847` passed 772 tests across all six Windows/macOS/Ubuntu PowerShell 7.4/7.6 jobs. The
+retained release-worktree archive is byte-identical to the public archive; rebuilt ZIP container
+hashes are not a replacement identity for the published bytes. PSGallery `0.2.2` remains an
+immutable predecessor.
 
 ### Added
 

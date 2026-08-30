@@ -12,11 +12,18 @@ It centralizes tenant profiles, credential resolution, token acquisition, Graph 
 
 ## Release status
 
-GraphKit `0.2.2` remains the immutable stable package on PSGallery. Current source builds the
-unpublished `0.3.0` integrated candidate; preparing or locally testing that candidate does not
-publish it and is not evidence of the six-job remote CI matrix. `0.3.0` makes SecretManagement
-lazy for non-vault flows and adds the live-proven TenantPulse collection descriptors described in
-`CHANGELOG.md`.
+GraphKit `0.3.0` is the current immutable release on PSGallery, published 2026-08-30 at
+`2026-08-30T04:38:20.12Z`. Its 207381-byte public archive has SHA-256
+`45319d7cf4f8333697343ccf9c1089c7e04da87a8df62553cbc140089337536d`. Reviewed PR head
+`a0f0e92a054fe2976ca74a844f5de6161e1b8c67` was merged to main as
+`a1b0b8d54c17671761ef5aee017a453b072d1fe9`; PR-head CI run `33292245900` and exact-main CI run
+`33292580847` passed 772 tests across all six Windows/macOS/Ubuntu PowerShell 7.4/7.6 jobs. This
+deterministic and CI evidence is distinct from live service verification. `0.3.0` makes
+SecretManagement lazy for non-vault flows and adds the live-proven TenantPulse collection
+descriptors described in `CHANGELOG.md`.
+
+GraphKit `0.2.2` is an immutable predecessor. Its hard SecretManagement contract remains relevant
+only for hosts pinned to that version.
 
 ## What it provides
 
