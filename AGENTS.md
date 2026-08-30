@@ -45,7 +45,7 @@ Two exceptions are real and runnable today, copied from IntuneHealthAutomation:
 - `scripts/New-Ivy24LabApp.ps1` — unattended runner that recreates the Ivy24 lab registration end to end and proves it: delete, create, verify every role was actually granted, authenticate app-only with the generated certificate, read a real Intune endpoint.
 - `tests/New-ClientServicePrincipalCBA.Tests.ps1` — 57 passing Pester tests covering that script.
 
-These are standalone scripts, deliberately not module functions: converting the CBA script into `New-GraphAppRegistration` is phase 2 work. IntuneHealthAutomation keeps its own copy of the script — it is referenced by seven docs, `New-Release.ps1` packaging, and at runtime by `src/private/Authentication/Invoke-CertificateSetupPrompt.ps1` — so the two copies diverge intentionally until the phase 6 cutover.
+These are standalone scripts, deliberately not module functions: converting the CBA script into `New-GraphAppRegistration` is phase 2 work. IntuneHealthAutomation keeps its own historical copy of the script — it is referenced by seven docs, `New-Release.ps1` packaging, and `src/private/Authentication/Invoke-CertificateSetupPrompt.ps1`. No adopted runtime currently depends on reconciling those copies, so any future consolidation is separate work rather than a `0.3.0` blocker.
 
 ## Architecture & Data Flow
 
@@ -68,7 +68,7 @@ Preserve these boundaries:
 - Do not build another OAuth client and do not persist access tokens. Client-credentials flows return no refresh token: an expired token is replaced by reacquiring from the source credential, which already lives in SecretManagement.
 - API version is per-operation metadata, never a global beta mode.
 - Generic reads may use `Get-GraphObject`; do not introduce a universal generic mutation API.
-- IntuneHealthAutomation retains reports, Excel processing, checkpointing, console UI, and caching until the later cutover.
+- IntuneHealthAutomation retains its reports, Excel processing, checkpointing, console UI, and caching in its own repository; no adopted runtime currently makes their consolidation a GraphKit release condition.
 - A current context is interactive convenience only. Low-level work must accept `-Context` or `-ProfileId` and resolve it before entering runspaces.
 
 Example planned usage:
