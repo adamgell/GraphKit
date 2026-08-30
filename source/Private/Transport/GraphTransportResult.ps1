@@ -16,6 +16,11 @@
       TransportException The exception for transport-level failures
                          (timeout, reset, cancellation); $null on a clean response.
       ResponseReceived   $true when HTTP response headers were actually received.
+      VerifiedTenantId   Tenant proven for the exact bearer placed on the request;
+                         never populated from an unverified provider claim.
+      TokenFingerprint   Non-secret fingerprint of the exact bearer placed on the
+                         request. The bearer itself never enters this record.
+      CredentialGeneration Non-secret credential generation for that bearer.
 #>
 class GraphTransportResult {
     [int]       $StatusCode
@@ -24,4 +29,7 @@ class GraphTransportResult {
     [string]    $RequestId
     [object]    $TransportException
     [bool]      $ResponseReceived
+    [string]    $VerifiedTenantId
+    [string]    $TokenFingerprint
+    [string]    $CredentialGeneration
 }

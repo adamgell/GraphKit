@@ -233,6 +233,37 @@ Describe 'Confirm-GraphTenantBinding' {
             $script:proofCall.Descriptor.IdentityRequirement | Should -Be 'Verified'
             $script:proofCall.Descriptor.Keys | Should -Not -Contain 'VerifyTenantBinding'
         }
+
+        It 'forwards the caller cancellation token into the proof retry pipeline' {
+            $cache = @{}
+            $script:proofCancellationToken = [System.Threading.CancellationToken]::None
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $cts.Cancel()
+
+            Mock Invoke-GraphRetry -ModuleName GraphKit {
+                param($Context, $Descriptor, $Uri, $Method, $Headers, $Body, $CancellationToken)
+                $script:proofCancellationToken = $CancellationToken
+                return [pscustomobject] @{
+                    Outcome = 'Cancelled'
+                    Data    = $null
+                }
+            }
+
+            $message = InModuleScope GraphKit -ArgumentList $cache, (New-TestContext), (New-TestTokenResult), $cts.Token {
+                param($Cache, $Context, $TokenResult, $CancellationToken)
+                try {
+                    Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult `
+                        -ProofCache $Cache -CancellationToken $CancellationToken
+                    return ''
+                }
+                catch {
+                    return $_.Exception.Message
+                }
+            }
+
+            $script:proofCancellationToken.IsCancellationRequested | Should -BeTrue
+            $message | Should -BeLike '*Tenant proof failed*'
+        }
     }
 }
 
@@ -267,6 +298,49 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
             # enforcement passed.
             $result.ResponseReceived | Should -BeFalse
             $result.TransportException | Should -Not -BeNullOrEmpty
+        }
+
+        It 'passes cancellation raised during acquisition to the prover before any mutation send' {
+            $port = Get-FreePort
+            $authority = [uri] "http://127.0.0.1:$port"
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $tokenSource = New-TestTokenSource -Fingerprint 'fp-cancelled' -Generation 'g1' -VerifiedTenantId $null
+            $tokenSource | Add-Member -MemberType NoteProperty -Name CancellationSource -Value $cts
+            $tokenSource | Add-Member -MemberType ScriptMethod -Name Acquire -Force -Value {
+                param([bool] $forceRefresh, $ct)
+                $this.CancellationSource.Cancel()
+                return [pscustomobject] @{
+                    AccessToken          = 'test-bearer-token'
+                    ExpiresOnUtc         = [System.DateTimeOffset]::UtcNow.AddHours(1)
+                    VerifiedTenantId     = $null
+                    TokenFingerprint     = $this.TokenFingerprint
+                    CredentialGeneration = $this.CredentialGeneration
+                }
+            }
+            $script:proverSawCancellation = $false
+            $prover = {
+                param($Context, $TokenResult, [System.Threading.CancellationToken] $CancellationToken)
+                $script:proverSawCancellation = $CancellationToken.IsCancellationRequested
+                $CancellationToken.ThrowIfCancellationRequested()
+                $TokenResult.VerifiedTenantId = [string] $Context.TenantId
+            }
+
+            $message = InModuleScope GraphKit -ArgumentList $authority, $tokenSource, $prover, $script:TenantId, $cts.Token {
+                param($Authority, $TokenSource, $Prover, $TenantId, $CancellationToken)
+                try {
+                    Send-GraphHttpRequest -Uri ([uri] "$($Authority.AbsoluteUri)/mutation") -Method POST -Body @{} `
+                        -CredentialPolicy GraphBearer -ExpectedAuthority $Authority -TokenSource $TokenSource `
+                        -TargetTenantId $TenantId -VerifyTenantBinding -TenantBindingProver $Prover `
+                        -CancellationToken $CancellationToken
+                    return ''
+                }
+                catch {
+                    return $_.Exception.Message
+                }
+            }
+
+            $script:proverSawCancellation | Should -BeTrue
+            $message | Should -BeLike '*operation was canceled*'
         }
 
         It 'does not invoke the prover when the current fingerprint is already verified' {

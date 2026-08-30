@@ -62,6 +62,41 @@ function Test-GraphTenantBinding {
     return ($script:GraphTenantBindingCache.ContainsKey($key) -and $script:GraphTenantBindingCache[$key] -eq $true)
 }
 
+<#
+    Private: expose one already-acquired result through the token-source duck
+    contract for the /organization proof. The source is deliberately
+    non-refreshable: proving a refreshed or independently reacquired bearer and
+    then caching that proof against the caller's earlier fingerprint would break
+    the exact-token binding invariant.
+#>
+function New-GraphPinnedTokenSource {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $TokenResult
+    )
+
+    $source = [pscustomobject] @{
+        CanRefresh           = $false
+        AuthMode             = 'PinnedTokenResult'
+        Audience             = $null
+        ClientId             = $null
+        CredentialGeneration = [string] $TokenResult.CredentialGeneration
+        Result               = $TokenResult
+    }
+
+    $source | Add-Member -MemberType ScriptMethod -Name Acquire -Value {
+        param([bool] $forceRefresh, $cancellationToken)
+        if ($forceRefresh) {
+            throw [System.InvalidOperationException]::new('A pinned token result cannot be refreshed during tenant proof.')
+        }
+        return $this.Result
+    }
+
+    return $source
+}
+
 function Confirm-GraphTenantBinding {
     [CmdletBinding()]
     param(
@@ -70,6 +105,8 @@ function Confirm-GraphTenantBinding {
 
         [Parameter(Mandatory = $true)]
         [object] $TokenResult,
+
+        [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None,
 
         [scriptblock] $ProofTransport,
 
@@ -114,13 +151,29 @@ function Confirm-GraphTenantBinding {
     $transport = $ProofTransport
     if ($null -eq $transport) {
         $transport = {
-            param($Context, $Descriptor, $Uri)
+            param($Context, $Descriptor, $Uri, $CancellationToken)
             Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri $Uri -Method GET `
-                -Headers @{} -Body $null -CancellationToken ([System.Threading.CancellationToken]::None)
+                -Headers @{} -Body $null -CancellationToken $CancellationToken
         }
     }
 
-    $envelope = & $transport -Context $Context -Descriptor $proofDescriptor -Uri $proofUri
+    # Invoke the normal retry/sender pipeline with a source pinned to this exact
+    # result. The original provider may rotate on every call; it must never be
+    # consulted while proving the bearer that the outer sender is about to use.
+    $proofContext = [pscustomobject] @{
+        ProfileId             = 'tenant-proof'
+        TenantId              = $targetTenant
+        Cloud                 = 'TenantProof'
+        GraphBaseUri          = $Context.GraphBaseUri
+        ClientId              = $null
+        TokenSource           = New-GraphPinnedTokenSource -TokenResult $TokenResult
+        CredentialFingerprint = [string] $TokenResult.TokenFingerprint
+        AcquisitionCacheKey   = "tenant-proof|$cacheKey"
+        IdentityState         = 'NotAcquired'
+    }
+
+    $envelope = & $transport -Context $proofContext -Descriptor $proofDescriptor -Uri $proofUri `
+        -CancellationToken $CancellationToken
 
     if ($null -eq $envelope -or $envelope.Outcome -ne 'Succeeded') {
         throw (

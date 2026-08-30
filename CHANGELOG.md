@@ -5,6 +5,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The real retry/sender path now acquires exactly one bearer per physical attempt. Tenant proof,
+  the `Authorization` header, and returned provenance are bound to that same token fingerprint;
+  a rotating no-expiry provider can no longer have one token proved and another sent.
+- A `401` refresh now propagates `WithForceRefresh($true)` into both confidential-client and
+  managed-identity MSAL builders instead of bypassing only GraphKit's local cache. Unproven
+  provider tenant claims no longer populate verified provenance.
+- Cancellation now flows through mutation tenant proof into its nested retry pipeline, so a
+  cancelled proof cannot outlive the caller or proceed to the mutation send.
+
 ## [0.3.0] - 2026-08-30
 
 GraphKit `0.3.0` was published to PSGallery at `2026-08-30T04:38:20.12Z`. The 207381-byte public

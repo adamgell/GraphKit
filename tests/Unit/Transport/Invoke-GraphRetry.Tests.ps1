@@ -89,10 +89,22 @@ BeforeAll {
 
     function New-TestSend {
         return {
-            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
+            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
             $script:sendCount++
             $script:lastSendHeaders = $Headers
-            return $script:results.Dequeue()
+            $result = $script:results.Dequeue()
+
+            # The injected sender models the real sender's acquisition ownership:
+            # exactly one acquisition per physical attempt, using the refresh
+            # decision supplied by the retry engine.
+            if ($CredentialPolicy -eq 'GraphBearer' -and $null -ne $TokenSource) {
+                $tokenResult = $TokenSource.Acquire([bool] $ForceRefresh, $CancellationToken)
+                $result | Add-Member -MemberType NoteProperty -Name VerifiedTenantId -Value $tokenResult.VerifiedTenantId -Force
+                $result | Add-Member -MemberType NoteProperty -Name TokenFingerprint -Value $tokenResult.TokenFingerprint -Force
+                $result | Add-Member -MemberType NoteProperty -Name CredentialGeneration -Value $tokenResult.CredentialGeneration -Force
+            }
+
+            return $result
         }
     }
 

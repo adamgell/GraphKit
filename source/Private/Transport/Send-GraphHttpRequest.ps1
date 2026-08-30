@@ -84,6 +84,8 @@ function Send-GraphHttpRequest {
 
         [object] $TokenSource,
 
+        [bool] $ForceRefresh = $false,
+
         [ValidateSet('GraphBearer', 'None')]
         [string] $CredentialPolicy = 'None',
 
@@ -102,6 +104,9 @@ function Send-GraphHttpRequest {
     $result.RequestId = $null
     $result.TransportException = $null
     $result.ResponseReceived = $false
+    $result.VerifiedTenantId = $null
+    $result.TokenFingerprint = $null
+    $result.CredentialGeneration = $null
 
     # ---- Credential boundary (non-bypassable, enforced before any send) ----
     if ($CredentialPolicy -eq 'GraphBearer') {
@@ -179,7 +184,11 @@ function Send-GraphHttpRequest {
 
     # Authorization is attached per-message, never as a default header.
     if ($CredentialPolicy -eq 'GraphBearer') {
-        $tokenResult = $TokenSource.Acquire($false, $CancellationToken)
+        # The sender is the sole token-acquisition owner for this physical
+        # attempt. Keeping acquisition beside the credential boundary makes the
+        # value acquired, tenant-proved and attached to Authorization one exact
+        # result rather than three independently rotating provider values.
+        $tokenResult = $TokenSource.Acquire($ForceRefresh, $CancellationToken)
         if ($null -eq $tokenResult) {
             throw 'GraphBearer credential policy: token source returned no token.'
         }
@@ -214,10 +223,14 @@ function Send-GraphHttpRequest {
 
                 $prover = $TenantBindingProver
                 if ($null -eq $prover) {
-                    $prover = { param($Context, $TokenResult) Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult }
+                    $prover = {
+                        param($Context, $TokenResult, $CancellationToken)
+                        Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult `
+                            -CancellationToken $CancellationToken
+                    }
                 }
 
-                & $prover -Context $proofContext -TokenResult $tokenResult
+                & $prover -Context $proofContext -TokenResult $tokenResult -CancellationToken $CancellationToken
             }
 
             if ($null -eq $tokenResult -or
@@ -231,6 +244,21 @@ function Send-GraphHttpRequest {
 
         $request.Headers.Authorization =
             [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', [string] $tokenResult.AccessToken)
+
+        # Return only non-secret identity metadata to the retry/provenance layer.
+        # A provider may CLAIM VerifiedTenantId; provenance may trust it only when
+        # the fingerprint/generation/tenant tuple is in GraphKit's proof cache.
+        $bindingRecorded = $TargetTenantId -ne [guid]::Empty -and
+            -not [string]::IsNullOrEmpty([string] $tokenResult.VerifiedTenantId) -and
+            [string]::Equals([string] $tokenResult.VerifiedTenantId, [string] $TargetTenantId, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Test-GraphTenantBinding `
+                -Fingerprint ([string] $tokenResult.TokenFingerprint) `
+                -Generation ([string] $tokenResult.CredentialGeneration) `
+                -TenantId $TargetTenantId)
+
+        $result.VerifiedTenantId = if ($bindingRecorded) { $TargetTenantId.ToString() } else { $null }
+        $result.TokenFingerprint = [string] $tokenResult.TokenFingerprint
+        $result.CredentialGeneration = [string] $tokenResult.CredentialGeneration
     }
 
     # ---- Send (one attempt = exactly one physical send) ----

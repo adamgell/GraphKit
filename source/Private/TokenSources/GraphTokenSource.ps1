@@ -122,7 +122,8 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
 
         $app = $this.GetApplication()
         $scopes = [string[]]@("$($this.Audience)/.default")
-        $authResult = $app.AcquireTokenForClient($scopes).ExecuteAsync($cancellation).GetAwaiter().GetResult()
+        $builder = $app.AcquireTokenForClient($scopes).WithForceRefresh($forceRefresh)
+        $authResult = $builder.ExecuteAsync($cancellation).GetAwaiter().GetResult()
 
         $result = [GraphTokenResult]::new()
         $result.AccessToken = $authResult.AccessToken
@@ -166,7 +167,8 @@ class ManagedIdentityTokenSource : GraphTokenSourceBase {
 
         $app = $this.GetApplication()
         $scope = "$($this.Audience)/.default"
-        $authResult = $app.AcquireTokenForManagedIdentity($scope).ExecuteAsync($cancellation).GetAwaiter().GetResult()
+        $builder = $app.AcquireTokenForManagedIdentity($scope).WithForceRefresh($forceRefresh)
+        $authResult = $builder.ExecuteAsync($cancellation).GetAwaiter().GetResult()
 
         $result = [GraphTokenResult]::new()
         $result.AccessToken = $authResult.AccessToken

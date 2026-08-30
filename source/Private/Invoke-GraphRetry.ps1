@@ -233,22 +233,6 @@ function Invoke-GraphRetry {
         # later operation on that tenant|client|class|family then blocks and reports
         # back-pressure - blaming Graph for a slot this module never gave back.
         try {
-            # ---- Token acquisition (force refresh when the prior decision demanded it) ----
-            if ($credentialPolicy -eq 'GraphBearer' -and $null -ne $Context.TokenSource) {
-                $acquireForce = $forceRefreshPending
-                $tokenResult = $Context.TokenSource.Acquire($acquireForce, $CancellationToken)
-                if ($acquireForce) {
-                    $forceRefreshPending = $false
-                    $forceRefreshUsed = $true
-                }
-
-                if ($null -ne $tokenResult -and
-                    -not [string]::IsNullOrEmpty([string] $tokenResult.VerifiedTenantId) -and
-                    [string]::Equals([string] $tokenResult.VerifiedTenantId, [string] $Context.TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $verifiedTenantId = $Context.TenantId
-                }
-            }
-
             # ---- Build per-attempt request headers (never mutate the caller's table) ----
             $clientRequestId = [guid]::NewGuid()
             $sendHeaders = @{}
@@ -303,6 +287,7 @@ function Invoke-GraphRetry {
 
             if ($credentialPolicy -eq 'GraphBearer') {
                 $sendParams.TokenSource = $Context.TokenSource
+                $sendParams.ForceRefresh = $forceRefreshPending
                 $sendParams.ExpectedAuthority = $Context.GraphBaseUri
                 $sendParams.TargetTenantId = $Context.TenantId
                 if ($isMutating) {
@@ -312,6 +297,17 @@ function Invoke-GraphRetry {
 
             # ---- One attempt = exactly one send ----
             $result = & $send @sendParams
+
+            if ($forceRefreshPending) {
+                $forceRefreshPending = $false
+                $forceRefreshUsed = $true
+            }
+
+            $attemptVerifiedTenantId = $null
+            if (-not [string]::IsNullOrEmpty([string] $result.VerifiedTenantId) -and
+                [string]::Equals([string] $result.VerifiedTenantId, [string] $Context.TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $attemptVerifiedTenantId = $Context.TenantId
+            }
 
             # ---- Runtime certainty, then release admission ----
             # Complete-GraphThrottleGate's -Success switch drives additive-increase
@@ -419,6 +415,10 @@ function Invoke-GraphRetry {
             continue
         }
 
+        # Tenant verification belongs to the token used by this terminal attempt.
+        # A proven token that receives 401 must never lend its identity to the
+        # refreshed token whose response becomes the operation result.
+        $verifiedTenantId = $attemptVerifiedTenantId
         $outcome = $decision.Outcome
         $certaintyFinal = $decision.Certainty
         if ($decision.Outcome -eq 'Succeeded') {
@@ -439,7 +439,7 @@ function Invoke-GraphRetry {
         ApiVersion     = $Descriptor.ApiVersion
         ResourceFamily = $Descriptor.ResourceFamily
         RetrievedUtc   = (& $utcNow)
-        IdentityState  = $Context.IdentityState
+        IdentityState  = if ($null -ne $verifiedTenantId) { 'VerifiedForToken' } else { $Context.IdentityState }
         ActualTenantId = $verifiedTenantId
     }
 
