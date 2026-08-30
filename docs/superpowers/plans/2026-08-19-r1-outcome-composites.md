@@ -13,8 +13,8 @@
 ## Global constraints
 
 1. Work only in the isolated branches `product/r1-outcome-composites` at:
-   - `/Users/Adam.Gell/repo/GraphKit/.worktrees/r1-outcome-composites`
-   - `/Users/Adam.Gell/repo/TenantPulse/.worktrees/r1-outcome-composites`
+   - `<GraphKit-repo>/.worktrees/r1-outcome-composites`
+   - `<TenantPulse-repo>/.worktrees/r1-outcome-composites`
 2. Do not modify either repository's `r0-source-truth` worktree. R0 invariant 10 forbids operation descriptors, settings assignments, outcome-model migration, and other R1 work there.
 3. The repository owner may use a local `.env` file as an operator-only credential source. Never print, stage, commit, or include its values in artifacts or evidence.
 4. Do not invent Graph operation names or a generic GraphKit `Walk` strategy.

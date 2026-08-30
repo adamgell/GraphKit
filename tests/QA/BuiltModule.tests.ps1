@@ -6,7 +6,7 @@
     file is packaged but never registered via FormatsToProcess. Both are silent: operation
     data appears absent and default views simply never apply.
 
-    Run:  ./build.ps1 -Tasks build   then   Invoke-Pester ./tests/QA/BuiltModule.tests.ps1
+    Run:  ./build.ps1 -Tasks test
 #>
 
 BeforeDiscovery {

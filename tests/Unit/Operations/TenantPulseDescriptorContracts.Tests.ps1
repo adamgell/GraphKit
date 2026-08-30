@@ -8,7 +8,7 @@ BeforeAll {
     $script:catalog = @(Get-GraphOperation -List)
 }
 
-Describe 'TenantPulse collection contracts proven live on 2026-08-29' {
+Describe 'TenantPulse collection descriptor contracts' {
     It 'ships the official expanded Intune unified-RBAC assignment read' {
         $descriptor = $script:catalog | Where-Object {
             $_.Type -eq 'DeviceManagementUnifiedRoleAssignment' -and $_.Operation -eq 'ListBeta'
