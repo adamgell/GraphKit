@@ -39,8 +39,12 @@
         For FileSystem, the repository directory. For GitHubRelease, owner/repo.
 
     .PARAMETER TestResultPath
-        NUnit result file proving this build passed. Required unless -SkipTestProof is given,
-        which exists only for a channel dry run and says so loudly.
+        NUnit result file bound by the canonical tested-release proof. Required unless
+        -SkipTestProof is given together with -WhatIf for a read-only channel dry run.
+
+    .PARAMETER ProofPath
+        Canonical tested-release proof. Defaults to
+        output/testResults/tested-release-proof.json.
 
     .PARAMETER PinPath
         Where to write the pin record. Defaults to ./output/graphkit.pin.json.
@@ -63,6 +67,8 @@ param(
     [string] $Destination,
 
     [string] $TestResultPath,
+
+    [string] $ProofPath,
 
     [switch] $SkipTestProof,
 
@@ -97,8 +103,15 @@ if ($moduleName -ne 'GraphKit') {
 }
 
 # --- Proof that these exact bits passed their tests -------------------------------------
+$verifiedSnapshotDirectory = $null
+try {
 if ($SkipTestProof) {
-    Write-Warning 'PUBLISHING WITHOUT TEST PROOF. -SkipTestProof was given, so this package is NOT known to have passed its suite. Do not use this for a channel that anything installs from.'
+    if (-not $WhatIfPreference) {
+        throw '-SkipTestProof is only allowed with -WhatIf. A real private-channel publication always requires the canonical tested-release proof.'
+    }
+    Write-Warning 'DRY RUN WITHOUT TEST PROOF. -SkipTestProof is accepted only because -WhatIf prevents package, proof, and pin writes.'
+    $verifiedRelease = $null
+    $verifiedProofSnapshot = $null
 }
 else {
     if ([string]::IsNullOrWhiteSpace($TestResultPath)) {
@@ -108,52 +121,53 @@ else {
         throw "Test result '$TestResultPath' does not exist."
     }
 
-    $gate = Join-Path $repoRoot 'tests/QA/Assert-GateResult.ps1'
-    & pwsh -NoProfile -File $gate -ResultPath $TestResultPath -MinimumTests 777 -AllowedSkips 0 | Write-Verbose
-    if ($LASTEXITCODE -ne 0) {
-        throw "The supplied test result did not pass the whole-result gate, so this package must not be published. Run: pwsh -File tests/QA/Assert-GateResult.ps1 -ResultPath '$TestResultPath' -MinimumTests 777"
+    # One verifier owns the release definition for both private-channel and PSGallery
+    # publication. It binds the exact package archive and result pair to every shipped
+    # module file; this publisher deliberately carries no second, weaker proof path.
+    $releaseProofPath = if ([string]::IsNullOrWhiteSpace($ProofPath)) {
+        Join-Path $repoRoot 'output/testResults/tested-release-proof.json'
     }
-
-    # The result must belong to this version, or it proves nothing about these bits.
-    [xml] $resultDoc = Get-Content -LiteralPath $TestResultPath -Raw
-    $resultName = [string] $resultDoc.SelectSingleNode('/test-results').GetAttribute('name')
-    if ($TestResultPath -notmatch [regex]::Escape($moduleVersion) -and $resultName -notmatch [regex]::Escape($moduleVersion)) {
-        throw "Test result '$TestResultPath' does not reference version $moduleVersion. Publishing a package against another build's result would make the proof meaningless."
+    else {
+        $ProofPath
     }
-
-    # Matching version numbers are not proof that these bytes are the tested bytes: the
-    # 'pack' task begins with Clean, so a build/test/pack ordering silently rebuilds the
-    # module after the suite ran and ships something no test ever saw. Compare the psm1
-    # inside the package against the built module the tests actually imported. This turns
-    # "publish only the already-tested artifact" from a procedural rule into a checked one.
-    $builtPsm1 = Join-Path $repoRoot "output/module/GraphKit/$moduleVersion/GraphKit.psm1"
-    if (-not (Test-Path -LiteralPath $builtPsm1 -PathType Leaf)) {
-        throw "The built module at '$builtPsm1' is gone, so this package cannot be tied back to the tested bits. Run ./build.ps1 -Tasks pack FIRST and ./build.ps1 -Tasks test SECOND - test does not clean, pack does."
-    }
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
+    $verifier = Join-Path $repoRoot 'scripts/Test-GraphKitReleaseProof.ps1'
+    $verifiedSnapshotDirectory = [System.IO.Directory]::CreateTempSubdirectory('graphkit-verified-release-').FullName
+    $verifiedPackageCopyPath = Join-Path $verifiedSnapshotDirectory $package.Name
+    $verifiedProofCopyPath = Join-Path $verifiedSnapshotDirectory 'tested-release-proof.json'
     try {
-        $entry = $archive.Entries | Where-Object { $_.FullName -eq 'GraphKit.psm1' } | Select-Object -First 1
-        if ($null -eq $entry) { throw "Package '$($package.Name)' contains no GraphKit.psm1." }
-
-        $stream = $entry.Open()
-        try {
-            $sha = [System.Security.Cryptography.SHA256]::Create()
-            $packagedHash = [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
-        }
-        finally { $stream.Dispose() }
+        $verifiedRelease = & $verifier `
+            -PackagePath $package.FullName `
+            -ProofPath $releaseProofPath `
+            -TestResultPath $TestResultPath `
+            -RepositoryRoot $repoRoot `
+            -VerifiedPackageCopyPath $verifiedPackageCopyPath `
+            -VerifiedProofCopyPath $verifiedProofCopyPath
     }
-    finally { $archive.Dispose() }
-
-    $testedHash = (Get-FileHash -LiteralPath $builtPsm1 -Algorithm SHA256).Hash
-    if (-not [string]::Equals($packagedHash, $testedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "The GraphKit.psm1 inside '$($package.Name)' ($packagedHash) is NOT the one the tests ran against ($testedHash). The module was rebuilt between testing and packaging, so this package is unverified. Run ./build.ps1 -Tasks pack, then ./build.ps1 -Tasks test, then publish."
+    catch {
+        Remove-Item -LiteralPath $verifiedSnapshotDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        $verifiedSnapshotDirectory = $null
+        throw
     }
-    Write-Verbose "Packaged GraphKit.psm1 matches the tested build ($testedHash)."
+    $package = Get-Item -LiteralPath $verifiedRelease.VerifiedPackagePath
+    $verifiedProofSnapshot = Get-Item -LiteralPath $verifiedRelease.VerifiedProofPath
+    Write-Verbose "Canonical tested-release proof accepted $($verifiedRelease.ShippedFileCount) shipped file(s)."
 }
 
-$hash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
+$hash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not $SkipTestProof -and $hash -cne $verifiedRelease.PackageSha256) {
+    throw 'The verifier-owned package snapshot changed before publication.'
+}
+$proofAssetName = if ($SkipTestProof) {
+    $null
+}
+else {
+    "GraphKit.$moduleVersion.tested-release.$($verifiedRelease.ProofSha256).json"
+}
+if (-not $SkipTestProof) {
+    $contentAddressedProofPath = Join-Path $verifiedSnapshotDirectory $proofAssetName
+    Move-Item -LiteralPath $verifiedProofSnapshot.FullName -Destination $contentAddressedProofPath
+    $verifiedProofSnapshot = Get-Item -LiteralPath $contentAddressedProofPath
+}
 
 Write-Host ''
 Write-Host "  package : $($package.Name) ($($package.Length) bytes)" -ForegroundColor Cyan
@@ -164,14 +178,16 @@ Write-Host ''
 
 # --- Publish ----------------------------------------------------------------------------
 $publishedSource = $null
+$publishedProofSource = if ($SkipTestProof) { 'NONE - WhatIf-only unverified dry run' } else { $null }
 
 switch ($Channel) {
     'FileSystem' {
         $target = Join-Path $Destination $package.Name
+        $proofTarget = if ($SkipTestProof) { $null } else { Join-Path $Destination $proofAssetName }
 
         if ((Test-Path -LiteralPath $target -PathType Leaf) -and -not $Force) {
-            $existingHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
-            if ($existingHash -eq $hash) {
+            $existingHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($existingHash -ceq $hash) {
                 Write-Host '  Already published with identical bytes; nothing to do.' -ForegroundColor Green
             }
             else {
@@ -186,7 +202,25 @@ switch ($Channel) {
             Write-Host "  Published to $target" -ForegroundColor Green
         }
 
-        $publishedSource = (Resolve-Path -LiteralPath $Destination).Path
+        if (-not $SkipTestProof) {
+            if (Test-Path -LiteralPath $proofTarget -PathType Leaf) {
+                $existingProofHash = (Get-FileHash -LiteralPath $proofTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($existingProofHash -cne $verifiedRelease.ProofSha256) {
+                    throw "Content-addressed proof '$proofTarget' exists with different bytes; refusing to replace it."
+                }
+                Write-Host '  Tested-release proof already exists with identical bytes; nothing to do.' -ForegroundColor Green
+            }
+            elseif ($PSCmdlet.ShouldProcess($proofTarget, 'Publish immutable tested-release proof')) {
+                if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
+                    $null = New-Item -ItemType Directory -Path $Destination -Force
+                }
+                Copy-Item -LiteralPath $verifiedProofSnapshot.FullName -Destination $proofTarget
+                Write-Host "  Published tested-release proof to $proofTarget" -ForegroundColor Green
+            }
+            $publishedProofSource = [System.IO.Path]::GetFullPath($proofTarget)
+        }
+
+        $publishedSource = [System.IO.Path]::GetFullPath($Destination)
     }
 
     'GitHubRelease' {
@@ -211,12 +245,19 @@ switch ($Channel) {
                 throw "Release $tag already exists in $Destination. Publish a new version rather than replacing one under an existing pin, or pass -Force."
             }
 
-            & gh release upload $tag $package.FullName --repo $Destination --clobber:$Force
+            $uploadArguments = @(
+                'release', 'upload', $tag,
+                $package.FullName, $verifiedProofSnapshot.FullName,
+                '--repo', $Destination
+            )
+            if ($Force) { $uploadArguments += '--clobber' }
+            & gh @uploadArguments
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $Destination $tag." }
-            Write-Host "  Uploaded $($package.Name) to $Destination release $tag" -ForegroundColor Green
+            Write-Host "  Uploaded $($package.Name) and $proofAssetName to $Destination release $tag" -ForegroundColor Green
         }
 
         $publishedSource = "https://github.com/$Destination/releases/tag/$tag"
+        $publishedProofSource = "https://github.com/$Destination/releases/download/$tag/$proofAssetName"
     }
 }
 
@@ -243,7 +284,9 @@ $pin = [ordered]@{
     channel       = $Channel
     source        = $publishedSource
     packageName   = $package.Name
-    testProof     = if ($SkipTestProof) { 'NONE - published without test proof' } else { (Resolve-Path -LiteralPath $TestResultPath).Path }
+    testProof     = $publishedProofSource
+    testProofSha256 = if ($SkipTestProof) { $null } else { $verifiedRelease.ProofSha256 }
+    testProofRunId = if ($SkipTestProof) { $null } else { $verifiedRelease.RunId }
     publishedUtc  = [datetime]::UtcNow.ToString('o')
 }
 
@@ -258,3 +301,9 @@ if ($PSCmdlet.ShouldProcess($PinPath, 'Write pin record')) {
 
 Write-Host ''
 [pscustomobject] $pin
+}
+finally {
+    if (-not [string]::IsNullOrWhiteSpace($verifiedSnapshotDirectory)) {
+        Remove-Item -LiteralPath $verifiedSnapshotDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

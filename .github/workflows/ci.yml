@@ -93,4 +93,21 @@ jobs:
           if ($resultFiles.Count -gt 1) {
               throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
           }
-          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 777 -AllowedSkips 0
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 825 -AllowedSkips 0
+          if ($LASTEXITCODE -ne 0) {
+              throw 'The standalone whole-result gate failed.'
+          }
+
+          $proofPath = 'output/testResults/tested-release-proof.json'
+          if (-not (Test-Path -LiteralPath $proofPath -PathType Leaf)) {
+              throw "No canonical tested-release proof was produced at $proofPath"
+          }
+          $packageFiles = @(Get-ChildItem -Path 'output/GraphKit.*.nupkg' -File -ErrorAction SilentlyContinue)
+          if ($packageFiles.Count -ne 1) {
+              throw "Expected exactly one GraphKit package, found $($packageFiles.Count): $($packageFiles.Name -join ', ')"
+          }
+          & ./scripts/Test-GraphKitReleaseProof.ps1 `
+              -PackagePath $packageFiles[0].FullName `
+              -ProofPath $proofPath `
+              -TestResultPath $resultFiles[0].FullName `
+              -RepositoryRoot $PWD | Out-Null

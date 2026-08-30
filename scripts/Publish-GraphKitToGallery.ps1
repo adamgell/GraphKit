@@ -31,6 +31,14 @@
     .PARAMETER WhatIfOnly
         Run every pre-flight check and stop, without prompting for a key or publishing.
 
+    .PARAMETER ProofPath
+        Canonical tested-release proof. Defaults to
+        output/testResults/tested-release-proof.json.
+
+    .PARAMETER TestResultPath
+        Optional NUnit result path. When supplied, it must be the exact result named and
+        hashed by the canonical proof.
+
     .EXAMPLE
         ./scripts/Publish-GraphKitToGallery.ps1 -WhatIfOnly
 
@@ -45,6 +53,10 @@
 param(
     [string] $PackagePath,
 
+    [string] $ProofPath,
+
+    [string] $TestResultPath,
+
     [switch] $WhatIfOnly
 )
 
@@ -52,12 +64,81 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$manifestPath = Join-Path $repoRoot 'source/GraphKit.psd1'
-$manifest = Import-PowerShellDataFile $manifestPath
-$version = $manifest.ModuleVersion
+$verifier = Join-Path $repoRoot 'scripts/Test-GraphKitReleaseProof.ps1'
+$releaseProofVerified = $false
+$verifiedRelease = $null
+$verifiedSnapshotDirectory = $null
 
-if ([string]::IsNullOrWhiteSpace($PackagePath)) {
-    $PackagePath = Join-Path $repoRoot "output/GraphKit.$version.nupkg"
+function Invoke-GalleryReleaseProofVerification {
+    param([Parameter(Mandatory)] [string] $ResolvedPackagePath)
+
+    if ([string]::IsNullOrWhiteSpace($verifiedSnapshotDirectory)) {
+        $script:verifiedSnapshotDirectory = [System.IO.Directory]::CreateTempSubdirectory('graphkit-gallery-verified-').FullName
+    }
+    $verificationParameters = @{
+        PackagePath = $ResolvedPackagePath
+        RepositoryRoot = $repoRoot
+        VerifiedPackageCopyPath = Join-Path $verifiedSnapshotDirectory (Split-Path $ResolvedPackagePath -Leaf)
+        VerifiedProofCopyPath = Join-Path $verifiedSnapshotDirectory 'tested-release-proof.json'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ProofPath)) {
+        $verificationParameters.ProofPath = $ProofPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TestResultPath)) {
+        $verificationParameters.TestResultPath = $TestResultPath
+    }
+    return & $verifier @verificationParameters
+}
+
+try {
+# An explicitly supplied package is verified before repository metadata is consulted.
+# This keeps the irreversible publication boundary authoritative even for a relocated
+# evidence bundle and ensures all later pre-flight checks inspect already-proven bytes.
+$packagePathWasExplicit = -not [string]::IsNullOrWhiteSpace($PackagePath)
+if (-not $packagePathWasExplicit) {
+    $packageCandidates = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'output') -Filter 'GraphKit.*.nupkg' -File -ErrorAction SilentlyContinue)
+    if ($packageCandidates.Count -gt 1) {
+        throw "Multiple GraphKit package candidates exist; supply -PackagePath explicitly: $($packageCandidates.Name -join ', ')."
+    }
+    if ($packageCandidates.Count -eq 1) {
+        $PackagePath = $packageCandidates[0].FullName
+    }
+    else {
+        # There is no artifact to publish. Source is used only to produce an actionable
+        # missing-path preflight message; it never authorizes or describes present bytes.
+        $sourceManifest = Import-PowerShellDataFile (Join-Path $repoRoot 'source/GraphKit.psd1')
+        $PackagePath = Join-Path $repoRoot "output/GraphKit.$($sourceManifest.ModuleVersion).nupkg"
+    }
+}
+if (Test-Path -LiteralPath $PackagePath -PathType Leaf) {
+    $verifiedRelease = Invoke-GalleryReleaseProofVerification -ResolvedPackagePath $PackagePath
+    $PackagePath = $verifiedRelease.VerifiedPackagePath
+    $releaseProofVerified = $true
+}
+
+$version = if ($releaseProofVerified) {
+    [string] $verifiedRelease.Version
+}
+else {
+    [string] (Import-PowerShellDataFile (Join-Path $repoRoot 'source/GraphKit.psd1')).ModuleVersion
+}
+$builtManifestPath = Join-Path $repoRoot "output/module/GraphKit/$version/GraphKit.psd1"
+$manifestValidationPath = $builtManifestPath
+if ($releaseProofVerified) {
+    # Keep every manifest-dependent preflight inside the verifier-owned snapshot
+    # boundary. The verified archive has already passed strict path/file-set checks.
+    $verifiedPackageContentDirectory = Join-Path $verifiedSnapshotDirectory 'verified-package-content'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($PackagePath, $verifiedPackageContentDirectory)
+    $manifestValidationPath = Join-Path $verifiedPackageContentDirectory 'GraphKit.psd1'
+}
+$manifest = if (Test-Path -LiteralPath $manifestValidationPath -PathType Leaf) {
+    Import-PowerShellDataFile $manifestValidationPath
+}
+else {
+    # This fallback is diagnostic only: canonical proof verification cannot pass without
+    # the built manifest, and publication remains gated below.
+    Import-PowerShellDataFile (Join-Path $repoRoot 'source/GraphKit.psd1')
 }
 
 $failures = [System.Collections.Generic.List[string]]::new()
@@ -81,11 +162,10 @@ if ($packageExists) {
     Test-Gate 'package version matches the manifest' ((Split-Path $PackagePath -Leaf) -eq "GraphKit.$version.nupkg") "manifest says $version"
 }
 
-# --- manifest validity and gallery metadata ----------------------------------------------
-$builtManifest = Join-Path $repoRoot "output/module/GraphKit/$version/GraphKit.psd1"
-if (Test-Path -LiteralPath $builtManifest) {
+# --- proven built-manifest validity and gallery metadata ---------------------------------
+if (Test-Path -LiteralPath $manifestValidationPath) {
     try {
-        $null = Test-ModuleManifest -Path $builtManifest -ErrorAction Stop
+        $null = Test-ModuleManifest -Path $manifestValidationPath -ErrorAction Stop
         Test-Gate 'Test-ModuleManifest passes' $true
     }
     catch {
@@ -93,7 +173,7 @@ if (Test-Path -LiteralPath $builtManifest) {
     }
 }
 else {
-    Test-Gate 'built module present' $false $builtManifest
+    Test-Gate 'verified module manifest present' $false $manifestValidationPath
 }
 
 $psData = $manifest.PrivateData.PSData
@@ -190,19 +270,15 @@ catch {
     Test-Gate 'gallery reachable' $false $_.Exception.Message
 }
 
-# --- a passing test result for this exact version ----------------------------------------
-$resultFile = Get-ChildItem -Path (Join-Path $repoRoot 'output/testResults') -Filter "NUnit*$version*.xml" -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($null -eq $resultFile) {
-    Test-Gate "test result for $version present" $false 'run ./build.ps1 -Tasks pack then -Tasks test'
-}
-else {
-    [xml] $doc = Get-Content -LiteralPath $resultFile.FullName -Raw
-    $root = $doc.SelectSingleNode('/test-results')
-    $failed = [int] $root.GetAttribute('failures')
-    $total = [int] $root.GetAttribute('total')
-    Test-Gate "tests green for $version" ($failed -eq 0) "$total tests, $failed failed"
-}
+# --- one canonical package/module/result proof -------------------------------------------
+Test-Gate 'canonical tested-release proof passes' $releaseProofVerified $(
+    if ($releaseProofVerified) {
+        "$($verifiedRelease.TestCount) tests; $($verifiedRelease.ShippedFileCount) shipped files"
+    }
+    else {
+        'package is absent, so no proof could be checked'
+    }
+)
 
 Write-Host ''
 if ($failures.Count -gt 0) {
@@ -257,4 +333,10 @@ finally {
     # Do not leave the key recoverable from this process.
     $plainKey = $null
     [System.GC]::Collect()
+}
+}
+finally {
+    if (-not [string]::IsNullOrWhiteSpace($verifiedSnapshotDirectory)) {
+        Remove-Item -LiteralPath $verifiedSnapshotDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
