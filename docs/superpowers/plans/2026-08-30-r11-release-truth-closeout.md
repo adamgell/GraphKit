@@ -91,12 +91,14 @@ In `tests/QA/PackageIdentity.tests.ps1`, rename only human-readable `Describe`/`
 Run:
 
 ```powershell
-./build.ps1 -Tasks build
+./build.ps1 -Tasks pack
 Import-Module ./output/RequiredModules/Pester/6.1.0/Pester.psd1 -Force
 Invoke-Pester -Path @('./tests/QA/ReleaseTruth.tests.ps1','./tests/QA/PackageIdentity.tests.ps1') -Output Detailed
 ```
 
-Expected: package-identity tests remain green; release-truth tests fail on the stale candidate/unpublished documentation and absent completion banner.
+Expected: `PackageIdentity` remains green because `pack` produces the exact `.nupkg` it inspects;
+the new release-truth assertions fail red on the stale candidate/unpublished documentation and
+absent completion banner.
 
 - [ ] **Step 4: Replace the README release-status block**
 
@@ -108,7 +110,7 @@ Make the same release correction in `AGENTS.md:7` and change the `0.3.0 candidat
 
 - [ ] **Step 6: Close the changelog release paragraph**
 
-Keep `## [0.3.0] - 2026-08-29` as the source-release section date, but replace the candidate/non-publication paragraph with a publication note containing the 2026-08-30 PSGallery timestamp, exact archive hash, merged-main SHA, both CI run IDs, and the 772-test result. Explain that the retained release-worktree archive is byte-identical to the public archive and that rebuilt ZIP container hashes are not a replacement identity.
+Set `## [0.3.0] - 2026-08-30` to the verified publication date, then replace the candidate/non-publication paragraph with a publication note containing the 2026-08-30 PSGallery timestamp, exact archive hash, merged-main SHA, both CI run IDs, and the 772-test result. Explain that the retained release-worktree archive is byte-identical to the public archive and that rebuilt ZIP container hashes are not a replacement identity.
 
 - [ ] **Step 7: Add a superseding execution banner to the dated integration plan**
 
