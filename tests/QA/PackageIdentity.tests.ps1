@@ -30,8 +30,8 @@ BeforeAll {
     }
 }
 
-Describe 'GraphKit candidate package identity' -Tag 'QA' {
-    It 'declares candidate version 0.3.0 in source and release metadata' {
+Describe 'GraphKit release package identity' -Tag 'QA' {
+    It 'declares released version 0.3.0 in source and release metadata' {
         $source = Import-PowerShellDataFile $script:sourceManifestPath
 
         [string] $source.ModuleVersion | Should -Be $script:expectedVersion
@@ -56,7 +56,7 @@ Describe 'GraphKit candidate package identity' -Tag 'QA' {
     It 'preserves 0.3.0 in the manifest extracted from the exact nupkg' {
         Test-Path $script:packagePath -PathType Leaf | Should -BeTrue
 
-        $extractRoot = Join-Path $TestDrive 'candidate'
+        $extractRoot = Join-Path $TestDrive 'release'
         [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $extractRoot)
         $packagedManifest = Import-PowerShellDataFile (Join-Path $extractRoot 'GraphKit.psd1')
         [string] $packagedManifest.ModuleVersion | Should -Be $script:expectedVersion
