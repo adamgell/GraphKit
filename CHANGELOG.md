@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-29
+## [0.3.0] - 2026-08-30
 
 GraphKit `0.3.0` was published to PSGallery at `2026-08-30T04:38:20.12Z`. The 207381-byte public
 archive SHA-256 is `45319d7cf4f8333697343ccf9c1089c7e04da87a8df62553cbc140089337536d`. Reviewed

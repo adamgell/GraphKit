@@ -42,23 +42,28 @@
 
 - [ ] **Step 1: Write the failing release-truth test**
 
-Create `tests/QA/ReleaseTruth.tests.ps1` with tests that load the five files above as raw text and assert all of the following:
+Create `tests/QA/ReleaseTruth.tests.ps1` with five tests that load the five files above as raw
+text. Extract the current GraphKit `0.3.0` release text from the README release-status paragraph,
+the `AGENTS.md` current-release paragraph, and the `CHANGELOG.md` `0.3.0` release paragraph; do
+not satisfy a current-release assertion from another document section. Each extracted scope must
+contain the publication timestamp, 207381-byte archive identity, archive SHA-256, reviewed PR
+head, merged-main SHA, PR-head CI run, exact-main CI run, 772-test result, and six-job
+Windows/macOS/Ubuntu PowerShell 7.4/7.6 claim, and must not use `candidate` or `unpublished`.
+Keep the Pester total at 777 by strengthening the existing tests rather than adding cases:
 
 ```powershell
 Describe 'GraphKit current release truth' -Tag 'QA' {
-    It 'records the immutable public GraphKit 0.3.0 archive' {
-        $readme | Should -Match 'GraphKit `0\.3\.0` is the current immutable release on PSGallery'
-        $readme | Should -Match '45319d7cf4f8333697343ccf9c1089c7e04da87a8df62553cbc140089337536d'
+    It 'records every verified field in the scoped README current-release text' {
+        Assert-CurrentReleaseEvidence -Text $readmeCurrentRelease -Location 'README release status'
     }
 
-    It 'records exact merged-main and CI evidence in operator guidance' {
-        $agents | Should -Match 'a1b0b8d54c17671761ef5aee017a453b072d1fe9'
-        $agents | Should -Match '33292580847'
-        $agents | Should -Match '772'
+    It 'records every verified field in the scoped operator current-release text' {
+        Assert-CurrentReleaseEvidence -Text $agentsCurrentRelease -Location 'AGENTS current release status'
     }
 
-    It 'does not claim the current 0.3.0 release is unpublished' {
-        @($readme, $agents, $changelog) -join "`n" | Should -Not -Match '(?i)0\.3\.0.{0,80}unpublished|unpublished.{0,80}0\.3\.0'
+    It 'records every verified field in the scoped changelog current-release text' {
+        $changelogCurrentRelease | Should -Match '^## \[0\.3\.0\] - 2026-08-30'
+        Assert-CurrentReleaseEvidence -Text $changelogCurrentRelease -Location 'CHANGELOG 0.3.0 release section'
     }
 
     It 'preserves the immutable released manifest identity' {
