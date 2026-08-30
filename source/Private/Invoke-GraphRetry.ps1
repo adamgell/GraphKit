@@ -288,6 +288,7 @@ function Invoke-GraphRetry {
             if ($credentialPolicy -eq 'GraphBearer') {
                 $sendParams.TokenSource = $Context.TokenSource
                 $sendParams.ForceRefresh = $forceRefreshPending
+                $sendParams.TokenAcquisitionKey = [string] $Context.AcquisitionCacheKey
                 $sendParams.ExpectedAuthority = $Context.GraphBaseUri
                 $sendParams.TargetTenantId = $Context.TenantId
                 if ($isMutating) {
@@ -319,9 +320,31 @@ function Invoke-GraphRetry {
             $admission = $null
         }
         catch {
+            $sendFailure = $_.Exception
             if ($null -ne $admission) {
                 Complete-GraphThrottleGate -Admission $admission
                 $admission = $null
+            }
+
+            # Cancellation can occur while this caller is waiting on another
+            # context's in-flight token acquisition. Preserve the retry engine's
+            # established Cancelled envelope instead of leaking a credential-path
+            # OperationCanceledException, but never mask an unrelated failure just
+            # because the caller token happened to be signalled at the same time.
+            $candidate = $sendFailure
+            $isCancellationFailure = $false
+            while ($null -ne $candidate) {
+                if ($candidate -is [System.OperationCanceledException]) {
+                    $isCancellationFailure = $true
+                    break
+                }
+                $candidate = $candidate.InnerException
+            }
+
+            if ($CancellationToken.IsCancellationRequested -and $isCancellationFailure) {
+                $outcome = 'Cancelled'
+                $certaintyFinal = 'Indeterminate'
+                break
             }
             throw
         }

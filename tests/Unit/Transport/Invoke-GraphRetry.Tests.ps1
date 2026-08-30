@@ -89,9 +89,10 @@ BeforeAll {
 
     function New-TestSend {
         return {
-            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
+            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
             $script:sendCount++
             $script:lastSendHeaders = $Headers
+            $script:lastTokenAcquisitionKey = $TokenAcquisitionKey
             $result = $script:results.Dequeue()
 
             # The injected sender models the real sender's acquisition ownership:
@@ -156,6 +157,7 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
             $script:completeCalls = 0
             $script:acquireCalls = [System.Collections.Generic.List[bool]]::new()
             $script:lastSendHeaders = $null
+            $script:lastTokenAcquisitionKey = $null
             $script:scopeToReturn = @{
                 CoarseKey      = 'Global|tenant|client|Read'
                 LeafKey        = 'Global|tenant|client|Test.Family|Read'
@@ -286,6 +288,34 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $r.Outcome | Should -Be 'Cancelled'
                 $script:sendCount | Should -Be 0
             }
+
+            It 'returns Cancelled when the caller cancels while waiting inside the sender' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $script:cancelDuringSendSource = $cts
+                $injections = New-TestInjections
+                $injections.Send = {
+                    param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
+                    $script:cancelDuringSendSource.Cancel()
+                    throw [System.OperationCanceledException]::new('single-flight waiter cancelled')
+                }
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext -TokenSource (New-TestTokenSource)), (New-TestDescriptor -CredentialPolicy GraphBearer), $injections, $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections
+                    }
+
+                    $r.Outcome | Should -Be 'Cancelled'
+                    $r.Certainty | Should -Be 'Indeterminate'
+                    $script:completeCalls | Should -Be 1
+                }
+                finally {
+                    $cts.Dispose()
+                    $script:cancelDuringSendSource = $null
+                }
+            }
         }
 
         Context 'attempt accounting' {
@@ -381,6 +411,20 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 }
 
                 $script:lastSendHeaders.ContainsKey('client-request-id') | Should -BeTrue
+            }
+
+            It 'forwards the context acquisition key to the real sender contract' {
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @() }))
+                $tokenSource = New-TestTokenSource
+
+                $null = InModuleScope GraphKit -ArgumentList (New-TestContext -TokenSource $tokenSource), (New-TestDescriptor -CredentialPolicy GraphBearer), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $script:lastTokenAcquisitionKey | Should -Be 'test-acquisition-cache-key'
             }
         }
     }

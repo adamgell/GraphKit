@@ -86,6 +86,8 @@ function Send-GraphHttpRequest {
 
         [bool] $ForceRefresh = $false,
 
+        [string] $TokenAcquisitionKey,
+
         [ValidateSet('GraphBearer', 'None')]
         [string] $CredentialPolicy = 'None',
 
@@ -188,9 +190,39 @@ function Send-GraphHttpRequest {
         # attempt. Keeping acquisition beside the credential boundary makes the
         # value acquired, tenant-proved and attached to Authorization one exact
         # result rather than three independently rotating provider values.
-        $tokenResult = $TokenSource.Acquire($ForceRefresh, $CancellationToken)
+        if ([string]::IsNullOrEmpty($TokenAcquisitionKey)) {
+            # Direct private callers and injected tests may not carry a context.
+            # Production Invoke-GraphRetry always supplies the canonical tuple.
+            $tokenResult = $TokenSource.Acquire($ForceRefresh, $CancellationToken)
+        }
+        else {
+            $sourceForAcquire = $TokenSource
+            $forceForAcquire = $ForceRefresh
+            $cancellationForAcquire = $CancellationToken
+            $flightKey = Get-GraphTokenFlightKey `
+                -AcquisitionKey $TokenAcquisitionKey `
+                -ForceRefresh:$ForceRefresh
+            $tokenResult = Invoke-GraphTokenSingleFlight `
+                -Key $flightKey `
+                -CancellationToken $CancellationToken `
+                -AcquireScript {
+                    $sourceForAcquire.Acquire($forceForAcquire, $cancellationForAcquire)
+                }.GetNewClosure()
+        }
         if ($null -eq $tokenResult) {
             throw 'GraphBearer credential policy: token source returned no token.'
+        }
+        if (-not [string]::IsNullOrEmpty($TokenAcquisitionKey) -and
+            $TokenSource -is [GraphTokenSourceBase] -and
+            $tokenResult -is [GraphTokenResult]) {
+            # The winner caches inside Acquire, but every follower owns a separate
+            # immutable context and token-source instance. Adopt the shared result
+            # into each follower so a forced-refresh follower cannot serve its
+            # previously rejected cached token on the next ordinary request.
+            ([GraphTokenSourceBase] $TokenSource).AdoptSharedResult(
+                [GraphTokenResult] $tokenResult,
+                $ForceRefresh
+            )
         }
         if ($VerifyTenantBinding) {
             # Mutating sends require tenant proof BEFORE the request is issued.

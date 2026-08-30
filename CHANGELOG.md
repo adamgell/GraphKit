@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider tenant claims no longer populate verified provenance.
 - Cancellation now flows through mutation tenant proof into its nested retry pipeline, so a
   cancelled proof cannot outlive the caller or proceed to the mutation send.
+- The canonical acquisition tuple is now wired into the production sender. Concurrent contexts
+  share one ordinary or forced-refresh acquisition, while a cancelled waiter can leave without
+  cancelling the shared work or leaking a disposable wait handle. A cancelled leader is replaced
+  only when its own caller token was signalled, and followers adopt shared results through a
+  monotonic per-source cache so an older ordinary result cannot overwrite a newer forced refresh.
 
 ## [0.3.0] - 2026-08-30
 

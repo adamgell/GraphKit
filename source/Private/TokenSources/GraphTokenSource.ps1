@@ -38,6 +38,12 @@ class GraphTokenSourceBase {
     [string] $CredentialGeneration
 
     hidden [GraphTokenResult] $CachedResult
+    hidden [bool] $CachedResultWasForceRefresh
+    hidden [object] $CacheLock
+
+    GraphTokenSourceBase() {
+        $this.CacheLock = [object]::new()
+    }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
         throw [System.NotImplementedException]::new('GraphTokenSourceBase.Acquire must be overridden by a concrete token source.')
@@ -73,25 +79,90 @@ class GraphTokenSourceBase {
         return $skew + $spread
     }
 
-    hidden [bool] HasValidCachedToken() {
-        if ($null -eq $this.CachedResult) {
-            return $false
-        }
+    hidden [GraphTokenResult] GetValidCachedToken() {
+        [System.Threading.Monitor]::Enter($this.CacheLock)
+        try {
+            $current = $this.CachedResult
+            if ($null -eq $current) {
+                return $null
+            }
 
-        $expires = $this.CachedResult.ExpiresOnUtc
-        if ($expires -le [System.DateTimeOffset]::MinValue) {
-            # No expiry is known (a fixed bearer): never treat it as skew-valid.
-            return $false
-        }
+            $expires = $current.ExpiresOnUtc
+            if ($expires -le [System.DateTimeOffset]::MinValue) {
+                # No expiry is known (a fixed bearer): never treat it as skew-valid.
+                return $null
+            }
 
-        $refreshAt = $expires.AddSeconds(-1.0 * $this.RefreshSkewSeconds($this.CachedResult))
-        return $refreshAt -gt [System.DateTimeOffset]::UtcNow
+            $refreshAt = $expires.AddSeconds(-1.0 * $this.RefreshSkewSeconds($current))
+            if ($refreshAt -gt [System.DateTimeOffset]::UtcNow) {
+                return $current
+            }
+            return $null
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($this.CacheLock)
+        }
     }
 
-    hidden [void] CacheResult([GraphTokenResult]$result) {
-        $this.CachedResult = $result
-        $this.ExpiresOn = $result.ExpiresOnUtc
-        $this.VerifiedTenantId = $result.VerifiedTenantId
+    hidden [GraphTokenResult] GetCachedToken() {
+        [System.Threading.Monitor]::Enter($this.CacheLock)
+        try {
+            return $this.CachedResult
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($this.CacheLock)
+        }
+    }
+
+    hidden [void] CacheResult([GraphTokenResult]$result, [bool]$forceRefresh) {
+        [System.Threading.Monitor]::Enter($this.CacheLock)
+        try {
+            $current = $this.CachedResult
+            $replace = $null -eq $current
+
+            if (-not $replace) {
+                $replace = $result.ReceivedOnUtc -gt $current.ReceivedOnUtc
+
+                # ReceivedOnUtc is recorded at acquisition time and normally
+                # provides a strict order. When two results share a clock tick,
+                # preserve a forced-refresh result over an ordinary result, then
+                # prefer the later expiry within the same acquisition mode.
+                # Otherwise retain the incumbent instead of making cache order
+                # depend on whichever sender resumes last.
+                if (-not $replace -and $result.ReceivedOnUtc -eq $current.ReceivedOnUtc) {
+                    $replace = ($forceRefresh -and -not $this.CachedResultWasForceRefresh) -or
+                        ($forceRefresh -eq $this.CachedResultWasForceRefresh -and
+                            $result.ExpiresOnUtc -gt $current.ExpiresOnUtc)
+                }
+            }
+
+            if ($replace) {
+                $this.CachedResult = $result
+                $this.CachedResultWasForceRefresh = $forceRefresh
+                $this.ExpiresOn = $result.ExpiresOnUtc
+                $this.VerifiedTenantId = $result.VerifiedTenantId
+            }
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($this.CacheLock)
+        }
+    }
+
+    [void] AdoptSharedResult([GraphTokenResult]$result, [bool]$forceRefresh) {
+        if ($null -eq $result) {
+            throw [System.ArgumentNullException]::new('result')
+        }
+
+        if (-not [string]::Equals(
+                [string] $result.CredentialGeneration,
+                [string] $this.CredentialGeneration,
+                [System.StringComparison]::Ordinal)) {
+            throw [System.InvalidOperationException]::new(
+                'Refusing to adopt a shared token result from a different credential generation.'
+            )
+        }
+
+        $this.CacheResult($result, $forceRefresh)
     }
 }
 
@@ -116,8 +187,11 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
-        if (-not $forceRefresh -and $this.HasValidCachedToken()) {
-            return $this.CachedResult
+        if (-not $forceRefresh) {
+            $cached = $this.GetValidCachedToken()
+            if ($null -ne $cached) {
+                return $cached
+            }
         }
 
         $app = $this.GetApplication()
@@ -135,7 +209,7 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
         $result.TokenFingerprint = Get-GraphFingerprint -Value $authResult.AccessToken
         $result.CredentialGeneration = $this.CredentialGeneration
 
-        $this.CacheResult($result)
+        $this.CacheResult($result, $forceRefresh)
         return $result
     }
 }
@@ -161,8 +235,11 @@ class ManagedIdentityTokenSource : GraphTokenSourceBase {
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
-        if (-not $forceRefresh -and $this.HasValidCachedToken()) {
-            return $this.CachedResult
+        if (-not $forceRefresh) {
+            $cached = $this.GetValidCachedToken()
+            if ($null -ne $cached) {
+                return $cached
+            }
         }
 
         $app = $this.GetApplication()
@@ -180,7 +257,7 @@ class ManagedIdentityTokenSource : GraphTokenSourceBase {
         $result.TokenFingerprint = Get-GraphFingerprint -Value $authResult.AccessToken
         $result.CredentialGeneration = $this.CredentialGeneration
 
-        $this.CacheResult($result)
+        $this.CacheResult($result, $forceRefresh)
         return $result
     }
 }
@@ -198,8 +275,11 @@ class ProviderTokenSource : GraphTokenSourceBase {
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
-        if (-not $forceRefresh -and $this.HasValidCachedToken()) {
-            return $this.CachedResult
+        if (-not $forceRefresh) {
+            $cached = $this.GetValidCachedToken()
+            if ($null -ne $cached) {
+                return $cached
+            }
         }
 
         $provided = & $this.Provider
@@ -246,7 +326,7 @@ class ProviderTokenSource : GraphTokenSourceBase {
         # Only cache a provider token that carries an explicit future expiry; a
         # token with no expiry is never reused and forces a fresh provider call.
         if ($expires -gt [System.DateTimeOffset]::UtcNow) {
-            $this.CacheResult($result)
+            $this.CacheResult($result, $forceRefresh)
         }
         return $result
     }
@@ -268,7 +348,8 @@ class FixedBearerTokenSource : GraphTokenSourceBase {
             throw [System.InvalidOperationException]::new('A fixed bearer token cannot be refreshed. Supply a new token (a new context) instead of forcing a refresh on an unrefreshable source.')
         }
 
-        if ($null -eq $this.CachedResult) {
+        $cached = $this.GetCachedToken()
+        if ($null -eq $cached) {
             $result = [GraphTokenResult]::new()
             $result.AccessToken = $this.Bearer
             $result.ExpiresOnUtc = [System.DateTimeOffset]::MinValue
@@ -278,25 +359,29 @@ class FixedBearerTokenSource : GraphTokenSourceBase {
             $result.VerifiedTenantId = $null
             $result.TokenFingerprint = Get-GraphFingerprint -Value $this.Bearer
             $result.CredentialGeneration = $this.CredentialGeneration
-            $this.CachedResult = $result
+            $this.CacheResult($result, $false)
+            $cached = $this.GetCachedToken()
         }
-        return $this.CachedResult
+        return $cached
     }
 }
 
 class GraphTokenFlight {
-    [System.Threading.ManualResetEventSlim] $Done
-    [object] $Result
-    [System.Exception] $Error
+    [System.Threading.Tasks.TaskCompletionSource[object]] $Completion
+    [bool] $LeaderCancellationRequested
 
     GraphTokenFlight() {
-        $this.Done = [System.Threading.ManualResetEventSlim]::new($false)
+        $this.Completion = [System.Threading.Tasks.TaskCompletionSource[object]]::new(
+            [System.Threading.Tasks.TaskCreationOptions]::RunContinuationsAsynchronously
+        )
+        $this.LeaderCancellationRequested = $false
     }
 }
 
 class GraphTokenFlightRegistry {
     static [System.Collections.Concurrent.ConcurrentDictionary[string, GraphTokenFlight]] $Flights =
         [System.Collections.Concurrent.ConcurrentDictionary[string, GraphTokenFlight]]::new()
+    static [object] $RemovalLock = [object]::new()
 }
 
 <#
@@ -433,9 +518,41 @@ function Get-GraphTokenAcquisitionKey {
 }
 
 <#
+    Private: remove a completed flight only when the key still names that exact
+    instance. TryRemove(key, out) alone can remove a newer replacement flight if
+    a cancelled leader completes while a live waiter starts the replacement.
+#>
+function Remove-GraphTokenFlightIfCurrent {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Key,
+        [Parameter(Mandatory)]
+        [GraphTokenFlight] $Flight
+    )
+
+    [System.Threading.Monitor]::Enter([GraphTokenFlightRegistry]::RemovalLock)
+    try {
+        $current = [GraphTokenFlight] $null
+        if (-not [GraphTokenFlightRegistry]::Flights.TryGetValue($Key, [ref] $current) -or
+            -not [object]::ReferenceEquals($current, $Flight)) {
+            return $false
+        }
+
+        $removed = [GraphTokenFlight] $null
+        return [GraphTokenFlightRegistry]::Flights.TryRemove($Key, [ref] $removed)
+    }
+    finally {
+        [System.Threading.Monitor]::Exit([GraphTokenFlightRegistry]::RemovalLock)
+    }
+}
+
+<#
     Private: single-flight acquisition per canonical tuple key. The first caller
-    runs the acquisition script and everyone else awaits the same result; a
-    failure surfaces to every waiter and is not cached.
+    runs the acquisition script and everyone else awaits the same result. A
+    non-cancellation failure surfaces to every waiter and is not cached; if the
+    leader is cancelled, a still-live waiter starts or joins a replacement flight.
 #>
 function Invoke-GraphTokenSingleFlight {
     [CmdletBinding()]
@@ -444,42 +561,103 @@ function Invoke-GraphTokenSingleFlight {
         [Parameter(Mandatory)]
         [string] $Key,
         [Parameter(Mandatory)]
-        [scriptblock] $AcquireScript
+        [scriptblock] $AcquireScript,
+        [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None
     )
 
-    $flight = [GraphTokenFlight]::new()
+    while ($true) {
+        $flight = [GraphTokenFlight]::new()
 
-    if ([GraphTokenFlightRegistry]::Flights.TryAdd($Key, $flight)) {
+        if ([GraphTokenFlightRegistry]::Flights.TryAdd($Key, $flight)) {
+            try {
+                $result = & $AcquireScript
+                $null = $flight.Completion.TrySetResult($result)
+                return $result
+            }
+            catch {
+                $failure = $_.Exception
+                $candidate = $failure
+                $isCancellationFailure = $false
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.OperationCanceledException]) {
+                        $isCancellationFailure = $true
+                        break
+                    }
+                    $candidate = $candidate.InnerException
+                }
+
+                # Record the leader's caller-specific cancellation disposition
+                # before publishing completion. A provider may throw its own OCE
+                # while the leader token remains live; followers must fan that out
+                # as one shared failure rather than multiplying provider calls.
+                $flight.LeaderCancellationRequested =
+                    $CancellationToken.IsCancellationRequested -and $isCancellationFailure
+                $null = $flight.Completion.TrySetException($failure)
+                # The leader observes its own failed task even when no waiter was
+                # present, preventing an unobserved-task exception later.
+                $null = $flight.Completion.Task.Exception
+                throw
+            }
+            finally {
+                $null = Remove-GraphTokenFlightIfCurrent -Key $Key -Flight $flight
+            }
+        }
+
+        $existing = [GraphTokenFlight] $null
+        if (-not [GraphTokenFlightRegistry]::Flights.TryGetValue($Key, [ref] $existing)) {
+            # The leader completed and removed the entry between TryAdd and
+            # TryGetValue. Retry the registry operation; never bypass the flight
+            # with a direct duplicate acquisition.
+            continue
+        }
+
         try {
-            $flight.Result = & $AcquireScript
+            return $existing.Completion.Task.WaitAsync($CancellationToken).GetAwaiter().GetResult()
         }
         catch {
-            $flight.Error = $_.Exception
-        }
-        finally {
-            $flight.Done.Set()
-            $removed = [GraphTokenFlight] $null
-            $null = [GraphTokenFlightRegistry]::Flights.TryRemove($Key, [ref] $removed)
-        }
-    }
-    else {
-        $existing = [GraphTokenFlightRegistry]::Flights[$Key]
-        if ($null -eq $existing) {
-            # Narrow race: the leader removed the entry between our failed
-            # TryAdd and the lookup. Fall back to acquiring directly.
-            return & $AcquireScript
-        }
-        $existing.Done.Wait()
-        if ($null -ne $existing.Error) {
-            throw $existing.Error
-        }
-        return $existing.Result
-    }
+            $candidate = $_.Exception
+            $sharedAcquisitionWasCancelled = $false
+            while ($null -ne $candidate) {
+                if ($candidate -is [System.OperationCanceledException]) {
+                    $sharedAcquisitionWasCancelled = $true
+                    break
+                }
+                $candidate = $candidate.InnerException
+            }
 
-    if ($null -ne $flight.Error) {
-        throw $flight.Error
+            $leaderCallerWasCancelled =
+                $sharedAcquisitionWasCancelled -and $existing.LeaderCancellationRequested
+
+            if (-not $leaderCallerWasCancelled -or $CancellationToken.IsCancellationRequested) {
+                throw
+            }
+
+            # A leader's caller-specific cancellation must not poison live
+            # waiters. Remove only the exact completed flight (never a newer
+            # replacement added for the same key), then let this caller compete
+            # to lead or join the replacement acquisition.
+            $null = Remove-GraphTokenFlightIfCurrent -Key $Key -Flight $existing
+            continue
+        }
     }
-    return $flight.Result
+}
+
+<#
+    Private: separate ordinary and forced refresh work for one canonical tuple.
+    A forced waiter must never join an ordinary acquisition that can legally
+    return the token Graph has just rejected with 401.
+#>
+function Get-GraphTokenFlightKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $AcquisitionKey,
+        [bool] $ForceRefresh = $false
+    )
+
+    $mode = if ($ForceRefresh) { 'refresh' } else { 'ordinary' }
+    return "$AcquisitionKey|flight:$mode"
 }
 
 <#
