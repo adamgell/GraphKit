@@ -36,6 +36,7 @@ class GraphTokenSourceBase {
     [System.DateTimeOffset] $ExpiresOn
     [string] $VerifiedTenantId
     [string] $CredentialGeneration
+    hidden [guid] $CreationRunspaceId
 
     hidden [GraphTokenResult] $CachedResult
     hidden [bool] $CachedResultWasForceRefresh
@@ -43,6 +44,13 @@ class GraphTokenSourceBase {
 
     GraphTokenSourceBase() {
         $this.CacheLock = [object]::new()
+        $runspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $this.CreationRunspaceId = if ($null -eq $runspace) {
+            [guid]::Empty
+        }
+        else {
+            $runspace.InstanceId
+        }
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
@@ -149,6 +157,16 @@ class GraphTokenSourceBase {
     }
 
     [void] AdoptSharedResult([GraphTokenResult]$result, [bool]$forceRefresh) {
+        $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $currentRunspaceId = if ($null -eq $currentRunspace) { [guid]::Empty } else { $currentRunspace.InstanceId }
+        if ($currentRunspaceId -ne $this.CreationRunspaceId) {
+            throw [System.InvalidOperationException]::new(
+                'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                'the compiled GraphKit.Auth token source is required for that contract.'
+            )
+        }
+
         if ($null -eq $result) {
             throw [System.ArgumentNullException]::new('result')
         }
@@ -169,9 +187,11 @@ class GraphTokenSourceBase {
 class ConfidentialClientTokenSource : GraphTokenSourceBase {
     hidden [scriptblock] $BuilderFactory
     hidden [object] $Application
+    hidden [object] $ApplicationLock
 
     ConfidentialClientTokenSource([scriptblock]$builderFactory, [string]$authMode, [string]$audience, [string]$clientId, [string]$generation) {
         $this.BuilderFactory = $builderFactory
+        $this.ApplicationLock = [object]::new()
         $this.AuthMode = $authMode
         $this.Audience = $audience
         $this.ClientId = $clientId
@@ -180,13 +200,35 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
     }
 
     hidden [object] GetApplication() {
-        if ($null -eq $this.Application) {
-            $this.Application = & $this.BuilderFactory
+        [System.Threading.Monitor]::Enter($this.ApplicationLock)
+        try {
+            if ($null -eq $this.Application) {
+                $candidate = & $this.BuilderFactory
+                if ($null -eq $candidate) {
+                    throw [System.InvalidOperationException]::new(
+                        'The confidential-client application factory returned no application.'
+                    )
+                }
+                $this.Application = $candidate
+            }
+            return $this.Application
         }
-        return $this.Application
+        finally {
+            [System.Threading.Monitor]::Exit($this.ApplicationLock)
+        }
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
+        $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $currentRunspaceId = if ($null -eq $currentRunspace) { [guid]::Empty } else { $currentRunspace.InstanceId }
+        if ($currentRunspaceId -ne $this.CreationRunspaceId) {
+            throw [System.InvalidOperationException]::new(
+                'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                'the compiled GraphKit.Auth token source is required for that contract.'
+            )
+        }
+
         if (-not $forceRefresh) {
             $cached = $this.GetValidCachedToken()
             if ($null -ne $cached) {
@@ -217,9 +259,11 @@ class ConfidentialClientTokenSource : GraphTokenSourceBase {
 class ManagedIdentityTokenSource : GraphTokenSourceBase {
     hidden [scriptblock] $BuilderFactory
     hidden [object] $Application
+    hidden [object] $ApplicationLock
 
     ManagedIdentityTokenSource([scriptblock]$builderFactory, [string]$audience, [string]$clientId, [string]$generation) {
         $this.BuilderFactory = $builderFactory
+        $this.ApplicationLock = [object]::new()
         $this.AuthMode = 'ManagedIdentity'
         $this.Audience = $audience
         $this.ClientId = $clientId
@@ -228,13 +272,35 @@ class ManagedIdentityTokenSource : GraphTokenSourceBase {
     }
 
     hidden [object] GetApplication() {
-        if ($null -eq $this.Application) {
-            $this.Application = & $this.BuilderFactory
+        [System.Threading.Monitor]::Enter($this.ApplicationLock)
+        try {
+            if ($null -eq $this.Application) {
+                $candidate = & $this.BuilderFactory
+                if ($null -eq $candidate) {
+                    throw [System.InvalidOperationException]::new(
+                        'The managed-identity application factory returned no application.'
+                    )
+                }
+                $this.Application = $candidate
+            }
+            return $this.Application
         }
-        return $this.Application
+        finally {
+            [System.Threading.Monitor]::Exit($this.ApplicationLock)
+        }
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
+        $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $currentRunspaceId = if ($null -eq $currentRunspace) { [guid]::Empty } else { $currentRunspace.InstanceId }
+        if ($currentRunspaceId -ne $this.CreationRunspaceId) {
+            throw [System.InvalidOperationException]::new(
+                'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                'the compiled GraphKit.Auth token source is required for that contract.'
+            )
+        }
+
         if (-not $forceRefresh) {
             $cached = $this.GetValidCachedToken()
             if ($null -ne $cached) {
@@ -275,6 +341,16 @@ class ProviderTokenSource : GraphTokenSourceBase {
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
+        $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $currentRunspaceId = if ($null -eq $currentRunspace) { [guid]::Empty } else { $currentRunspace.InstanceId }
+        if ($currentRunspaceId -ne $this.CreationRunspaceId) {
+            throw [System.InvalidOperationException]::new(
+                'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                'the compiled GraphKit.Auth token source is required for that contract.'
+            )
+        }
+
         if (-not $forceRefresh) {
             $cached = $this.GetValidCachedToken()
             if ($null -ne $cached) {
@@ -344,6 +420,16 @@ class FixedBearerTokenSource : GraphTokenSourceBase {
     }
 
     [GraphTokenResult] Acquire([bool]$forceRefresh, [System.Threading.CancellationToken]$cancellation) {
+        $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+        $currentRunspaceId = if ($null -eq $currentRunspace) { [guid]::Empty } else { $currentRunspace.InstanceId }
+        if ($currentRunspaceId -ne $this.CreationRunspaceId) {
+            throw [System.InvalidOperationException]::new(
+                'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                'the compiled GraphKit.Auth token source is required for that contract.'
+            )
+        }
+
         if ($forceRefresh) {
             throw [System.InvalidOperationException]::new('A fixed bearer token cannot be refreshed. Supply a new token (a new context) instead of forcing a refresh on an unrefreshable source.')
         }
@@ -412,17 +498,104 @@ function Get-GraphFingerprint {
     }
 }
 
+function Get-GraphPfxSnapshot {
+    <#
+        Read a persisted PFX once and bind its canonical path, exact bytes and
+        SHA-256 identity together. Callers that construct a certificate use the
+        returned Bytes property rather than reopening the path, so the material
+        cannot change between generation verification and import.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Management.Automation.PSCustomObject])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw 'A persisted PFX path is empty; GraphKit cannot derive its credential generation.'
+    }
+
+    try {
+        # .NET's GetFullPath resolves against Environment.CurrentDirectory,
+        # which PowerShell does not update for Set-Location. Resolve through
+        # the PowerShell path API so a relative PFX means relative to the
+        # caller's actual FileSystem location at context construction.
+        $provider = $null
+        $drive = $null
+        $canonicalPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+            $Path,
+            [ref] $provider,
+            [ref] $drive
+        )
+        if ($null -eq $provider -or $provider.Name -ne 'FileSystem') {
+            $providerName = if ($null -eq $provider) { '<unknown>' } else { $provider.Name }
+            throw "PFX paths must use the FileSystem provider; '$Path' resolved through '$providerName'."
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($canonicalPath)
+    }
+    catch {
+        throw "The PFX at '$Path' could not be read to derive its credential generation: $($_.Exception.Message)"
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return [pscustomobject] @{
+        Path   = $canonicalPath
+        Bytes  = $bytes
+        Sha256 = $digest
+    }
+}
+
 <#
     Private: derive a non-secret credential-generation string from a profile.
     The generation changes whenever the underlying vault version, certificate or
     provider generation changes, but never embeds a secret value.
 #>
+function New-GraphCredentialGenerationValue {
+    <#
+        Build an unambiguous, non-secret credential identity. Raw delimiter
+        concatenation is unsafe because distinct persisted references can contain
+        `|` and collapse to the same string. Each field is therefore length-
+        prefixed; the internal kind is fixed by GraphKit and versioned as `g1`.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Kind,
+
+        [AllowNull()]
+        [object[]] $Components
+    )
+
+    $builder = [System.Text.StringBuilder]::new("g1|$Kind")
+    foreach ($component in @($Components)) {
+        $value = if ($null -eq $component) { '' } else { [string] $component }
+        $null = $builder.Append('|').Append($value.Length).Append(':').Append($value)
+    }
+    return $builder.ToString()
+}
+
 function Get-GraphCredentialGeneration {
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [hashtable] $TenantProfile
+        [hashtable] $TenantProfile,
+
+        # Internal snapshot seam: the PFX resolver has already read the exact
+        # bytes it will import, so it supplies their digest/path to avoid a
+        # second path read and a generation-to-load TOCTOU window.
+        [string] $PfxContentSha256,
+
+        [string] $PfxCanonicalPath
     )
 
     $authMethod = [string]$TenantProfile.AuthMethod
@@ -430,35 +603,136 @@ function Get-GraphCredentialGeneration {
 
     switch ($authMethod) {
         'ClientSecret' {
-            return "ClientSecret|$($credential.VaultName)|$($credential.SecretName)|$($credential.Version)"
+            return New-GraphCredentialGenerationValue -Kind 'ClientSecret' -Components @(
+                $credential.VaultName,
+                $credential.SecretName,
+                $credential.Version
+            )
         }
         'Certificate' {
             if ($null -ne $credential.PfxPath) {
                 $passwordRef = $credential.Password
-                return "Certificate|PFX|$($credential.PfxPath)|$($passwordRef.VaultName)|$($passwordRef.SecretName)"
+                $contentHash = $PfxContentSha256
+                $path = $PfxCanonicalPath
+                if ([string]::IsNullOrEmpty($contentHash) -or [string]::IsNullOrEmpty($path)) {
+                    $snapshot = Get-GraphPfxSnapshot -Path ([string] $credential.PfxPath)
+                    try {
+                        $contentHash = [string] $snapshot.Sha256
+                        $path = [string] $snapshot.Path
+                    }
+                    finally {
+                        if ($snapshot.Bytes -is [byte[]]) {
+                            [System.Security.Cryptography.CryptographicOperations]::ZeroMemory(
+                                [byte[]] $snapshot.Bytes
+                            )
+                        }
+                    }
+                }
+                return New-GraphCredentialGenerationValue -Kind 'Certificate.PFX' -Components @(
+                    $path,
+                    "sha256:$contentHash",
+                    $passwordRef.VaultName,
+                    $passwordRef.SecretName,
+                    $passwordRef.Version
+                )
             }
             if ($null -ne $credential.CertificateName) {
-                return "Certificate|Vault|$($credential.VaultName)|$($credential.CertificateName)|$($credential.Version)"
+                $passwordRef = $credential.Password
+                return New-GraphCredentialGenerationValue -Kind 'Certificate.Vault' -Components @(
+                    $credential.VaultName,
+                    $credential.CertificateName,
+                    $credential.Version,
+                    $passwordRef.VaultName,
+                    $passwordRef.SecretName,
+                    $passwordRef.Version
+                )
             }
             if ($null -ne $credential.StoreLocation) {
-                return "Certificate|Store|$($credential.StoreLocation)|$($credential.StoreName)|$($credential.Thumbprint)|$($credential.Subject)"
+                return New-GraphCredentialGenerationValue -Kind 'Certificate.Store' -Components @(
+                    $credential.StoreLocation,
+                    $credential.StoreName,
+                    $credential.Thumbprint,
+                    $credential.Subject
+                )
             }
-            return "Certificate|Injected|$($credential.Thumbprint)"
+            return New-GraphCredentialGenerationValue -Kind 'Certificate.Injected' -Components @(
+                $credential.Thumbprint
+            )
         }
         'BearerToken' {
-            return "BearerToken|$($credential.VaultName)|$($credential.SecretName)|$($credential.Version)"
+            return New-GraphCredentialGenerationValue -Kind 'BearerToken' -Components @(
+                $credential.VaultName,
+                $credential.SecretName,
+                $credential.Version
+            )
         }
         'ManagedIdentity' {
             if ($null -ne $credential.ClientId -and $credential.ClientId -ne '') {
-                return "ManagedIdentity|$($credential.ClientId)"
+                return New-GraphCredentialGenerationValue -Kind 'ManagedIdentity' -Components @(
+                    $credential.ClientId
+                )
             }
-            return 'ManagedIdentity|system'
+            return New-GraphCredentialGenerationValue -Kind 'ManagedIdentity' -Components @('system')
         }
         'Provider' {
-            return "Provider|$($credential.Identity)"
+            return New-GraphCredentialGenerationValue -Kind 'Provider' -Components @(
+                $credential.Identity
+            )
         }
         default {
             throw "Unknown AuthMethod '$authMethod'."
+        }
+    }
+}
+
+function Test-GraphCredentialReferencePinned {
+    <#
+        A versioned vault slot or certificate thumbprint is immutable enough to
+        participate in cross-context token sharing. Mutable selectors (an
+        unversioned secret name or certificate subject) are context-scoped so a
+        rotation can never make a new context adopt an old context's flight.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $TenantProfile
+    )
+
+    $credential = $TenantProfile.Credential
+    switch ([string] $TenantProfile.AuthMethod) {
+        'ClientSecret' {
+            return -not [string]::IsNullOrEmpty([string] $credential.Version)
+        }
+        'BearerToken' {
+            return [string]::IsNullOrEmpty([string] $credential.Token) -and
+                -not [string]::IsNullOrEmpty([string] $credential.Version)
+        }
+        'Certificate' {
+            if (-not [string]::IsNullOrEmpty([string] $credential.PfxPath)) {
+                return -not [string]::IsNullOrEmpty([string] $credential.Password.Version)
+            }
+            if (-not [string]::IsNullOrEmpty([string] $credential.CertificateName)) {
+                $materialPinned = -not [string]::IsNullOrEmpty([string] $credential.Version)
+                $hasPassword = $null -ne $credential.Password -and
+                    (-not [string]::IsNullOrEmpty([string] $credential.Password.SecretName) -or
+                        -not [string]::IsNullOrEmpty([string] $credential.Password.VaultName))
+                $passwordPinned = -not $hasPassword -or
+                    -not [string]::IsNullOrEmpty([string] $credential.Password.Version)
+                return $materialPinned -and $passwordPinned
+            }
+            if (-not [string]::IsNullOrEmpty([string] $credential.Thumbprint)) {
+                return $true
+            }
+            if (-not [string]::IsNullOrEmpty([string] $credential.Subject)) {
+                return $false
+            }
+            # Caller-injected certificates are identified by thumbprint in the
+            # synthetic profile and provider identities already carry a nonce.
+            return $true
+        }
+        default {
+            return $true
         }
     }
 }
@@ -679,7 +953,39 @@ function New-GraphTokenSource {
     $authMethod = [string]$Profile.AuthMethod
     $audience = [string]$Cloud.Resource
     $clientId = $Profile.ClientId
-    $generation = Get-GraphCredentialGeneration -TenantProfile $Profile
+    $factoryProfile = $Profile
+    if ($authMethod -eq 'Certificate' -and
+        -not [string]::IsNullOrEmpty([string] $Profile.Credential.PfxPath)) {
+        # Capture the canonical path at context/source construction. Lazy vault
+        # resolution may occur after Set-Location; it must reopen the same path
+        # whose bytes were bound into this immutable source's generation.
+        $snapshot = Get-GraphPfxSnapshot -Path ([string] $Profile.Credential.PfxPath)
+        try {
+            $generation = Get-GraphCredentialGeneration -TenantProfile $Profile `
+                -PfxContentSha256 ([string] $snapshot.Sha256) `
+                -PfxCanonicalPath ([string] $snapshot.Path)
+            $factoryProfile = $Profile.Clone()
+            $factoryCredential = $Profile.Credential.Clone()
+            $factoryCredential.PfxPath = [string] $snapshot.Path
+            $factoryProfile.Credential = $factoryCredential
+        }
+        finally {
+            if ($snapshot.Bytes -is [byte[]]) {
+                [System.Security.Cryptography.CryptographicOperations]::ZeroMemory(
+                    [byte[]] $snapshot.Bytes
+                )
+            }
+        }
+    }
+    else {
+        $generation = Get-GraphCredentialGeneration -TenantProfile $Profile
+    }
+    if (-not (Test-GraphCredentialReferencePinned -TenantProfile $Profile)) {
+        # Never hash secret/password material to discover an unversioned
+        # rotation. Instead, isolate mutable selectors to this immutable
+        # context. Versioned references still coalesce across contexts.
+        $generation = "$generation|context:$([guid]::NewGuid().ToString('N'))"
+    }
 
     switch ($authMethod) {
         'Certificate' {
@@ -688,14 +994,16 @@ function New-GraphTokenSource {
             # module could not authenticate by any means outside a test.
             $factory = $MsalFactory
             if ($null -eq $factory) {
-                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud
+                $factory = New-GraphMsalApplicationFactory -Profile $factoryProfile -Cloud $Cloud `
+                    -ExpectedCredentialGeneration $generation
             }
             return [ConfidentialClientTokenSource]::new($factory, 'Certificate', $audience, $clientId, $generation)
         }
         'ClientSecret' {
             $factory = $MsalFactory
             if ($null -eq $factory) {
-                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud
+                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud `
+                    -ExpectedCredentialGeneration $generation
             }
             return [ConfidentialClientTokenSource]::new($factory, 'ClientSecret', $audience, $clientId, $generation)
         }

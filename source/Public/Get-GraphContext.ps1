@@ -104,13 +104,19 @@ function Get-GraphContext {
                     Credential = @{ Thumbprint = $Certificate.Thumbprint }
                 } `
                 -Cloud $cloud `
+                -ExpectedCredentialGeneration $generation `
                 -CredentialResolver {
                     # The resolver contract takes a profile, but this implementation
                     # ignores it: the certificate was supplied directly by the caller and
                     # is never persisted, so there is nothing to look up.
                     param($P)
                     $null = $P
-                    [pscustomobject] @{ AuthMethod = 'Certificate'; Material = $injected }
+                    [pscustomobject] @{
+                        AuthMethod           = 'Certificate'
+                        Material             = $injected
+                        OwnsMaterial         = $false
+                        CredentialGeneration = $generation
+                    }
                 }.GetNewClosure()
         }
         $source = [ConfidentialClientTokenSource]::new($factory, 'Certificate', [string]$cloud.Resource, $tenantProfile.ClientId, $generation)

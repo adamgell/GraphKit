@@ -50,7 +50,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
-$minimumTests = 825
+$minimumTests = 896
 $allowedSkips = 0
 $allowedNotRun = 0
 
@@ -374,6 +374,11 @@ try {
         else {
             $actualValue = ConvertTo-CanonicalLineEndings -Value $actualValue
             $expectedValue = ConvertTo-CanonicalLineEndings -Value $expectedValue
+            if ($fieldName -eq 'releaseNotes') {
+                $terminalLineEndings = [char[]] @("`r", "`n")
+                $actualValue = $actualValue.TrimEnd($terminalLineEndings)
+                $expectedValue = $expectedValue.TrimEnd($terminalLineEndings)
+            }
         }
         if ($actualValue -cne $expectedValue) {
             throw "Package metadata field '$fieldName' does not match the proven built manifest."

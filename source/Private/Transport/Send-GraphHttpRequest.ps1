@@ -25,34 +25,104 @@
 # value - an API that accepts a per-call, range-validated parameter it does not
 # apply. One client per distinct timeout keeps the parameter honest while
 # preserving connection pooling within each timeout class (in practice one or two).
-$script:GraphKitHttpClients = @{}
+# The cache lives in the centralized lifecycle state so creation, admission and
+# removal use one lock and one ownership ledger.
 
 function Get-GraphHttpClient {
-    param([int] $ConnectTimeoutSeconds = 10)
+    [CmdletBinding()]
+    [OutputType([System.Net.Http.HttpClient])]
+    param(
+        [int] $ConnectTimeoutSeconds = 10,
 
-    $key = [string] $ConnectTimeoutSeconds
+        [object] $State = $script:GraphKitModuleLifecycle,
 
-    if (-not $script:GraphKitHttpClients.ContainsKey($key)) {
-        $handler = [System.Net.Http.SocketsHttpHandler]::new()
-        $handler.AllowAutoRedirect = $false
-        $handler.UseCookies = $false
-        $handler.PooledConnectionLifetime = [TimeSpan]::FromMinutes(5)
-        $handler.ConnectTimeout = [TimeSpan]::FromSeconds($ConnectTimeoutSeconds)
+        # Deterministic test seam. The result must declare both the client and
+        # whether GraphKit owns it; injected clients remain caller-owned.
+        [scriptblock] $ClientFactory
+    )
 
-        # No handler is chained and no DelegatingHandler wraps this client, so
-        # nothing can retry behind GraphKit's back.
-        $client = [System.Net.Http.HttpClient]::new($handler)
-        # GraphKit enforces per-phase timeouts itself; disable HttpClient's own
-        # 100s wall-clock cap so it cannot fire before a configured phase timeout.
-        $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
-
-        $script:GraphKitHttpClients[$key] = [pscustomobject] @{
-            Handler = $handler
-            Client  = $client
-        }
+    if ($null -eq $State) {
+        throw [System.InvalidOperationException]::new('GraphKit module lifecycle state is unavailable.')
     }
 
-    return $script:GraphKitHttpClients[$key].Client
+    $key = [string] $ConnectTimeoutSeconds
+    [System.Threading.Monitor]::Enter($State.SyncRoot)
+    try {
+        if ($State.StopRequested -or $State.CleanupStarted) {
+            throw [System.ObjectDisposedException]::new(
+                'GraphKit',
+                'The GraphKit module is stopping and cannot create or return an HTTP client.'
+            )
+        }
+
+        if ($State.HttpClients.ContainsKey($key)) {
+            return [System.Net.Http.HttpClient] $State.HttpClients[$key].Client
+        }
+
+        if ($null -ne $ClientFactory) {
+            $created = & $ClientFactory $ConnectTimeoutSeconds
+            if ($null -eq $created -or
+                $null -eq $created.PSObject.Properties['Client'] -or
+                $created.Client -isnot [System.Net.Http.HttpClient] -or
+                $null -eq $created.PSObject.Properties['OwnedByGraphKit']) {
+                throw [System.InvalidOperationException]::new(
+                    'The GraphKit HTTP client factory must return Client (HttpClient) and OwnedByGraphKit properties.'
+                )
+            }
+
+            $client = [System.Net.Http.HttpClient] $created.Client
+            $ownedByGraphKit = [bool] $created.OwnedByGraphKit
+        }
+        else {
+            $handler = [System.Net.Http.SocketsHttpHandler]::new()
+            try {
+                $handler.AllowAutoRedirect = $false
+                $handler.UseCookies = $false
+                $handler.PooledConnectionLifetime = [TimeSpan]::FromMinutes(5)
+                $handler.ConnectTimeout = [TimeSpan]::FromSeconds($ConnectTimeoutSeconds)
+
+                # No handler is chained and no DelegatingHandler wraps this client,
+                # so nothing can retry behind GraphKit's back.
+                $client = [System.Net.Http.HttpClient]::new($handler, $true)
+                $handler = $null
+                # GraphKit enforces per-phase timeouts itself; disable HttpClient's
+                # own 100s wall-clock cap so it cannot fire before a configured
+                # phase timeout.
+                $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
+            }
+            finally {
+                if ($null -ne $handler) {
+                    $handler.Dispose()
+                }
+            }
+            $ownedByGraphKit = $true
+        }
+
+        $entry = [pscustomobject] @{
+            Client          = $client
+            OwnedByGraphKit = $ownedByGraphKit
+        }
+        $State.HttpClients.Add($key, $entry)
+        try {
+            $null = Register-GraphModuleOwnedResource -State $State -Resource $client `
+                -OwnedByGraphKit:$ownedByGraphKit
+        }
+        catch {
+            $null = $State.HttpClients.Remove($key)
+            # Register-GraphModuleOwnedResource transfers ownership only on a
+            # successful return. A failed registration leaves this client here
+            # for exactly-once disposal, including a shutdown race.
+            if ($ownedByGraphKit) {
+                $client.Dispose()
+            }
+            throw
+        }
+
+        return $client
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($State.SyncRoot)
+    }
 }
 
 function Send-GraphHttpRequest {
@@ -97,8 +167,29 @@ function Send-GraphHttpRequest {
 
         [switch] $VerifyTenantBinding,
 
-        [scriptblock] $TenantBindingProver
+        [scriptblock] $TenantBindingProver,
+
+        # Private deterministic seams. Production callers use the current
+        # module lifecycle and the GraphKit-owned client factory.
+        [object] $LifecycleState = $script:GraphKitModuleLifecycle,
+
+        [scriptblock] $HttpClientFactory
     )
+
+    $leaseAcquired = $false
+    $lifetimeCts = $null
+    $phaseCts = $null
+    $request = $null
+    $response = $null
+
+    $moduleCancellationToken = Enter-GraphModuleOperation -State $LifecycleState
+    $leaseAcquired = $true
+    try {
+        $lifetimeCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource(
+            $CancellationToken,
+            $moduleCancellationToken
+        )
+        $effectiveCancellationToken = $lifetimeCts.Token
 
     $result = [GraphTransportResult]::new()
     $result.StatusCode = 0
@@ -132,6 +223,29 @@ function Send-GraphHttpRequest {
 
         if ($null -eq $TokenSource) {
             throw 'GraphBearer credential policy requires a token source.'
+        }
+
+        # Legacy PowerShell-class sources cannot execute Acquire safely after a
+        # context crosses runspaces. Check the captured field here, before the
+        # single-flight registry can make this caller wait on an unrelated
+        # leader and before invoking any source method. GraphKit.Auth replaces
+        # this containment with a compiled runspace-neutral source.
+        if ($TokenSource -is [GraphTokenSourceBase]) {
+            $currentRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+            $currentRunspaceId = if ($null -eq $currentRunspace) {
+                [guid]::Empty
+            }
+            else {
+                $currentRunspace.InstanceId
+            }
+            $sourceRunspaceId = ([GraphTokenSourceBase] $TokenSource).CreationRunspaceId
+            if ($currentRunspaceId -ne $sourceRunspaceId) {
+                throw [System.InvalidOperationException]::new(
+                    'This legacy PowerShell token source is bound to the runspace where its context was created. ' +
+                    'Cross-runspace context use is disabled because PowerShell-class token acquisition can hang; ' +
+                    'the compiled GraphKit.Auth token source is required for that contract.'
+                )
+            }
         }
     }
 
@@ -193,18 +307,18 @@ function Send-GraphHttpRequest {
         if ([string]::IsNullOrEmpty($TokenAcquisitionKey)) {
             # Direct private callers and injected tests may not carry a context.
             # Production Invoke-GraphRetry always supplies the canonical tuple.
-            $tokenResult = $TokenSource.Acquire($ForceRefresh, $CancellationToken)
+            $tokenResult = $TokenSource.Acquire($ForceRefresh, $effectiveCancellationToken)
         }
         else {
             $sourceForAcquire = $TokenSource
             $forceForAcquire = $ForceRefresh
-            $cancellationForAcquire = $CancellationToken
+            $cancellationForAcquire = $effectiveCancellationToken
             $flightKey = Get-GraphTokenFlightKey `
                 -AcquisitionKey $TokenAcquisitionKey `
                 -ForceRefresh:$ForceRefresh
             $tokenResult = Invoke-GraphTokenSingleFlight `
                 -Key $flightKey `
-                -CancellationToken $CancellationToken `
+                -CancellationToken $effectiveCancellationToken `
                 -AcquireScript {
                     $sourceForAcquire.Acquire($forceForAcquire, $cancellationForAcquire)
                 }.GetNewClosure()
@@ -262,7 +376,7 @@ function Send-GraphHttpRequest {
                     }
                 }
 
-                & $prover -Context $proofContext -TokenResult $tokenResult -CancellationToken $CancellationToken
+                & $prover -Context $proofContext -TokenResult $tokenResult -CancellationToken $effectiveCancellationToken
             }
 
             if ($null -eq $tokenResult -or
@@ -294,13 +408,13 @@ function Send-GraphHttpRequest {
     }
 
     # ---- Send (one attempt = exactly one physical send) ----
-    $client = Get-GraphHttpClient -ConnectTimeoutSeconds $TimeoutConnectionSeconds
+    $client = Get-GraphHttpClient -State $LifecycleState `
+        -ConnectTimeoutSeconds $TimeoutConnectionSeconds `
+        -ClientFactory $HttpClientFactory
 
     # The connection phase is bounded by the handler ConnectTimeout (set once);
     # header and body phases are bounded via a linked CancellationTokenSource.
-    $phaseCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken)
-
-    $response = $null
+    $phaseCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource($effectiveCancellationToken)
 
     try {
         $phaseCts.CancelAfter([TimeSpan]::FromSeconds($TimeoutHeadersSeconds))
@@ -354,13 +468,44 @@ function Send-GraphHttpRequest {
             $result.StatusCode = 0
         }
     }
-    finally {
-        $phaseCts.Dispose()
-        $request.Dispose()
-        if ($null -ne $response) { $response.Dispose() }
-    }
-
     return $result
+    }
+    finally {
+        # The lease is released last. Stop-GraphModule cannot dispose a cached
+        # client while this sender still owns any request, response or linked
+        # cancellation source associated with that client.
+        try {
+            if ($null -ne $response) {
+                $response.Dispose()
+            }
+        }
+        finally {
+            try {
+                if ($null -ne $request) {
+                    $request.Dispose()
+                }
+            }
+            finally {
+                try {
+                    if ($null -ne $phaseCts) {
+                        $phaseCts.Dispose()
+                    }
+                }
+                finally {
+                    try {
+                        if ($null -ne $lifetimeCts) {
+                            $lifetimeCts.Dispose()
+                        }
+                    }
+                    finally {
+                        if ($leaseAcquired) {
+                            Exit-GraphModuleOperation -State $LifecycleState
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 <#

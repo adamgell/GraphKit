@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancelling the shared work or leaking a disposable wait handle. A cancelled leader is replaced
   only when its own caller token was signalled, and followers adopt shared results through a
   monotonic per-source cache so an older ordinary result cannot overwrite a newer forced refresh.
+- Credential generations now bind the exact canonical PFX byte snapshot, password/material
+  version references, and unambiguous length-prefixed fields. Mutable unversioned vault and
+  subject selectors are isolated per context, relative PFX paths remain bound after a working-
+  directory change, and resolver-owned password/PFX buffers are disposed or zeroed on every path.
+- GraphKit-owned HTTP clients and credential material now share a compiled module-lifecycle
+  coordinator. Removal cancels active work, waits on both operation and cancellation-callback
+  gates, disposes owned resources asynchronously in LIFO order, and remains bounded even when a
+  callback or `Dispose()` implementation does not cooperate; injected resources remain caller-owned.
+- The sender now rejects a legacy PowerShell token source before it crosses into a different
+  runspace, where nested PowerShell-class acquisition can hang. This is fail-fast containment;
+  the compiled, runspace-neutral `GraphKit.Auth` adapter remains the R8 completion gate.
 
 ## [0.3.0] - 2026-08-30
 

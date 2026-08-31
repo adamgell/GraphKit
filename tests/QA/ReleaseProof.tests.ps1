@@ -101,7 +101,7 @@ BeforeAll {
             [string] $PesterResult,
             [int] $Passed = -1,
             [bool] $Executed = $true,
-            [int] $Total = 825
+            [int] $Total = 896
         )
 
         $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('graphkit-release-proof-' + [guid]::NewGuid().ToString('N'))
@@ -257,7 +257,7 @@ BeforeAll {
                     sha256 = (Get-FileHash -LiteralPath $pesterObjectPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 }
                 policy = [pscustomobject] [ordered] @{
-                    minimumTests = 825
+                    minimumTests = 896
                     allowedSkips = 0
                     allowedNotRun = 0
                 }
@@ -469,6 +469,32 @@ Describe 'Canonical tested release proof' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Output | Should -Match 'VERIFIED TESTED RELEASE'
         $result.Output | Should -Match '5 shipped file'
+    }
+
+    It 'accepts package-serializer trimming of terminal release-note line endings' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $manifestPath = Join-Path $script:fixture.ModuleDir 'GraphKit.psd1'
+        $manifestContent = Get-Content -LiteralPath $manifestPath -Raw
+        $manifestContent = $manifestContent.Replace(
+            "ReleaseNotes = 'Fixture release notes.'",
+            'ReleaseNotes = "Fixture release notes.`n`n"'
+        )
+        Set-Content -LiteralPath $manifestPath -Value $manifestContent -NoNewline -Encoding utf8NoBOM
+        Set-GraphKitFixtureArchiveEntryText `
+            -Fixture $script:fixture `
+            -EntryName 'GraphKit.psd1' `
+            -Content $manifestContent
+
+        $proof = Get-Content -LiteralPath $script:fixture.ProofPath -Raw | ConvertFrom-Json
+        ($proof.module.files | Where-Object path -CEQ 'GraphKit.psd1').sha256 =
+            (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $proof | ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $script:fixture.ProofPath -NoNewline -Encoding utf8NoBOM
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'VERIFIED TESTED RELEASE'
     }
 
     It 'rejects changed <Kind> bytes by their shipped relative path' -ForEach @(
@@ -786,7 +812,7 @@ Describe 'Test workflow release-proof generation' {
         $proof.module.name | Should -Be 'GraphKit'
         $proof.module.version | Should -Be '9.9.9'
         @($proof.module.files).Count | Should -Be 5
-        $proof.testRun.summary.total | Should -Be 825
+        $proof.testRun.summary.total | Should -Be 896
         $proof.testRun.summary.notRun | Should -Be 0
         Test-Path -LiteralPath (Join-Path $script:fixture.Root 'output/testResults/candidate-release-input.json') | Should -BeFalse
     }

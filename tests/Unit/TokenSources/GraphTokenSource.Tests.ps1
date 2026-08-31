@@ -7,6 +7,86 @@ BeforeAll {
     }
     $script:BuiltManifest = Join-Path $built.FullName 'GraphKit.psd1'
     Import-Module $script:BuiltManifest -Force
+
+    if ($null -eq ('GraphKit.Tests.ConcurrentApplicationHarness' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace GraphKit.Tests
+{
+    public sealed class ConcurrentApplicationHarness
+    {
+        private static int _factoryCalls;
+
+        public static int FactoryCalls { get { return Volatile.Read(ref _factoryCalls); } }
+
+        public static void Reset()
+        {
+            Interlocked.Exchange(ref _factoryCalls, 0);
+        }
+
+        public static ConcurrentConfidentialApplication Create()
+        {
+            Interlocked.Increment(ref _factoryCalls);
+            Thread.Sleep(400);
+            return new ConcurrentConfidentialApplication();
+        }
+    }
+
+    public sealed class ConcurrentConfidentialApplication
+    {
+        public ConcurrentConfidentialBuilder AcquireTokenForClient(string[] scopes)
+        {
+            return new ConcurrentConfidentialBuilder();
+        }
+    }
+
+    public sealed class ConcurrentConfidentialBuilder
+    {
+        public ConcurrentConfidentialBuilder WithForceRefresh(bool forceRefresh)
+        {
+            return this;
+        }
+
+        public Task<ConcurrentAuthenticationResult> ExecuteAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ConcurrentAuthenticationResult
+            {
+                AccessToken = "single-confidential-app-token",
+                ExpiresOn = DateTimeOffset.UtcNow.AddHours(1)
+            });
+        }
+    }
+
+    public sealed class ConcurrentAuthenticationResult
+    {
+        public string AccessToken { get; set; }
+        public DateTimeOffset ExpiresOn { get; set; }
+    }
+}
+'@
+    }
+
+    function New-ConcurrentHarnessSource {
+        InModuleScope GraphKit {
+            # ScriptBlock.Create keeps the fake itself runspace-neutral; the
+            # legacy source is intentionally created in this parent runspace.
+            $factory = [scriptblock]::Create(
+                '[GraphKit.Tests.ConcurrentApplicationHarness]::Create()'
+            )
+
+            [ConfidentialClientTokenSource]::new(
+                $factory,
+                'Certificate',
+                'https://graph.microsoft.com',
+                'client-id',
+                'generation'
+            )
+        }
+    }
 }
 
 Describe 'GraphTokenSource' {
@@ -74,6 +154,187 @@ Describe 'GraphTokenSource' {
                 { $source.Acquire($true, [System.Threading.CancellationToken]::None) } | Should -Throw
             }
         }
+
+        It 'fails legacy cross-runspace acquisition quickly instead of hanging before GraphKit.Auth cutover' {
+            [GraphKit.Tests.ConcurrentApplicationHarness]::Reset()
+            $ready = [System.Threading.CountdownEvent]::new(2)
+            $go = [System.Threading.ManualResetEventSlim]::new($false)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationReady', $ready)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationGo', $go)
+
+            $source = New-ConcurrentHarnessSource
+            $jobs = $null
+            try {
+                $jobs = @($false, $true) | ForEach-Object {
+                    Start-ThreadJob -ThrottleLimit 2 -ScriptBlock {
+                        param($ForceRefresh, $Manifest, $Source)
+                        Import-Module $Manifest
+                        $ready = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ApplicationReady')
+                        $go = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ApplicationGo')
+                        $null = $ready.Signal()
+                        $null = $go.Wait()
+                        try {
+                            & (Get-Module GraphKit) {
+                                param($TokenSource, [bool] $Refresh)
+                                $null = Send-GraphHttpRequest `
+                                    -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') `
+                                    -Method GET `
+                                    -CredentialPolicy GraphBearer `
+                                    -ExpectedAuthority ([uri] 'https://graph.microsoft.com') `
+                                    -TokenSource $TokenSource `
+                                    -ForceRefresh:$Refresh
+                            } $Source $ForceRefresh
+                            [pscustomobject] @{ Succeeded = $true; Message = $null }
+                        }
+                        catch {
+                            [pscustomobject] @{ Succeeded = $false; Message = $_.Exception.Message }
+                        }
+                    } -ArgumentList $_, $script:BuiltManifest, $source
+                }
+
+                $ready.Wait(15000) | Should -BeTrue
+                $go.Set()
+                $completed = @(Wait-Job -Job $jobs -Timeout 10)
+                $completed.Count | Should -Be 2 -Because 'cross-runspace containment must fail, never hang'
+                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
+                $jobs = $null
+
+                [GraphKit.Tests.ConcurrentApplicationHarness]::FactoryCalls | Should -Be 0
+                $results.Count | Should -Be 2
+                @($results | Where-Object Succeeded).Count | Should -Be 0
+                @($results | Where-Object { $_.Message -notmatch 'bound to the runspace.*GraphKit\.Auth' }).Count |
+                    Should -Be 0
+            }
+            finally {
+                $go.Set()
+                if ($null -ne $jobs) {
+                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                }
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationReady', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationGo', $null)
+                $ready.Dispose()
+                $go.Dispose()
+            }
+        }
+
+        It 'rejects a wrong-runspace sender before it can wait on an existing token flight' {
+            [GraphKit.Tests.ConcurrentApplicationHarness]::Reset()
+            $source = New-ConcurrentHarnessSource
+            $acquisitionKey = 'wrong-runspace-flight-' + [guid]::NewGuid().ToString('N')
+
+            $seed = InModuleScope GraphKit -Parameters @{ AcquisitionKey = $acquisitionKey } {
+                param($AcquisitionKey)
+                $flightKey = Get-GraphTokenFlightKey -AcquisitionKey $AcquisitionKey -ForceRefresh:$false
+                $flight = [GraphTokenFlight]::new()
+                [GraphTokenFlightRegistry]::Flights[$flightKey] = $flight
+                [pscustomobject] @{ Key = $flightKey; Flight = $flight }
+            }
+
+            $job = $null
+            try {
+                $job = Start-ThreadJob -ScriptBlock {
+                    param($Manifest, $Source, $AcquisitionKey)
+                    Import-Module $Manifest
+                    try {
+                        & (Get-Module GraphKit) {
+                            param($TokenSource, $Key)
+                            $null = Send-GraphHttpRequest `
+                                -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') `
+                                -Method GET `
+                                -CredentialPolicy GraphBearer `
+                                -ExpectedAuthority ([uri] 'https://graph.microsoft.com') `
+                                -TokenSource $TokenSource `
+                                -TokenAcquisitionKey $Key
+                        } $Source $AcquisitionKey
+                        'unexpected-success'
+                    }
+                    catch {
+                        $_.Exception.Message
+                    }
+                } -ArgumentList $script:BuiltManifest, $source, $acquisitionKey
+
+                $completed = Wait-Job -Job $job -Timeout 5
+                $completed | Should -Not -BeNullOrEmpty -Because 'preflight must run before waiting on a shared flight'
+                $message = $job | Receive-Job -Wait
+
+                $message | Should -Match 'bound to the runspace.*GraphKit\.Auth'
+                [GraphKit.Tests.ConcurrentApplicationHarness]::FactoryCalls | Should -Be 0
+                $seed.Flight.Completion.Task.IsCompleted | Should -BeFalse
+
+                InModuleScope GraphKit -Parameters @{ FlightKey = $seed.Key; Flight = $seed.Flight } {
+                    param($FlightKey, $Flight)
+                    [GraphTokenFlightRegistry]::Flights.ContainsKey($FlightKey) | Should -BeTrue
+                    [object]::ReferenceEquals([GraphTokenFlightRegistry]::Flights[$FlightKey], $Flight) |
+                        Should -BeTrue
+                }
+            }
+            finally {
+                $null = $seed.Flight.Completion.TrySetResult($null)
+                InModuleScope GraphKit -Parameters @{ FlightKey = $seed.Key; Flight = $seed.Flight } {
+                    param($FlightKey, $Flight)
+                    $current = [GraphTokenFlight] $null
+                    if ([GraphTokenFlightRegistry]::Flights.TryGetValue($FlightKey, [ref] $current) -and
+                        [object]::ReferenceEquals($current, $Flight)) {
+                        $removed = [GraphTokenFlight] $null
+                        $null = [GraphTokenFlightRegistry]::Flights.TryRemove($FlightKey, [ref] $removed)
+                    }
+                }
+                if ($null -ne $job) {
+                    $job | Remove-Job -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        It 'does not poison application initialization when the first factory call fails' {
+            InModuleScope GraphKit {
+                $state = @{ Calls = 0 }
+                $factory = {
+                    $state.Calls++
+                    if ($state.Calls -eq 1) {
+                        throw 'first-application-build-failed'
+                    }
+
+                    $app = [pscustomobject] @{}
+                    $app | Add-Member ScriptMethod AcquireTokenForClient {
+                        param($Scopes)
+                        $null = $Scopes
+                        $builder = [pscustomobject] @{}
+                        $builder | Add-Member ScriptMethod WithForceRefresh { param($Value); $null = $Value; return $this }
+                        $builder | Add-Member ScriptMethod ExecuteAsync {
+                            param($Cancellation)
+                            $null = $Cancellation
+                            $auth = [pscustomobject] @{
+                                AccessToken = 'retry-application-token'
+                                ExpiresOn = [System.DateTimeOffset]::UtcNow.AddHours(1)
+                            }
+                            $task = [pscustomobject] @{ Auth = $auth }
+                            $task | Add-Member ScriptMethod GetAwaiter {
+                                $awaiter = [pscustomobject] @{ Auth = $this.Auth }
+                                $awaiter | Add-Member ScriptMethod GetResult { return $this.Auth }
+                                return $awaiter
+                            }
+                            return $task
+                        }
+                        return $builder
+                    }
+                    return $app
+                }.GetNewClosure()
+
+                $source = [ConfidentialClientTokenSource]::new(
+                    $factory,
+                    'Certificate',
+                    'https://graph.microsoft.com',
+                    'client-id',
+                    'generation'
+                )
+
+                { $null = $source.Acquire($false, [System.Threading.CancellationToken]::None) } |
+                    Should -Throw -ExpectedMessage '*first-application-build-failed*'
+                $source.Acquire($false, [System.Threading.CancellationToken]::None).AccessToken |
+                    Should -Be 'retry-application-token'
+                $state.Calls | Should -Be 2
+            }
+        }
     }
 
     Context 'New-GraphTokenSource factory' {
@@ -91,7 +352,7 @@ Describe 'GraphTokenSource' {
 
                 $cert = New-GraphTokenSource -Profile @{
                     AuthMethod = 'Certificate'; ClientId = $null
-                    Credential = @{ PfxPath = '/tmp/x.pfx'; Password = @{ VaultName = 'v'; SecretName = 'p' } }
+                    Credential = @{ VaultName = 'v'; CertificateName = 'cert'; Version = '1' }
                 } -Cloud $cloud -MsalFactory { throw 'not invoked' }
                 $cert.CanRefresh | Should -BeTrue
                 $cert.AuthMode | Should -Be 'Certificate'
@@ -698,6 +959,338 @@ Describe 'GraphTokenSource' {
                 $ready.Dispose()
                 $go.Dispose()
             }
+        }
+    }
+
+    Context 'Credential generation' {
+
+        It 'is stable for identical PFX bytes and changes when the bytes at the same path change' {
+            $pfxPath = Join-Path $TestDrive 'generation.pfx'
+            [System.IO.File]::WriteAllBytes($pfxPath, [byte[]] @(1, 2, 3, 4))
+
+            $first = InModuleScope GraphKit -Parameters @{ Path = $pfxPath } {
+                param($Path)
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = $Path
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                    }
+                }
+            }
+            $same = InModuleScope GraphKit -Parameters @{ Path = $pfxPath } {
+                param($Path)
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = $Path
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                    }
+                }
+            }
+
+            [System.IO.File]::WriteAllBytes($pfxPath, [byte[]] @(1, 2, 3, 5))
+            $changed = InModuleScope GraphKit -Parameters @{ Path = $pfxPath } {
+                param($Path)
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = $Path
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                    }
+                }
+            }
+
+            $same | Should -Be $first
+            $changed | Should -Not -Be $first
+            $first | Should -Match 'sha256:[0-9a-f]{64}'
+            $first | Should -Not -Match ([regex]::Escape([Convert]::ToBase64String([byte[]] @(1, 2, 3, 4))))
+        }
+
+        It 'changes when only the PFX password secret version changes' {
+            $pfxPath = Join-Path $TestDrive 'password-version.pfx'
+            [System.IO.File]::WriteAllBytes($pfxPath, [byte[]] @(5, 6, 7, 8))
+
+            $v1 = InModuleScope GraphKit -Parameters @{ Path = $pfxPath } {
+                param($Path)
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = $Path
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                    }
+                }
+            }
+            $v2 = InModuleScope GraphKit -Parameters @{ Path = $pfxPath } {
+                param($Path)
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = $Path
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v2' }
+                    }
+                }
+            }
+
+            $v2 | Should -Not -Be $v1
+            $v1 | Should -Match '\|2:v1$'
+            $v2 | Should -Match '\|2:v2$'
+        }
+
+        It 'zeroes the internal PFX snapshot after deriving its generation' {
+            $script:GenerationSnapshotProbe = [byte[]] @(9, 8, 7, 6)
+            Mock Get-GraphPfxSnapshot -ModuleName GraphKit {
+                [pscustomobject] @{
+                    Path = '/canonical/test.pfx'
+                    Bytes = $script:GenerationSnapshotProbe
+                    Sha256 = ('b' * 64)
+                }
+            }
+
+            $generation = InModuleScope GraphKit {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = @{
+                        PfxPath = 'relative/test.pfx'
+                        Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                    }
+                }
+            }
+
+            $generation | Should -Be (
+                "g1|Certificate.PFX|19:/canonical/test.pfx|71:sha256:$('b' * 64)|5:vault|8:password|2:v1"
+            )
+            @($script:GenerationSnapshotProbe | Where-Object { $_ -ne 0 }).Count | Should -Be 0
+        }
+
+        It 'pins a relative PFX path to the canonical path passed into its lazy factory' {
+            $original = Join-Path $TestDrive 'relative-pfx-origin'
+            $elsewhere = Join-Path $TestDrive 'relative-pfx-elsewhere'
+            $null = New-Item -ItemType Directory -Path $original, $elsewhere -Force
+            [System.IO.File]::WriteAllBytes((Join-Path $original 'credential.pfx'), [byte[]] @(1, 3, 3, 7))
+            $script:CapturedPfxFactoryProfile = $null
+
+            Mock New-GraphMsalApplicationFactory -ModuleName GraphKit {
+                param($Profile, $Cloud, $ExpectedCredentialGeneration)
+                $script:CapturedPfxFactoryProfile = $Profile
+                return { throw 'canonical-path capture test must not acquire' }
+            }
+
+            $source = InModuleScope GraphKit -Parameters @{ Origin = $original } {
+                param($Origin)
+                Push-Location $Origin
+                try {
+                    New-GraphTokenSource -Profile @{
+                            TenantId = '00000000-0000-0000-0000-000000000001'
+                            ClientId = '00000000-0000-0000-0000-000000000002'
+                            AuthMethod = 'Certificate'
+                            Credential = @{
+                                PfxPath = 'credential.pfx'
+                                Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                            }
+                        } -Cloud @{
+                            Resource = 'https://graph.microsoft.com'
+                            Authority = 'https://login.microsoftonline.com'
+                        }
+                }
+                finally {
+                    Pop-Location
+                }
+            }
+
+            Push-Location $elsewhere
+            try {
+                $script:CapturedPfxFactoryProfile.Credential.PfxPath | Should -Be (
+                    [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
+                )
+                $source.CredentialGeneration | Should -Match '^g1\|Certificate\.PFX\|.+\|71:sha256:[0-9a-f]{64}\|5:vault\|8:password\|2:v1$'
+            }
+            finally {
+                Pop-Location
+            }
+        }
+
+        It 'changes when a vault-certificate material or password version changes' {
+            $baseProfile = @{
+                AuthMethod = 'Certificate'
+                Credential = @{
+                    VaultName = 'vault'
+                    CertificateName = 'certificate'
+                    Version = 'cert-v1'
+                    Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'password-v1' }
+                }
+            }
+
+            $base = InModuleScope GraphKit -Parameters @{ Profile = $baseProfile } {
+                param($Profile)
+                Get-GraphCredentialGeneration -TenantProfile $Profile
+            }
+            $passwordChanged = $baseProfile.Clone()
+            $passwordChanged.Credential = $baseProfile.Credential.Clone()
+            $passwordChanged.Credential.Password = $baseProfile.Credential.Password.Clone()
+            $passwordChanged.Credential.Password.Version = 'password-v2'
+            $passwordGeneration = InModuleScope GraphKit -Parameters @{ Profile = $passwordChanged } {
+                param($Profile)
+                Get-GraphCredentialGeneration -TenantProfile $Profile
+            }
+            $materialChanged = $baseProfile.Clone()
+            $materialChanged.Credential = $baseProfile.Credential.Clone()
+            $materialChanged.Credential.Version = 'cert-v2'
+            $materialGeneration = InModuleScope GraphKit -Parameters @{ Profile = $materialChanged } {
+                param($Profile)
+                Get-GraphCredentialGeneration -TenantProfile $Profile
+            }
+
+            $passwordGeneration | Should -Not -Be $base
+            $materialGeneration | Should -Not -Be $base
+        }
+
+        It 'fails actionably when a persisted PFX cannot be read for identity' {
+            $missing = Join-Path $TestDrive 'missing.pfx'
+
+            {
+                InModuleScope GraphKit -Parameters @{ Path = $missing } {
+                    param($Path)
+                    Get-GraphCredentialGeneration -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = @{
+                            PfxPath = $Path
+                            Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                        }
+                    }
+                }
+            } | Should -Throw -ExpectedMessage '*PFX*read*'
+        }
+
+        It 'isolates mutable vault selectors per context while versioned references still coalesce' {
+            $cloud = @{ Resource = 'https://graph.microsoft.com'; Authority = 'https://login.microsoftonline.com' }
+            $unversioned = @{
+                TenantId = '00000000-0000-0000-0000-000000000001'
+                ClientId = '00000000-0000-0000-0000-000000000002'
+                AuthMethod = 'ClientSecret'
+                Credential = @{ VaultName = 'vault'; SecretName = 'secret' }
+            }
+            $versioned = $unversioned.Clone()
+            $versioned.Credential = $unversioned.Credential.Clone()
+            $versioned.Credential.Version = 'immutable-v1'
+
+            $generations = InModuleScope GraphKit -Parameters @{
+                Cloud = $cloud
+                Unversioned = $unversioned
+                Versioned = $versioned
+            } {
+                param($Cloud, $Unversioned, $Versioned)
+                $factory = { throw 'generation-only test must not acquire' }
+                [pscustomobject] @{
+                    UnpinnedA = (New-GraphTokenSource -Profile $Unversioned -Cloud $Cloud -MsalFactory $factory).CredentialGeneration
+                    UnpinnedB = (New-GraphTokenSource -Profile $Unversioned -Cloud $Cloud -MsalFactory $factory).CredentialGeneration
+                    PinnedA = (New-GraphTokenSource -Profile $Versioned -Cloud $Cloud -MsalFactory $factory).CredentialGeneration
+                    PinnedB = (New-GraphTokenSource -Profile $Versioned -Cloud $Cloud -MsalFactory $factory).CredentialGeneration
+                }
+            }
+
+            $generations.UnpinnedA | Should -Not -Be $generations.UnpinnedB
+            $generations.UnpinnedA | Should -Match '\|context:[0-9a-f]{32}$'
+            $generations.PinnedA | Should -Be $generations.PinnedB
+            $generations.PinnedA | Should -Be 'g1|ClientSecret|5:vault|6:secret|12:immutable-v1'
+        }
+
+        It 'does not collide when distinct versioned reference fields contain the old delimiter' {
+            $generations = InModuleScope GraphKit {
+                [pscustomobject] @{
+                    First = Get-GraphCredentialGeneration -TenantProfile @{
+                        AuthMethod = 'ClientSecret'
+                        Credential = @{ VaultName = 'a|b'; SecretName = 'c'; Version = 'd' }
+                    }
+                    Second = Get-GraphCredentialGeneration -TenantProfile @{
+                        AuthMethod = 'ClientSecret'
+                        Credential = @{ VaultName = 'a'; SecretName = 'b'; Version = 'c|d' }
+                    }
+                }
+            }
+
+            $generations.First | Should -Not -Be $generations.Second
+            $generations.First | Should -Be 'g1|ClientSecret|3:a|b|1:c|1:d'
+            $generations.Second | Should -Be 'g1|ClientSecret|1:a|1:b|3:c|d'
+        }
+
+        It 'isolates unversioned bearer rotations so old and new tokens cannot share a flight key' {
+            $script:BearerRotationValues = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+            $script:BearerRotationValues.Enqueue('old-bearer')
+            $script:BearerRotationValues.Enqueue('new-bearer')
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                $resolved = $null
+                if (-not $script:BearerRotationValues.TryDequeue([ref] $resolved)) {
+                    throw 'bearer rotation test exhausted its values'
+                }
+                [pscustomobject] @{ Material = $resolved }
+            }
+
+            $result = InModuleScope GraphKit {
+                $profile = @{
+                    TenantId = '00000000-0000-0000-0000-000000000001'
+                    ClientId = '00000000-0000-0000-0000-000000000002'
+                    AuthMethod = 'BearerToken'
+                    Credential = @{ VaultName = 'vault'; SecretName = 'bearer' }
+                }
+                $cloud = @{
+                    Name = 'Global'
+                    Resource = 'https://graph.microsoft.com'
+                    Authority = 'https://login.microsoftonline.com'
+                }
+                $old = New-GraphTokenSource -Profile $profile -Cloud $cloud
+                $new = New-GraphTokenSource -Profile $profile -Cloud $cloud
+                [pscustomobject] @{
+                    OldGeneration = $old.CredentialGeneration
+                    NewGeneration = $new.CredentialGeneration
+                    OldToken = $old.Acquire($false, [System.Threading.CancellationToken]::None).AccessToken
+                    NewToken = $new.Acquire($false, [System.Threading.CancellationToken]::None).AccessToken
+                    OldKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $profile.TenantId `
+                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $profile.ClientId `
+                        -AuthMode BearerToken -Generation $old.CredentialGeneration
+                    NewKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $profile.TenantId `
+                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $profile.ClientId `
+                        -AuthMode BearerToken -Generation $new.CredentialGeneration
+                }
+            }
+
+            $result.OldToken | Should -Be 'old-bearer'
+            $result.NewToken | Should -Be 'new-bearer'
+            $result.OldGeneration | Should -Not -Be $result.NewGeneration
+            $result.OldKey | Should -Not -Be $result.NewKey
+        }
+
+        It 'treats a subject-only store selector and unversioned vault certificate as mutable' {
+            $pinned = InModuleScope GraphKit {
+                [pscustomobject] @{
+                    SubjectOnly = Test-GraphCredentialReferencePinned -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = @{ StoreLocation = 'CurrentUser'; StoreName = 'My'; Subject = 'CN=example' }
+                    }
+                    Thumbprint = Test-GraphCredentialReferencePinned -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = @{ StoreLocation = 'CurrentUser'; StoreName = 'My'; Thumbprint = 'ABC123' }
+                    }
+                    VaultUnversioned = Test-GraphCredentialReferencePinned -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = @{ VaultName = 'vault'; CertificateName = 'cert' }
+                    }
+                    VaultVersioned = Test-GraphCredentialReferencePinned -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = @{
+                            VaultName = 'vault'
+                            CertificateName = 'cert'
+                            Version = 'cert-v1'
+                            Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'password-v1' }
+                        }
+                    }
+                }
+            }
+
+            $pinned.SubjectOnly | Should -BeFalse
+            $pinned.Thumbprint | Should -BeTrue
+            $pinned.VaultUnversioned | Should -BeFalse
+            $pinned.VaultVersioned | Should -BeTrue
         }
     }
 

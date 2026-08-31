@@ -24,6 +24,50 @@ Describe 'Register-GraphTenant' {
         $store.Profiles[0].Credential.SecretName | Should -Be 'acme-secret'
     }
 
+    It 'persists the exact PFX password secret version' {
+        $script:storePath = Join-Path $TestDrive ("profiles-{0}.json" -f [guid]::NewGuid())
+        $pfxPath = Join-Path $TestDrive 'registration.pfx'
+        [System.IO.File]::WriteAllBytes($pfxPath, [byte[]] @(1, 2, 3))
+
+        Register-GraphTenant -ProfileId 'pfx-versioned' -Name 'PFX' -Kind 'lab' `
+            -TenantId $script:tenantId -Environment 'Global' -AuthMethod 'Certificate' `
+            -PfxPath $pfxPath -PfxVaultName 'GraphKit' -PfxSecretName 'pfx-password' `
+            -PfxSecretVersion 'version-2' -StorePath $script:storePath
+
+        $store = InModuleScope GraphKit -Parameters @{ StorePath = $script:storePath } {
+            Get-GraphProfileStore -StorePath $StorePath
+        }
+        $store.Profiles[0].Credential.Password.VaultName | Should -Be 'GraphKit'
+        $store.Profiles[0].Credential.Password.SecretName | Should -Be 'pfx-password'
+        $store.Profiles[0].Credential.Password.Version | Should -Be 'version-2'
+    }
+
+    It 'persists an encrypted vault-certificate password reference and requires a complete pair' {
+        $script:storePath = Join-Path $TestDrive ("profiles-{0}.json" -f [guid]::NewGuid())
+
+        Register-GraphTenant -ProfileId 'vault-cert' -Name 'Vault cert' -Kind 'lab' `
+            -TenantId $script:tenantId -Environment 'Global' -AuthMethod 'Certificate' `
+            -VaultName 'GraphKit' -CertificateName 'certificate-pfx' -CertificateVersion 'cert-v2' `
+            -CertificatePasswordVaultName 'GraphKit' -CertificatePasswordSecretName 'certificate-password' `
+            -CertificatePasswordVersion 'password-v3' -StorePath $script:storePath
+
+        $store = InModuleScope GraphKit -Parameters @{ StorePath = $script:storePath } {
+            Get-GraphProfileStore -StorePath $StorePath
+        }
+        $store.Profiles[0].Credential.Version | Should -Be 'cert-v2'
+        $store.Profiles[0].Credential.Password.VaultName | Should -Be 'GraphKit'
+        $store.Profiles[0].Credential.Password.SecretName | Should -Be 'certificate-password'
+        $store.Profiles[0].Credential.Password.Version | Should -Be 'password-v3'
+
+        $invalidStore = Join-Path $TestDrive ("profiles-{0}.json" -f [guid]::NewGuid())
+        {
+            Register-GraphTenant -ProfileId 'invalid-vault-cert' -Name 'Invalid' -Kind 'lab' `
+                -TenantId $script:tenantId -Environment 'Global' -AuthMethod 'Certificate' `
+                -VaultName 'GraphKit' -CertificateName 'certificate-pfx' `
+                -CertificatePasswordVaultName 'GraphKit' -StorePath $invalidStore
+        } | Should -Throw -ExpectedMessage '*must include both*'
+    }
+
     It 'rejects an injected certificate object' {
         $script:storePath = Join-Path $TestDrive ("profiles-{0}.json" -f [guid]::NewGuid())
         $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new()

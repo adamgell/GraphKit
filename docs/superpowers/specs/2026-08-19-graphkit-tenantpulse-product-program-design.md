@@ -430,6 +430,11 @@ does not turn all Detail or reason fields into empty strings.
 
 ### R8: GraphKit.Auth
 
+**Current status:** active and incomplete. The post-`0.3.0` source rejects legacy PowerShell token
+sources that cross runspaces because the nested class path can hang. Lifecycle and credential-
+generation hardening are prerequisites, but that containment is not the compiled adapter and does
+not satisfy this milestone.
+
 - Define GraphKit-owned auth request and result types.
 - Build and package the isolated adapter reproducibly.
 - Implement certificate, client-secret, managed-identity, and fixed-bearer token sources behind

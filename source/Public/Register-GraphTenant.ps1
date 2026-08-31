@@ -49,7 +49,10 @@ function Register-GraphTenant {
         token value, depending on AuthMethod.
 
     .PARAMETER SecretVersion
-        Optional SecretManagement version of the client secret or bearer token.
+        Optional version metadata for the client secret or bearer token. The
+        pinned SecretManagement 1.1.2 Get-Secret API has no Version parameter,
+        so such a profile fails before vault access today. Use a distinct secret
+        name for each immutable generation with the supported provider.
 
     .PARAMETER PfxPath
         The path to a PFX certificate file (Certificate AuthMethod, PFX shape).
@@ -60,12 +63,34 @@ function Register-GraphTenant {
     .PARAMETER PfxSecretName
         The secret name holding the PFX password within that vault (PFX shape).
 
+    .PARAMETER PfxSecretVersion
+        Optional version metadata for the PFX password secret. The pinned
+        SecretManagement 1.1.2 Get-Secret API cannot resolve it; use a distinct
+        password secret name for each immutable generation today.
+
     .PARAMETER CertificateName
         The vault certificate name (Certificate AuthMethod, vault-material
         shape).
 
     .PARAMETER CertificateVersion
-        Optional SecretManagement version of the vault certificate material.
+        Optional version metadata for vault certificate material. The pinned
+        SecretManagement 1.1.2 Get-Secret API cannot resolve it; use a distinct
+        certificate secret name for each immutable generation today.
+
+    .PARAMETER CertificatePasswordVaultName
+        Optional SecretManagement vault holding the password for encrypted
+        vault certificate material. Supply it together with
+        CertificatePasswordSecretName.
+
+    .PARAMETER CertificatePasswordSecretName
+        Optional secret name holding the password for encrypted vault
+        certificate material. Supply it together with
+        CertificatePasswordVaultName.
+
+    .PARAMETER CertificatePasswordVersion
+        Optional version metadata for the vault-certificate password. The
+        pinned SecretManagement 1.1.2 Get-Secret API cannot resolve it; use a
+        distinct password secret name for each immutable generation today.
 
     .PARAMETER StoreLocation
         The certificate store location (Windows only) for a store-lookup
@@ -117,6 +142,9 @@ function Register-GraphTenant {
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePasswordVaultName', Justification = 'This value is a SecretManagement vault selector, not credential material.')]
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePasswordSecretName', Justification = 'This value is a SecretManagement secret-name selector, not credential material.')]
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePasswordVersion', Justification = 'This value is immutable generation metadata, not credential material.')]
     param(
         [Parameter(Mandatory, Position = 0)]
         [string] $ProfileId,
@@ -153,9 +181,17 @@ function Register-GraphTenant {
 
         [string] $PfxSecretName,
 
+        [string] $PfxSecretVersion,
+
         [string] $CertificateName,
 
         [string] $CertificateVersion,
+
+        [string] $CertificatePasswordVaultName,
+
+        [string] $CertificatePasswordSecretName,
+
+        [string] $CertificatePasswordVersion,
 
         [string] $StoreLocation,
 
@@ -219,12 +255,29 @@ function Register-GraphTenant {
                 if ([string]::IsNullOrEmpty($PfxSecretName)) { throw "Certificate PFX requires -PfxSecretName." }
                 $credential = @{
                     PfxPath  = $PfxPath
-                    Password = @{ VaultName = $PfxVaultName; SecretName = $PfxSecretName }
+                    Password = @{
+                        VaultName  = $PfxVaultName
+                        SecretName = $PfxSecretName
+                        Version    = $PfxSecretVersion
+                    }
                 }
             }
             elseif ($hasVaultCert) {
                 if ([string]::IsNullOrEmpty($VaultName)) { throw "Vault certificate material requires -VaultName." }
                 $credential = @{ VaultName = $VaultName; CertificateName = $CertificateName; Version = $CertificateVersion }
+
+                $hasPasswordVault = -not [string]::IsNullOrEmpty($CertificatePasswordVaultName)
+                $hasPasswordName = -not [string]::IsNullOrEmpty($CertificatePasswordSecretName)
+                if ($hasPasswordVault -ne $hasPasswordName) {
+                    throw 'Vault certificate password parameters must include both -CertificatePasswordVaultName and -CertificatePasswordSecretName.'
+                }
+                if ($hasPasswordVault) {
+                    $credential.Password = @{
+                        VaultName  = $CertificatePasswordVaultName
+                        SecretName = $CertificatePasswordSecretName
+                        Version    = $CertificatePasswordVersion
+                    }
+                }
             }
             elseif ($hasStore) {
                 # Windows-only, declared as such; never the sole supported shape.
