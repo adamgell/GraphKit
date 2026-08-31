@@ -482,6 +482,22 @@ string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE
         New-R8InternalHelperFixture -CaptureSentinel
     }
 
+    function New-R8RepositoryRootAlias {
+        param(
+            [Parameter(Mandatory)] [string] $Target,
+            [Parameter(Mandatory)] [string] $Alias
+        )
+
+        if ($IsWindows) {
+            $null = New-Item -ItemType Junction -Path $Alias -Target $Target
+        }
+        else {
+            $null = New-Item -ItemType SymbolicLink -Path $Alias -Target $Target
+        }
+
+        return (Get-Item -LiteralPath $Alias -Force).FullName
+    }
+
     $script:ambientCaptureSource = @'
 using System;
 using System.IO;
@@ -613,6 +629,36 @@ $source
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires'
         $result.Output | Should -Match 'exactly one exact raw inventory record'
+    }
+
+    It 'binds a physically internal proof helper when RepositoryRoot is a Unix symlink or Windows junction alias' {
+        $fixture = New-R8InternalHelperFixture
+        $rootAlias = New-R8RepositoryRootAlias -Target $fixture.Root -Alias (Join-Path $TestDrive ('repository-alias-' + [guid]::NewGuid().ToString('N')))
+        $shimDirectory = New-R8PortableGitShim -Mode helper-case-alias -Configuration @{
+            CanonicalPath = 'scripts/private/GraphKit.SourceCapture.cs'
+            AliasPath = 'Scripts/private/GraphKit.SourceCapture.cs'
+        }
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $rootAlias -VersionScript $fixture.VersionScript
+        }
+        finally { $env:PATH = $savedPath }
+
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires'
+        $result.Output | Should -Match 'exactly one exact raw inventory record'
+    }
+
+    It 'allows a genuinely external proof helper when RepositoryRoot is a filesystem alias' {
+        $root = New-R8TrainVersionFixture
+        $rootAlias = New-R8RepositoryRootAlias -Target $root -Alias (Join-Path $TestDrive ('external-helper-alias-' + [guid]::NewGuid().ToString('N')))
+
+        $result = Get-R8TrainVersion -RepositoryRoot $rootAlias -VersionScript $script:versionScript
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Output.Trim() | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
     }
 
     It 'fails on unmerged index stage <Stage> before invoking worktree capture' -ForEach @(
@@ -1004,8 +1050,8 @@ $source
         }
         finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state.sourceStateSha256 | Should -Be '8acdbeded33e8b41799dadced367401212cdcd6cb6ed3424ea9c82a003326bd0'
-        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d8acdbeded33e$'
+        $state.sourceStateSha256 | Should -Be '514a2ebe272e5d6e099617f784559b6056f8f8b2600a203ad777df08cbe605ec'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d514a2ebe272e$'
     }
 }
 

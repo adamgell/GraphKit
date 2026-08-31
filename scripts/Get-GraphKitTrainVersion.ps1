@@ -79,9 +79,39 @@ function Get-GraphKitRelativePath { param([byte[]] $RawPath, [Text.UTF8Encoding]
     return $path
 }
 
+function Resolve-GraphKitPhysicalPath { param([string] $Path)
+    $pathComparer = if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $visitedLinks = [Collections.Generic.HashSet[string]]::new($pathComparer)
+
+    function Resolve-GraphKitExistingPathComponents { param([string] $FullPath, $VisitedLinks)
+        $fullPath = [IO.Path]::GetFullPath($FullPath)
+        $root = [IO.Path]::GetPathRoot($fullPath)
+        if ([string]::IsNullOrEmpty($root)) { throw "Cannot resolve physical path '$FullPath' without a filesystem root." }
+        $separators = [char[]] @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $segments = $fullPath.Substring($root.Length).Split($separators, [StringSplitOptions]::RemoveEmptyEntries)
+        $current = $root
+        foreach ($segment in $segments) {
+            $candidate = [IO.Path]::Combine($current, $segment)
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            $target = $item.ResolveLinkTarget($true)
+            if ($null -ne $target) {
+                $linkPath = [IO.Path]::GetFullPath($item.FullName)
+                if (-not $VisitedLinks.Add($linkPath)) { throw "Filesystem link cycle detected while resolving '$Path'." }
+                $current = Resolve-GraphKitExistingPathComponents ([IO.Path]::GetFullPath($target.FullName)) $VisitedLinks
+            }
+            else {
+                $current = [IO.Path]::GetFullPath($item.FullName)
+            }
+        }
+        return $current
+    }
+
+    return Resolve-GraphKitExistingPathComponents ([IO.Path]::GetFullPath($Path)) $visitedLinks
+}
+
 function Get-GraphKitProofBoundHelperInventoryPath { param([string] $Root, [string] $Helper, [Text.UTF8Encoding] $Utf8)
-    $rootPath = [IO.Path]::GetFullPath($Root)
-    $helperPath = [IO.Path]::GetFullPath($Helper)
+    $rootPath = Resolve-GraphKitPhysicalPath $Root
+    $helperPath = Resolve-GraphKitPhysicalPath $Helper
     $relative = [IO.Path]::GetRelativePath($rootPath, $helperPath)
     if ([IO.Path]::IsPathRooted($relative) -or
         $relative -eq '..' -or
@@ -218,4 +248,4 @@ function Get-GraphKitR8SourceState { param([string] $Root)
     [pscustomobject]@{revision=$before.headOid;clean=[bool]$clean;sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream.ToArray())).ToLowerInvariant()}
 }
 
-$RepositoryRoot=(Resolve-Path -LiteralPath $RepositoryRoot).ProviderPath;$base='0.4.0';$train='r8';$state=Get-GraphKitR8SourceState $RepositoryRoot;$revision=$state.revision;$version="$base-$train.g$($revision.Substring(0,12))$(if($state.clean){''}else{".d$($state.sha256.Substring(0,12))"})";if($AsObject){[pscustomobject][ordered]@{version=$version;baseVersion=$base;train=$train;revision=$revision;clean=[bool]$state.clean;sourceStateSha256=$state.sha256}}else{$version}
+$RepositoryRoot=Resolve-GraphKitPhysicalPath (Resolve-Path -LiteralPath $RepositoryRoot).ProviderPath;$base='0.4.0';$train='r8';$state=Get-GraphKitR8SourceState $RepositoryRoot;$revision=$state.revision;$version="$base-$train.g$($revision.Substring(0,12))$(if($state.clean){''}else{".d$($state.sha256.Substring(0,12))"})";if($AsObject){[pscustomobject][ordered]@{version=$version;baseVersion=$base;train=$train;revision=$revision;clean=[bool]$state.clean;sourceStateSha256=$state.sha256}}else{$version}
