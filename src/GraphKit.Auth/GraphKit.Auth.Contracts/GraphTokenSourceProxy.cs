@@ -2,9 +2,12 @@ namespace GraphKit.Auth;
 
 internal sealed class GraphTokenSourceProxy : IGraphTokenSource
 {
+    private readonly TaskCompletionSource<GraphAuthException?> _disposalCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private IGraphTokenSource? _inner;
     private IGraphTokenSource? _retiredInner;
     private GraphAuthHost? _owner;
+    private WeakReference<GraphAuthHost>? _retirementOwner;
     private int _activeOperations;
     private int _disposeState;
     private int _hostNotificationState;
@@ -47,26 +50,33 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
 
     public void Dispose()
     {
+        Task<GraphAuthException?> completion = StartDisposal();
+        if (completion.IsCompletedSuccessfully &&
+            completion.Result is GraphAuthException failure)
+        {
+            throw failure;
+        }
+    }
+
+    internal Task<GraphAuthException?> DisposeForHostAsync() => StartDisposal();
+
+    private Task<GraphAuthException?> StartDisposal()
+    {
         if (Interlocked.CompareExchange(ref _disposeState, 1, 0) != 0)
         {
-            return;
+            return _disposalCompletion.Task;
         }
 
         GraphAuthHost? owner = Interlocked.Exchange(ref _owner, null);
+        if (owner is not null)
+        {
+            Volatile.Write(ref _retirementOwner, new WeakReference<GraphAuthHost>(owner));
+        }
+
         IGraphTokenSource? inner = Interlocked.Exchange(ref _inner, null);
         Volatile.Write(ref _retiredInner, inner);
-        try
-        {
-            DisposeRetiredInnerWhenIdle();
-        }
-        finally
-        {
-            if (owner is not null &&
-                Interlocked.CompareExchange(ref _hostNotificationState, 1, 0) == 0)
-            {
-                owner.Unregister(this);
-            }
-        }
+        DisposeRetiredInnerWhenIdle();
+        return _disposalCompletion.Task;
     }
 
     private TResult Read<TResult>(Func<IGraphTokenSource, TResult> reader)
@@ -129,7 +139,49 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
             return;
         }
 
-        Interlocked.Exchange(ref _retiredInner, null)?.Dispose();
+        IGraphTokenSource? retired = Interlocked.Exchange(ref _retiredInner, null);
+        if (retired is null)
+        {
+            return;
+        }
+
+        GraphAuthException? failure = null;
+        try
+        {
+            retired.Dispose();
+        }
+        catch
+        {
+            failure = CreateProviderDisposalFailure();
+        }
+
+        NotifyHost(failure);
+        _disposalCompletion.TrySetResult(failure);
+    }
+
+    private void NotifyHost(GraphAuthException? failure)
+    {
+        WeakReference<GraphAuthHost>? retirementOwner = Interlocked.Exchange(
+            ref _retirementOwner,
+            null);
+        if (Interlocked.CompareExchange(ref _hostNotificationState, 1, 0) != 0 ||
+            retirementOwner is null ||
+            !retirementOwner.TryGetTarget(out GraphAuthHost? owner))
+        {
+            return;
+        }
+
+        owner.CompleteSourceDisposal(this, failure);
+    }
+
+    private static GraphAuthException CreateProviderDisposalFailure()
+    {
+        return new GraphAuthException(
+            "provider_disposal_failed",
+            "ProviderLifecycle",
+            "The isolated GraphKit.Auth provider failed while disposing a token source.",
+            retryAfter: null,
+            correlationId: null);
     }
 
     private sealed class ProxyOperation : IDisposable

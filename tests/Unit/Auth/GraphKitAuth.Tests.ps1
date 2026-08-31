@@ -303,12 +303,44 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
         {
             File.AppendAllText(_disposeMarker, "disposed" + Environment.NewLine);
         }
+
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_FAILURE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            throw new ProviderOwnedDisposeException();
+        }
     }
 
     internal static bool WaitForBlockedAcquire(TimeSpan timeout) =>
         BlockedAcquireEntered.Wait(timeout);
 
     internal static void ReleaseBlockedAcquire() => BlockedAcquireRelease.Set();
+}
+
+internal sealed class ProviderOwnedDisposeException : Exception
+{
+    internal const string ForbiddenMessage = "isolated-provider-disposal-sensitive-detail";
+
+    internal ProviderOwnedDisposeException()
+        : base(ForbiddenMessage, new ProviderOwnedInnerException())
+    {
+        Data["isolated-provider-data"] = new ProviderOwnedData();
+    }
+}
+
+internal sealed class ProviderOwnedInnerException : Exception
+{
+    internal ProviderOwnedInnerException()
+        : base("isolated-provider-inner-sensitive-detail")
+    {
+    }
+}
+
+internal sealed class ProviderOwnedData
+{
+    public override string ToString() => "isolated-provider-data-sensitive-detail";
 }
 '@
         if (-not [string]::IsNullOrWhiteSpace($PublicSurfaceDeclaration)) {
@@ -406,9 +438,14 @@ public sealed class Counterfeit
         $escapedContractsPath = [System.Security.SecurityElement]::Escape($script:contractsPath)
         Set-Content -LiteralPath $sourcePath -NoNewline -Encoding utf8NoBOM -Value @'
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -502,6 +539,8 @@ public static class GraphKitAuthRuntimeHarness
             ?? throw new InvalidOperationException("Host shutdown source was not found."));
         var stateField = typeof(GraphAuthHost).GetField("_state", privateInstance)
             ?? throw new InvalidOperationException("Host state field was not found.");
+        var shutdownTaskField = typeof(GraphAuthHost).GetField("_shutdownTask", privateInstance)
+            ?? throw new InvalidOperationException("Host shutdown-task field was not found.");
         Type proxyType = source.GetType();
         var innerField = proxyType.GetField("_inner", privateInstance)
             ?? throw new InvalidOperationException("Proxy inner field was not found.");
@@ -532,9 +571,15 @@ public static class GraphKitAuthRuntimeHarness
 
         using var callbackEntered = new ManualResetEventSlim(false);
         using var releaseCallback = new ManualResetEventSlim(false);
+        bool completionPlaceholderPublishedBeforeCallback = false;
+        bool reentrantDisposeReturned = false;
         using CancellationTokenRegistration registration = shutdown.Token.Register(() =>
         {
             callbackEntered.Set();
+            completionPlaceholderPublishedBeforeCallback =
+                shutdownTaskField.GetValue(host) is Task;
+            host.Dispose();
+            reentrantDisposeReturned = true;
             if (!releaseCallback.Wait(TimeSpan.FromSeconds(10)))
             {
                 throw new TimeoutException("The blocked cancellation callback was not released.");
@@ -615,6 +660,8 @@ public static class GraphKitAuthRuntimeHarness
             OwnerCompletedBeforeCallbackRelease = ownerCompletedBeforeCallbackRelease,
             NonOwnerCompletedBeforeCallbackRelease = nonOwnerCompletedBeforeCallbackRelease,
             OwnerElapsedMilliseconds = ownerElapsedMilliseconds,
+            CompletionPlaceholderPublishedBeforeCallback = completionPlaceholderPublishedBeforeCallback,
+            ReentrantDisposeReturned = reentrantDisposeReturned,
             StateWhileCallbackBlocked = stateWhileCallbackBlocked,
             DisposeCountWhileCallbackBlocked = disposeCountWhileCallbackBlocked,
             ProxyInnerPresentWhileCallbackBlocked = proxyInnerPresentWhileCallbackBlocked,
@@ -626,6 +673,258 @@ public static class GraphKitAuthRuntimeHarness
             ProxyInnerCleared = innerField.GetValue(source) is null,
             ProxyOwnerCleared = ownerField.GetValue(source) is null
         });
+    }
+
+    public static string ImmediateDisposalFailure(
+        GraphAuthHost host,
+        IGraphTokenSource source,
+        string disposeMarker)
+    {
+        BindingFlags privateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        Type hostType = typeof(GraphAuthHost);
+        Type proxyType = source.GetType();
+        var innerField = proxyType.GetField("_inner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy inner field was not found.");
+        var ownerField = proxyType.GetField("_owner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy owner field was not found.");
+        WeakReference weakReference = host.LoadContextWeakReference;
+
+        string firstFailure = CaptureFailure(host.Dispose);
+        Task shutdownTask = (Task)(hostType.GetField("_shutdownTask", privateInstance)?.GetValue(host)
+            ?? throw new InvalidOperationException("Host shutdown task was not published."));
+        string taskFailure = DescribeFailure(shutdownTask.Exception);
+        string repeatedFailure = CaptureFailure(host.Dispose);
+
+        ForceCollection(weakReference);
+        return JsonSerializer.Serialize(new
+        {
+            FirstFailure = firstFailure,
+            TaskFailure = taskFailure,
+            RepeatedFailure = repeatedFailure,
+            DisposeCount = File.Exists(disposeMarker)
+                ? File.ReadAllLines(disposeMarker).Length
+                : 0,
+            ProxyInnerCleared = innerField.GetValue(source) is null,
+            ProxyOwnerCleared = ownerField.GetValue(source) is null,
+            HostProviderReferencesCleared = HostProviderReferencesAreCleared(host, privateInstance),
+            LoadContextAliveWhileHostAndTaskReferenced = weakReference.IsAlive
+        });
+    }
+
+    public static string DeferredDisposalFailure(
+        GraphAuthHost host,
+        IGraphTokenSource source,
+        string disposeMarker)
+    {
+        BindingFlags privateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        WeakReference weakReference = host.LoadContextWeakReference;
+        object deferred = RunDeferredDisposal(host, source, privateInstance);
+
+        Task shutdownTask = (Task)(typeof(GraphAuthHost)
+            .GetField("_shutdownTask", privateInstance)?.GetValue(host)
+            ?? throw new InvalidOperationException("Host shutdown task was not published."));
+        if (!SpinWait.SpinUntil(() => shutdownTask.IsCompleted, TimeSpan.FromSeconds(5)))
+        {
+            throw new TimeoutException("Deferred shutdown completion was not published after the acquisition left.");
+        }
+
+        string laterFailure = CaptureFailure(host.Dispose);
+        string repeatedFailure = CaptureFailure(host.Dispose);
+        string taskFailure = DescribeFailure(shutdownTask.Exception);
+        Type proxyType = source.GetType();
+        var innerField = proxyType.GetField("_inner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy inner field was not found.");
+        var retiredInnerField = proxyType.GetField("_retiredInner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy retired-inner field was not found.");
+        var ownerField = proxyType.GetField("_owner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy owner field was not found.");
+
+        ForceCollection(weakReference);
+        return JsonSerializer.Serialize(new
+        {
+            Deferred = deferred,
+            LaterFailure = laterFailure,
+            RepeatedFailure = repeatedFailure,
+            TaskFailure = taskFailure,
+            DisposeCount = File.Exists(disposeMarker)
+                ? File.ReadAllLines(disposeMarker).Length
+                : 0,
+            ProxyInnerCleared = innerField.GetValue(source) is null,
+            ProxyRetiredInnerCleared = retiredInnerField.GetValue(source) is null,
+            ProxyOwnerCleared = ownerField.GetValue(source) is null,
+            HostProviderReferencesCleared = HostProviderReferencesAreCleared(host, privateInstance),
+            LoadContextAliveWhileHostAndTaskReferenced = weakReference.IsAlive
+        });
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static object RunDeferredDisposal(
+        GraphAuthHost host,
+        IGraphTokenSource source,
+        BindingFlags privateInstance)
+    {
+        Type proxyType = source.GetType();
+        var innerField = proxyType.GetField("_inner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy inner field was not found.");
+        var retiredInnerField = proxyType.GetField("_retiredInner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy retired-inner field was not found.");
+        object inner = innerField.GetValue(source)
+            ?? throw new InvalidOperationException("Proxy inner source was not found.");
+        BindingFlags providerControlFlags = BindingFlags.Static | BindingFlags.NonPublic;
+        MethodInfo waitForAcquire = inner.GetType().GetMethod(
+            "WaitForBlockedAcquire",
+            providerControlFlags)
+            ?? throw new InvalidOperationException("Provider acquire wait control was not found.");
+        MethodInfo releaseAcquire = inner.GetType().GetMethod(
+            "ReleaseBlockedAcquire",
+            providerControlFlags)
+            ?? throw new InvalidOperationException("Provider acquire release control was not found.");
+
+        Task<GraphTokenResult> acquire = Task.Factory.StartNew(
+            () => source.Acquire(false, CancellationToken.None),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        if (waitForAcquire.Invoke(null, new object[] { TimeSpan.FromSeconds(5) }) is not true)
+        {
+            releaseAcquire.Invoke(null, null);
+            throw new TimeoutException("The provider acquisition did not enter its blocked section.");
+        }
+
+        Task owner = Task.Factory.StartNew(
+            host.Dispose,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        bool ownerReturnedWithinDeadline = owner.Wait(TimeSpan.FromSeconds(2));
+        bool retiredInnerPresentWhileAcquireBlocked =
+            SpinWait.SpinUntil(
+                () => retiredInnerField.GetValue(source) is not null,
+                TimeSpan.FromSeconds(5));
+        bool loadContextAliveWhileAcquireBlocked = host.LoadContextWeakReference.IsAlive;
+        releaseAcquire.Invoke(null, null);
+        string acquireFailure = CaptureTaskFailure(acquire);
+        if (!owner.Wait(TimeSpan.FromSeconds(5)))
+        {
+            throw new TimeoutException("The initial bounded Dispose caller did not return.");
+        }
+
+        return new
+        {
+            OwnerReturnedWithinDeadline = ownerReturnedWithinDeadline,
+            RetiredInnerPresentWhileAcquireBlocked = retiredInnerPresentWhileAcquireBlocked,
+            LoadContextAliveWhileAcquireBlocked = loadContextAliveWhileAcquireBlocked,
+            AcquireFailure = acquireFailure
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string CaptureTaskFailure(Task task)
+    {
+        try
+        {
+            task.GetAwaiter().GetResult();
+            return string.Empty;
+        }
+        catch (Exception exception)
+        {
+            return DescribeFailure(exception);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string CaptureFailure(Action action)
+    {
+        try
+        {
+            action();
+            return string.Empty;
+        }
+        catch (Exception exception)
+        {
+            return DescribeFailure(exception);
+        }
+    }
+
+    private static string DescribeFailure(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return string.Empty;
+        }
+
+        var description = new StringBuilder();
+        AppendFailure(exception, description, new HashSet<Exception>());
+        return description.ToString();
+    }
+
+    private static void AppendFailure(
+        Exception exception,
+        StringBuilder description,
+        HashSet<Exception> visited)
+    {
+        if (!visited.Add(exception))
+        {
+            return;
+        }
+
+        Type type = exception.GetType();
+        description.Append("type=").Append(type.FullName)
+            .Append(";assembly=").Append(type.Assembly.GetName().Name)
+            .Append(";alc=").Append(AssemblyLoadContext.GetLoadContext(type.Assembly)?.Name)
+            .Append(";message=").Append(exception.Message)
+            .Append(";stack=").Append(exception.StackTrace)
+            .Append(";dataCount=").Append(exception.Data.Count);
+        if (exception is GraphAuthException graphAuthException)
+        {
+            description.Append(";code=").Append(graphAuthException.Code)
+                .Append(";category=").Append(graphAuthException.Category)
+                .Append(";correlation=").Append(graphAuthException.CorrelationId)
+                .Append(";retryAfter=").Append(graphAuthException.RetryAfter);
+        }
+
+        foreach (DictionaryEntry item in exception.Data)
+        {
+            description.Append(";dataKeyType=").Append(item.Key?.GetType().AssemblyQualifiedName)
+                .Append(";dataKey=").Append(item.Key)
+                .Append(";dataValueType=").Append(item.Value?.GetType().AssemblyQualifiedName)
+                .Append(";dataValue=").Append(item.Value);
+        }
+
+        description.AppendLine();
+        if (exception is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions)
+            {
+                AppendFailure(inner, description, visited);
+            }
+        }
+        else if (exception.InnerException is not null)
+        {
+            AppendFailure(exception.InnerException, description, visited);
+        }
+    }
+
+    private static bool HostProviderReferencesAreCleared(
+        GraphAuthHost host,
+        BindingFlags privateInstance)
+    {
+        Type hostType = typeof(GraphAuthHost);
+        return hostType.GetField("_factory", privateInstance)?.GetValue(host) is null &&
+            hostType.GetField("_factoryType", privateInstance)?.GetValue(host) is null &&
+            hostType.GetField("_providerAssembly", privateInstance)?.GetValue(host) is null &&
+            hostType.GetField("_loadContext", privateInstance)?.GetValue(host) is null;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ForceCollection(WeakReference weakReference)
+    {
+        for (int attempt = 0; attempt < 30 && weakReference.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
     }
 }
 '@
@@ -697,6 +996,7 @@ public static class GraphKitAuthRuntimeHarness
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>CS8625</NoWarn>
     <Deterministic>true</Deterministic>
     <DebugType>none</DebugType>
   </PropertyGroup>
@@ -940,7 +1240,7 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         param(
             [Parameter(Mandatory)] [string] $ContractsPath,
             [string] $PayloadRoot,
-            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'SamePathReplacement')] [string] $Scenario,
+            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'ImmediateDisposalFailure', 'DeferredDisposalFailure', 'SamePathReplacement')] [string] $Scenario,
             [string] $DisposeMarker,
             [string] $ReplacementContractsPath,
             [string] $PreloadPath,
@@ -1123,6 +1423,33 @@ switch ($Scenario) {
         $data | Add-Member -NotePropertyName LoadContextAlive -NotePropertyValue $weakReference.IsAlive
         $data | ConvertTo-Json -Compress
     }
+    'ImmediateDisposalFailure' {
+        $env:GRAPHKIT_AUTH_TEST_DISPOSE_MARKER = $DisposeMarker
+        $env:GRAPHKIT_AUTH_TEST_DISPOSE_FAILURE = '1'
+        $authHost = [GraphKit.Auth.GraphAuthHost]::new(
+            $PayloadRoot,
+            [version]'1.0.0.0',
+            [timespan]::FromSeconds(2))
+        $source = $authHost.CreateSource((New-ValidRequest))
+        [GraphKitAuthRuntimeHarness]::ImmediateDisposalFailure(
+            $authHost,
+            $source,
+            $DisposeMarker)
+    }
+    'DeferredDisposalFailure' {
+        $env:GRAPHKIT_AUTH_TEST_DISPOSE_MARKER = $DisposeMarker
+        $env:GRAPHKIT_AUTH_TEST_DISPOSE_FAILURE = '1'
+        $env:GRAPHKIT_AUTH_TEST_BLOCK_ACQUIRE = '1'
+        $authHost = [GraphKit.Auth.GraphAuthHost]::new(
+            $PayloadRoot,
+            [version]'1.0.0.0',
+            [timespan]::FromMilliseconds(125))
+        $source = $authHost.CreateSource((New-ValidRequest))
+        [GraphKitAuthRuntimeHarness]::DeferredDisposalFailure(
+            $authHost,
+            $source,
+            $DisposeMarker)
+    }
     'SamePathReplacement' {
         $residentMvid = [GraphKit.Auth.GraphAuthHost].Assembly.ManifestModule.ModuleVersionId.ToString('D')
         [IO.File]::Copy(
@@ -1224,31 +1551,44 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
         @($script:contractsInspection.Data.Leaks) | Should -BeNullOrEmpty -Because 'no MSAL type may cross the GraphKit-owned ABI boundary'
     }
 
-    It 'detects an enum underlying-type mutation in the ABI snapshot metadata' {
+    It 'rejects an enum underlying-type mutation through the literal ABI-v1 gate' {
         $mutatedPath = New-GraphKitAuthAbiMutationAssembly `
             -Root (Join-Path $TestDrive 'abi-enum-byte') -Mutation EnumUnderlyingByte
 
-        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $mutatedPath
+        $rejection = try {
+            Assert-GraphKitAuthAbiV1Surface -ContractsPath $mutatedPath
+            $null
+        }
+        catch {
+            $_.Exception.Message
+        }
 
-        $result.ExitCode | Should -Be 0 -Because $result.Output
-        @($result.Data) | Should -Contain `
-            'TYPE-META|GraphKit.Auth.GraphAuthMode|staticType=false|enumUnderlying=System.Byte|genericArity=0' `
-            -Because 'the ABI gate must distinguish the frozen Int32 enum from an otherwise identical byte enum'
+        $rejection | Should -Match 'enumUnderlying=System\.Int32'
+        $rejection | Should -Match 'enumUnderlying=System\.Byte' `
+            -Because 'the literal ABI gate must distinguish the frozen Int32 enum from an otherwise identical byte enum'
     }
 
-    It 'detects a nullable-reference mutation in constructor parameter metadata' {
+    It 'rejects a nullable-reference mutation through the literal ABI-v1 gate' {
         $mutatedPath = New-GraphKitAuthAbiMutationAssembly `
             -Root (Join-Path $TestDrive 'abi-correlation-nonnullable') -Mutation CorrelationIdNonNullable
 
-        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $mutatedPath
+        $rejection = try {
+            Assert-GraphKitAuthAbiV1Surface -ContractsPath $mutatedPath
+            $null
+        }
+        catch {
+            $_.Exception.Message
+        }
 
-        $result.ExitCode | Should -Be 0 -Because $result.Output
-        @($result.Data) | Should -Contain `
-            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|4|correlationId|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull' `
-            -Because 'the ABI gate must distinguish a non-null correlationId parameter from the frozen nullable parameter'
+        $rejection | Should -Match 'correlationId.*nullable=Nullable/Nullable'
+        $rejection | Should -Match 'correlationId.*nullable=NotNull/NotNull' `
+            -Because 'the literal ABI gate must distinguish a non-null correlationId parameter from the frozen nullable parameter'
     }
 
-    It 'matches the literal ABI-v1 public surface without extra exported types or members' {
+    BeforeAll {
+        function Assert-GraphKitAuthAbiV1Surface {
+            param([Parameter(Mandatory)] [string] $ContractsPath)
+
         $expectedSurface = @(
             'CTOR|GraphKit.Auth.CertificateCredential|(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,System.Boolean ownsMaterial)'
             'CTOR|GraphKit.Auth.ClientSecretCredential|(System.Security.SecureString secret,System.Boolean ownsMaterial)'
@@ -1413,11 +1753,24 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
             'TYPE-META|GraphKit.Auth.ManagedIdentityCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
         ) | Sort-Object
 
-        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $script:contractsPath
+        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $ContractsPath
         $differences = @(Compare-Object -ReferenceObject $expectedSurface -DifferenceObject @($result.Data) -SyncWindow 10000)
 
-        $result.ExitCode | Should -Be 0 -Because $result.Output
-        $differences | Should -BeNullOrEmpty -Because "ABI-v1 is literal, not inferred from the candidate:`n$($differences | Format-Table | Out-String)"
+        if ($result.ExitCode -ne 0) {
+            throw "The ABI-v1 surface probe failed: $($result.Output)"
+        }
+        if ($differences.Count -ne 0) {
+            $differenceText = @($differences | ForEach-Object {
+                "$($_.SideIndicator) $($_.InputObject)"
+            }) -join "`n"
+            throw "ABI-v1 is literal, not inferred from the candidate:`n$differenceText"
+        }
+        }
+    }
+
+    It 'matches the literal ABI-v1 public surface without extra exported types or members' {
+        { Assert-GraphKitAuthAbiV1Surface -ContractsPath $script:contractsPath } |
+            Should -Not -Throw
     }
 }
 
@@ -1486,6 +1839,9 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.Data.OwnerCompletedBeforeCallbackRelease | Should -BeTrue -Because 'a synchronous cancellation callback must not defeat the configured host timeout'
         $result.Data.NonOwnerCompletedBeforeCallbackRelease | Should -BeTrue -Because 'concurrent Dispose callers share the same bounded shutdown deadline'
         $result.Data.OwnerElapsedMilliseconds | Should -BeLessThan 2000
+        $result.Data.CompletionPlaceholderPublishedBeforeCallback | Should -BeTrue
+        $result.Data.ReentrantDisposeReturned | Should -BeTrue `
+            -Because 'a cancellation callback that reenters Dispose must observe the one published completion and return within the same bounded deadline'
         $result.Data.StateWhileCallbackBlocked | Should -Be 1
         $result.Data.DisposeCountWhileCallbackBlocked | Should -Be 0
         $result.Data.ProxyInnerPresentWhileCallbackBlocked | Should -BeTrue
@@ -1497,6 +1853,63 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.Data.ProxyInnerCleared | Should -BeTrue
         $result.Data.ProxyOwnerCleared | Should -BeTrue
         $result.Data.LoadContextAlive | Should -BeFalse
+    }
+
+    It 'sanitizes an immediate provider disposal failure without rooting the collectible context' {
+        $payloadRoot = Join-Path $TestDrive 'immediate-disposal-failure-provider'
+        $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
+        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
+        $harnessPath = New-GraphKitAuthRuntimeHarnessAssembly -Root (Join-Path $TestDrive 'immediate-disposal-failure-harness')
+        $disposeMarker = Join-Path $TestDrive 'immediate-disposal-failure-marker.txt'
+
+        $result = Invoke-GraphKitAuthRuntimeProbe -ContractsPath (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll') `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario ImmediateDisposalFailure `
+            -DisposeMarker $disposeMarker -HarnessPath $harnessPath
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        foreach ($failure in @($result.Data.FirstFailure, $result.Data.TaskFailure, $result.Data.RepeatedFailure)) {
+            $failure | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+            $failure | Should -Match 'code=provider_disposal_failed;category=ProviderLifecycle'
+            $failure | Should -Not -Match 'ProviderOwned|isolated-provider|Microsoft\.Identity'
+            $failure | Should -Not -Match 'dataCount=[1-9]'
+        }
+        $result.Data.DisposeCount | Should -Be 1
+        $result.Data.ProxyInnerCleared | Should -BeTrue
+        $result.Data.ProxyOwnerCleared | Should -BeTrue
+        $result.Data.HostProviderReferencesCleared | Should -BeTrue
+        $result.Data.LoadContextAliveWhileHostAndTaskReferenced | Should -BeFalse `
+            -Because 'the disposed host and its faulted task may retain only default-context sanitized failures'
+    }
+
+    It 'reports a deferred provider disposal failure through the shared shutdown completion after the active call drains' {
+        $payloadRoot = Join-Path $TestDrive 'deferred-disposal-failure-provider'
+        $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
+        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
+        $harnessPath = New-GraphKitAuthRuntimeHarnessAssembly -Root (Join-Path $TestDrive 'deferred-disposal-failure-harness')
+        $disposeMarker = Join-Path $TestDrive 'deferred-disposal-failure-marker.txt'
+
+        $result = Invoke-GraphKitAuthRuntimeProbe -ContractsPath (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll') `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario DeferredDisposalFailure `
+            -DisposeMarker $disposeMarker -HarnessPath $harnessPath
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Data.Deferred.OwnerReturnedWithinDeadline | Should -BeTrue
+        $result.Data.Deferred.RetiredInnerPresentWhileAcquireBlocked | Should -BeTrue
+        $result.Data.Deferred.LoadContextAliveWhileAcquireBlocked | Should -BeTrue
+        $result.Data.Deferred.AcquireFailure | Should -BeNullOrEmpty `
+            -Because 'deferred provider disposal failure belongs to the shared host shutdown channel, not the completed acquisition'
+        foreach ($failure in @($result.Data.LaterFailure, $result.Data.RepeatedFailure, $result.Data.TaskFailure)) {
+            $failure | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+            $failure | Should -Match 'code=provider_disposal_failed;category=ProviderLifecycle'
+            $failure | Should -Not -Match 'ProviderOwned|isolated-provider|Microsoft\.Identity'
+            $failure | Should -Not -Match 'dataCount=[1-9]'
+        }
+        $result.Data.DisposeCount | Should -Be 1
+        $result.Data.ProxyInnerCleared | Should -BeTrue
+        $result.Data.ProxyRetiredInnerCleared | Should -BeTrue
+        $result.Data.ProxyOwnerCleared | Should -BeTrue
+        $result.Data.HostProviderReferencesCleared | Should -BeTrue
+        $result.Data.LoadContextAliveWhileHostAndTaskReferenced | Should -BeFalse
     }
 
     It 'rejects same-path contracts bytes that no longer match the resident default-context assembly' {

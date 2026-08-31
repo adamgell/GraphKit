@@ -342,7 +342,26 @@ git commit -m "feat: add the isolated GraphKit Auth provider"
 - Test: `tests/QA/GraphKitAuthPackage.tests.ps1`
 - Test: `tests/QA/BuiltModule.tests.ps1`
 
-- [ ] **Step 1: Add the locked build and allowlisted copy tasks**
+- [ ] **Step 1: Require digest-bound immutable staging before package copy or import**
+
+Treat the archive/package digest as an input assertion only; an archive digest by itself is
+insufficient to bind the bytes that the module later copies or imports. After locked publish,
+derive an exact manifest of the permitted runtime closure and SHA-256 digest of every staged file.
+Create a new permission-restricted immutable-per-version staging directory with create-new
+semantics: it must never reuse, merge with, or overwrite an existing version directory. Copy only
+the manifest-bound bytes into that directory, reject symbolic links, hard links, junctions,
+reparse-point aliases, path escapes, and any directory or file that retains a writable mutation
+route, then seal the complete directory and files against mutation.
+
+Immediately before `Copy_GraphKitAuth_Into_BuiltModule` and again before the package import proof,
+re-open the sealed staging root, verify its exact file closure and every digest against the bound
+manifest, verify that the staging root is still permission-restricted and immutable, and fail closed
+if any entry is missing, extra, linked/aliased, writable, replaced, or changed. Tests must prove that
+an existing version directory cannot be reused or overwritten, a post-digest mutation is rejected,
+links/reparse aliases and writable routes are rejected, and only the freshly created sealed staged
+bytes can reach copy/import.
+
+- [ ] **Step 2: Add the locked build and allowlisted copy tasks**
 
 `Build_GraphKitAuth` runs locked restore, .NET tests, and Release publish into
 `output/GraphKit.Auth/stage`. `Copy_GraphKitAuth_Into_BuiltModule` accepts only:
@@ -360,7 +379,7 @@ $allowed = @(
 If MSAL 4.82.1's locked runtime closure adds another managed dependency, add that exact filename to
 the allowlist and package test in the same commit; never use `Copy-Item *`.
 
-- [ ] **Step 2: Wire the workflow and built manifest**
+- [ ] **Step 3: Wire the workflow and built manifest**
 
 Insert the two build tasks in the order fixed by the R8 design. Set
 `RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')` only in the built
@@ -369,7 +388,7 @@ built path. Keep source `RequiredAssemblies` empty so source validation never po
 file absent from `source/`. Add `actions/setup-dotnet@v4` with `10.0.400` before dependency restore
 in each existing matrix row.
 
-- [ ] **Step 3: Pack and run package tests**
+- [ ] **Step 4: Pack and run package tests**
 
 Run:
 
@@ -382,7 +401,7 @@ Invoke-Pester ./tests/QA/GraphKitAuthPackage.tests.ps1,./tests/QA/BuiltModule.te
 Expected: contracts load in Default ALC; provider and exact MSAL load in the named non-default ALC;
 every packaged runtime file is allowlisted; no PDB/ref/native file exists.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add .build/GraphKitAuth.tasks.ps1 build.yaml source/GraphKit.psd1 .github/workflows/ci.yml tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/BuiltModule.tests.ps1

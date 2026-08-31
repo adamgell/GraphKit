@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -21,9 +20,12 @@ public sealed class GraphAuthHost : IDisposable
 
     private readonly object _gate = new();
     private readonly HashSet<GraphTokenSourceProxy> _sources = [];
+    private readonly List<GraphAuthException> _sourceDisposalFailures = [];
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ManualResetEventSlim _drained = new(initialState: true);
     private readonly ManualResetEventSlim _shutdownCompleted = new(initialState: false);
+    private readonly TaskCompletionSource<GraphAuthException?> _finalizationCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TimeSpan _shutdownTimeout;
     private IGraphTokenSourceFactory? _factory;
     private GraphAuthLoadContext? _loadContext;
@@ -110,7 +112,15 @@ public sealed class GraphAuthHost : IDisposable
             }
             catch
             {
-                source.Dispose();
+                try
+                {
+                    source.Dispose();
+                }
+                catch
+                {
+                    throw CreateProviderDisposalFailure();
+                }
+
                 throw;
             }
         }
@@ -118,27 +128,16 @@ public sealed class GraphAuthHost : IDisposable
 
     public void Dispose()
     {
-        Stopwatch deadline = Stopwatch.StartNew();
         Task shutdownTask = GetOrStartShutdown();
-        bool shutdownStageCompleted;
         try
         {
-            shutdownStageCompleted = shutdownTask.Wait(_shutdownTimeout);
+            if (!shutdownTask.Wait(_shutdownTimeout))
+            {
+                return;
+            }
         }
         catch (AggregateException)
         {
-            shutdownStageCompleted = true;
-        }
-
-        if (!shutdownStageCompleted)
-        {
-            return;
-        }
-
-        TimeSpan remaining = _shutdownTimeout - deadline.Elapsed;
-        if (remaining > TimeSpan.Zero)
-        {
-            _shutdownCompleted.Wait(remaining);
         }
 
         shutdownTask.GetAwaiter().GetResult();
@@ -146,6 +145,8 @@ public sealed class GraphAuthHost : IDisposable
 
     private Task GetOrStartShutdown()
     {
+        TaskCompletionSource<object?> shutdownCompletion;
+        Task shutdownTask;
         lock (_gate)
         {
             if (_shutdownTask is not null)
@@ -153,66 +154,89 @@ public sealed class GraphAuthHost : IDisposable
                 return _shutdownTask;
             }
 
-            Volatile.Write(ref _state, ShutdownOwnerDisposingSources);
-            Task shutdownTask = CancelAndDisposeSourcesAsync();
+            shutdownCompletion = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            shutdownTask = shutdownCompletion.Task;
             _shutdownTask = shutdownTask;
+            Volatile.Write(ref _state, ShutdownOwnerDisposingSources);
             _ = shutdownTask.ContinueWith(
                 static completed => _ = completed.Exception,
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted |
                     TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
-            return shutdownTask;
         }
+
+        Task worker = Task.Run(() => RunShutdownAsync(shutdownCompletion));
+        _ = worker.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted |
+                TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return shutdownTask;
     }
 
-    private async Task CancelAndDisposeSourcesAsync()
+    private async Task RunShutdownAsync(TaskCompletionSource<object?> shutdownCompletion)
     {
-        List<Exception>? failures = null;
+        List<GraphAuthException> failures = [];
         try
-        {
-            await _shutdown.CancelAsync().ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            failures = [exception];
-        }
-
-        GraphTokenSourceProxy[] sources;
-        lock (_gate)
-        {
-            sources = [.. _sources];
-        }
-
-        foreach (GraphTokenSourceProxy source in sources)
         {
             try
             {
-                source.Dispose();
+                await _shutdown.CancelAsync().ConfigureAwait(false);
             }
-            catch (Exception exception)
+            catch
             {
-                failures ??= [];
-                failures.Add(exception);
+                failures.Add(CreateCancellationFailure());
+            }
+
+            GraphTokenSourceProxy[] sources;
+            lock (_gate)
+            {
+                sources = [.. _sources];
+            }
+
+            Task<GraphAuthException?>[] disposalTasks =
+                [.. sources.Select(static source => source.DisposeForHostAsync())];
+            await Task.WhenAll(disposalTasks).ConfigureAwait(false);
+
+            lock (_gate)
+            {
+                failures.AddRange(_sourceDisposalFailures);
+                _sourceDisposalFailures.Clear();
+            }
+
+            Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
+            TryFinalizeUnload();
+            GraphAuthException? finalizationFailure =
+                await _finalizationCompletion.Task.ConfigureAwait(false);
+            if (finalizationFailure is not null)
+            {
+                failures.Add(finalizationFailure);
             }
         }
-
-        Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
-        try
+        catch
         {
-            TryFinalizeUnload();
+            failures.Add(CreateHostShutdownFailure());
         }
-        catch (Exception exception)
+        finally
         {
-            failures ??= [];
-            failures.Add(exception);
-        }
-
-        if (failures is not null)
-        {
-            throw new AggregateException(
-                "One or more GraphKit.Auth cancellation callbacks or provider sources failed while the host was shutting down.",
-                failures);
+            if (failures.Count == 0)
+            {
+                shutdownCompletion.TrySetResult(null);
+            }
+            else if (failures.Count == 1)
+            {
+                shutdownCompletion.TrySetException(failures[0]);
+            }
+            else
+            {
+                shutdownCompletion.TrySetException(
+                    new AggregateException(
+                        "Multiple GraphKit.Auth cancellation, provider-disposal, or host-finalization failures occurred while the host was shutting down.",
+                        failures));
+            }
         }
     }
 
@@ -245,11 +269,17 @@ public sealed class GraphAuthHost : IDisposable
         }
     }
 
-    internal void Unregister(GraphTokenSourceProxy source)
+    internal void CompleteSourceDisposal(
+        GraphTokenSourceProxy source,
+        GraphAuthException? failure)
     {
         lock (_gate)
         {
             _sources.Remove(source);
+            if (failure is not null)
+            {
+                _sourceDisposalFailures.Add(failure);
+            }
         }
     }
 
@@ -541,26 +571,70 @@ public sealed class GraphAuthHost : IDisposable
             return;
         }
 
+        GraphAuthException? failure = null;
+        GraphAuthLoadContext? loadContext;
+        lock (_gate)
+        {
+            _sources.Clear();
+            _factory = null;
+            _factoryType = null;
+            _providerAssembly = null;
+            loadContext = _loadContext;
+            _loadContext = null;
+        }
+
         try
         {
-            GraphAuthLoadContext? loadContext;
-            lock (_gate)
-            {
-                _sources.Clear();
-                _factory = null;
-                _factoryType = null;
-                _providerAssembly = null;
-                loadContext = _loadContext;
-                _loadContext = null;
-            }
-
             loadContext?.Unload();
+        }
+        catch
+        {
+            failure = CreateHostShutdownFailure();
+        }
+
+        try
+        {
             _shutdown.Dispose();
+        }
+        catch
+        {
+            failure ??= CreateHostShutdownFailure();
         }
         finally
         {
             _shutdownCompleted.Set();
+            _finalizationCompletion.TrySetResult(failure);
         }
+    }
+
+    private static GraphAuthException CreateCancellationFailure()
+    {
+        return new GraphAuthException(
+            "shutdown_callback_failed",
+            "HostLifecycle",
+            "A GraphKit.Auth shutdown cancellation callback failed.",
+            retryAfter: null,
+            correlationId: null);
+    }
+
+    private static GraphAuthException CreateProviderDisposalFailure()
+    {
+        return new GraphAuthException(
+            "provider_disposal_failed",
+            "ProviderLifecycle",
+            "The isolated GraphKit.Auth provider failed while disposing a token source.",
+            retryAfter: null,
+            correlationId: null);
+    }
+
+    private static GraphAuthException CreateHostShutdownFailure()
+    {
+        return new GraphAuthException(
+            "host_shutdown_failed",
+            "HostLifecycle",
+            "GraphKit.Auth could not finish shutting down its isolated provider context.",
+            retryAfter: null,
+            correlationId: null);
     }
 
     internal sealed class GraphAuthOperationLease : IDisposable
