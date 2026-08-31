@@ -117,7 +117,8 @@ BeforeAll {
         $resultsDir = Join-Path $fixtureRoot 'output/testResults'
         $gateDir = Join-Path $fixtureRoot 'tests/QA'
         $scriptsDir = Join-Path $fixtureRoot 'scripts'
-        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir -Force | Out-Null
+        $privateScriptsDir = Join-Path $scriptsDir 'private'
+        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir, $privateScriptsDir -Force | Out-Null
 
         Copy-Item -LiteralPath (Join-Path $script:repoRoot 'tests/QA/Assert-GateResult.ps1') `
             -Destination (Join-Path $gateDir 'Assert-GateResult.ps1')
@@ -133,6 +134,8 @@ BeforeAll {
         if ($ForGenerator) {
             Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') `
                 -Destination (Join-Path $scriptsDir 'Get-GraphKitTrainVersion.ps1')
+            Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/private/GraphKit.SourceCapture.cs') `
+                -Destination (Join-Path $privateScriptsDir 'GraphKit.SourceCapture.cs')
             Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') -Value "output/`nLICENSE`n" -NoNewline -Encoding utf8NoBOM
             & git -C $fixtureRoot init --quiet
             & git -C $fixtureRoot add .gitignore scripts tests
