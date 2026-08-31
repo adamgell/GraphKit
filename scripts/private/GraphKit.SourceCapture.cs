@@ -2,11 +2,13 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Win32.SafeHandles;
 
 #nullable enable
 
-namespace GraphKit.R8
+namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
 {
     internal enum SourceEntryKind
     {
@@ -53,6 +55,8 @@ namespace GraphKit.R8
 
     public static class SourceCapture
     {
+        private const long MaxSourceEntryBytes = 16L * 1024L * 1024L;
+
         public static string ResolveEffectiveGitMode(string? capturedMode, bool hasExecutableMode, string? indexMode)
         {
             if (!hasExecutableMode)
@@ -89,6 +93,10 @@ namespace GraphKit.R8
 
             string[] segments = ValidateRelativePath(relativePath);
             string root = Path.GetFullPath(repositoryRoot);
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                ValidateWindowsRelativePathForProof(relativePath);
+            }
             return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 ? CaptureWindows(root, segments)
                 : CaptureUnix(root, segments);
@@ -101,11 +109,6 @@ namespace GraphKit.R8
                 throw new ArgumentException("The source path must be a non-empty relative Git path.", nameof(relativePath));
             }
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && relativePath.IndexOf('\\') >= 0)
-            {
-                throw new ArgumentException("A Git source path must use forward-slash separators on Windows.", nameof(relativePath));
-            }
-
             string[] segments = relativePath.Split('/');
             foreach (string segment in segments)
             {
@@ -113,13 +116,46 @@ namespace GraphKit.R8
                 {
                     throw new ArgumentException("The source path contains an unsafe segment.", nameof(relativePath));
                 }
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && segment.IndexOf(':') >= 0)
-                {
-                    throw new ArgumentException("A Windows Git source path cannot select a drive or alternate data stream.", nameof(relativePath));
-                }
             }
 
             return segments;
+        }
+
+        public static void ValidateWindowsRelativePathForProof(string relativePath)
+        {
+            if (string.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath) || relativePath.IndexOf('\0') >= 0)
+            {
+                throw new ArgumentException("The Windows proof path must be a non-empty relative Git path.", nameof(relativePath));
+            }
+            if (relativePath.IndexOf('\\') >= 0 || relativePath.IndexOf(':') >= 0)
+            {
+                throw new ArgumentException("A Windows Git source path cannot use backslashes, a drive, or an alternate data stream.", nameof(relativePath));
+            }
+
+            foreach (string segment in relativePath.Split('/'))
+            {
+                if (segment.Length == 0 || segment == "." || segment == ".." || segment.EndsWith(' ') || segment.EndsWith('.'))
+                {
+                    throw new ArgumentException("The Windows Git source path contains an unsafe or aliased segment.", nameof(relativePath));
+                }
+                foreach (char character in segment)
+                {
+                    if (character < 32)
+                    {
+                        throw new ArgumentException("The Windows Git source path contains a control character.", nameof(relativePath));
+                    }
+                }
+
+                string stem = segment.Split('.')[0];
+                if (Regex.IsMatch(stem, @"^(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                {
+                    throw new ArgumentException($"The Windows Git source path segment '{segment}' is a reserved device name.", nameof(relativePath));
+                }
+                if (Regex.IsMatch(segment, @"^[^ .]{1,6}~[1-9][0-9]*(?:\.[^ .]{1,3})?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                {
+                    throw new ArgumentException($"The Windows Git source path segment '{segment}' is ambiguous with an 8.3 short-name alias.", nameof(relativePath));
+                }
+            }
         }
 
         private static CapturedSourceFile CaptureUnix(string root, string[] segments)
@@ -270,9 +306,9 @@ namespace GraphKit.R8
             {
                 throw new IOException($"Source entry '{displayName}' is an unsupported special/non-regular file.");
             }
-            if (before.Length < 0 || before.Length > int.MaxValue)
+            if (before.Length < 0 || before.Length > MaxSourceEntryBytes)
             {
-                throw new IOException($"Source entry '{displayName}' is too large for deterministic source capture.");
+                throw new IOException($"Source entry '{displayName}' exceeds the 16 MiB per-entry GraphKit package-source limit; keep generated or binary assets out of package-producing source.");
             }
 
             byte[] content = ReadExactly(handle, before.Length);
@@ -523,10 +559,10 @@ namespace GraphKit.R8
             internal StatxTimestamp BirthTime;
             internal StatxTimestamp ChangeTime;
             internal StatxTimestamp ModificationTime;
+            internal uint RDeviceMajor;
+            internal uint RDeviceMinor;
             internal uint DeviceMajor;
             internal uint DeviceMinor;
-            internal uint SpecialDeviceMajor;
-            internal uint SpecialDeviceMinor;
             internal ulong MountId;
             internal uint DirectIoMemoryAlignment;
             internal uint DirectIoOffsetAlignment;
@@ -594,8 +630,8 @@ namespace GraphKit.R8
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileAttributeReparsePoint = 0x00000400;
         private const uint FileAttributeDirectory = 0x00000010;
-        private const uint ObjectCaseInsensitive = 0x00000040;
         private const uint FileOpen = 1;
+        private const uint FileNameNormalized = 0;
 
         internal const int ErrorFileNotFound = 2;
         internal const int ErrorPathNotFound = 3;
@@ -612,6 +648,13 @@ namespace GraphKit.R8
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle handle,
+            StringBuilder path,
+            uint pathLength,
+            uint flags);
 
         [DllImport("ntdll.dll")]
         private static extern int NtCreateFile(
@@ -672,7 +715,7 @@ namespace GraphKit.R8
                     Length = Marshal.SizeOf<ObjectAttributes>(),
                     RootDirectory = parent.DangerousGetHandle(),
                     ObjectName = unicodeStringPointer,
-                    Attributes = ObjectCaseInsensitive
+                    Attributes = 0
                 };
                 uint access = FileReadAttributes | Synchronize | (directory ? FileListDirectory : GenericRead | FileReadData);
                 uint options = FileOpenReparsePoint | FileSynchronousIoNonAlert | (directory ? FileDirectoryFile : FileNonDirectoryFile);
@@ -696,7 +739,16 @@ namespace GraphKit.R8
 
                 var owned = new SafeFileHandle(raw, true);
                 raw = IntPtr.Zero;
-                return owned;
+                try
+                {
+                    EnsureExactOpenedSegment(owned, segment);
+                    return owned;
+                }
+                catch
+                {
+                    owned.Dispose();
+                    throw;
+                }
             }
             finally
             {
@@ -716,6 +768,33 @@ namespace GraphKit.R8
                 {
                     Marshal.FreeHGlobal(nameBuffer);
                 }
+            }
+        }
+
+        private static void EnsureExactOpenedSegment(SafeFileHandle handle, string requestedSegment)
+        {
+            var path = new StringBuilder(512);
+            uint length = GetFinalPathNameByHandleW(handle, path, checked((uint)path.Capacity), FileNameNormalized);
+            if (length == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot query the exact name of an opened source path segment.");
+            }
+            if (length >= path.Capacity)
+            {
+                path = new StringBuilder(checked((int)length + 1));
+                length = GetFinalPathNameByHandleW(handle, path, checked((uint)path.Capacity), FileNameNormalized);
+                if (length == 0 || length >= path.Capacity)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot query the exact name of an opened source path segment.");
+                }
+            }
+
+            string fullPath = path.ToString().TrimEnd('\\', '/');
+            int separator = Math.Max(fullPath.LastIndexOf('\\'), fullPath.LastIndexOf('/'));
+            string openedSegment = separator >= 0 ? fullPath.Substring(separator + 1) : fullPath;
+            if (!string.Equals(openedSegment, requestedSegment, StringComparison.Ordinal))
+            {
+                throw new IOException($"Source path segment '{requestedSegment}' resolved to alias or differently-cased name '{openedSegment}'.");
             }
         }
 

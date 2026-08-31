@@ -40,6 +40,13 @@ Only a clean-tree package may become release authority or cross a repository/mac
 The tested-release proof records the full semantic version, source revision, clean/dirty state,
 and package digest. No R8 build may create or publish changed bytes as `0.3.0`.
 
+The canonical source-state byte stream is version 4. In addition to the length-framed Git
+HEAD/index/worktree fields, it explicitly frames the SHA-256 of the exact build-time source-capture
+template and each opened file handle's native identity. The helper is compiled under a fresh,
+unpredictable type identity on every invocation; that generated type name is deliberately excluded
+from the canonical stream. Package-producing source entries are limited to 16 MiB each so capture
+fails actionably before any unbounded near-`int.MaxValue` allocation.
+
 ## Assembly boundary
 
 R8 ships two GraphKit-owned assemblies under `Assemblies/GraphKit.Auth/`:

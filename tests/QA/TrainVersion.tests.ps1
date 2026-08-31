@@ -15,9 +15,24 @@ BeforeAll {
     }
 
     function Get-R8TrainVersion {
-        param([Parameter(Mandatory)] [string] $RepositoryRoot)
+        param(
+            [Parameter(Mandatory)] [string] $RepositoryRoot,
+            [string] $VersionScript = $script:versionScript
+        )
 
-        $output = & pwsh -NoLogo -NoProfile -File $script:versionScript -RepositoryRoot $RepositoryRoot 2>&1 | Out-String
+        $output = & pwsh -NoLogo -NoProfile -File $VersionScript -RepositoryRoot $RepositoryRoot 2>&1 | Out-String
+        [pscustomobject] @{
+            ExitCode = $LASTEXITCODE
+            Output = $output.Trim()
+        }
+    }
+
+    function Invoke-R8Bootstrap {
+        param([Parameter(Mandatory)] [string] $Content)
+
+        $bootstrap = Join-Path $TestDrive ('r8-bootstrap-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Set-Content -LiteralPath $bootstrap -Value $Content -NoNewline -Encoding utf8NoBOM
+        $output = & pwsh -NoLogo -NoProfile -File $bootstrap 2>&1 | Out-String
         [pscustomobject] @{
             ExitCode = $LASTEXITCODE
             Output = $output.Trim()
@@ -56,23 +71,22 @@ BeforeAll {
         }
     }
 
-    function New-R8GitShim {
-        param(
-            [Parameter(Mandatory)] [string] $Name,
-            [Parameter(Mandatory)] [string] $Body
-        )
-
-        $shimDirectory = Join-Path $TestDrive ("git-shim-$Name-" + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $shimDirectory -Force
-        $shimPath = Join-Path $shimDirectory 'git'
-        Set-Content -LiteralPath $shimPath -NoNewline -Encoding utf8NoBOM -Value $Body
-        & /bin/chmod +x $shimPath
-        return $shimDirectory
-    }
-
     function New-R8PortableGitShim {
         param(
-            [Parameter(Mandatory)] [ValidateSet('duplicate-index', 'appearance', 'mutation', 'head-move', 'invalid-tree-oid')] [string] $Mode,
+            [Parameter(Mandatory)] [ValidateSet(
+                'duplicate-index',
+                'appearance',
+                'mutation',
+                'head-move',
+                'invalid-tree-oid',
+                'sha256-format',
+                'missing',
+                'invalid-path',
+                'unmerged-stage',
+                'case-collision',
+                'normalization-collision',
+                'reverse-untracked'
+            )] [string] $Mode,
             [hashtable] $Configuration = @{}
         )
 
@@ -112,6 +126,7 @@ function Write-Result($Result) {
 $isStage = $gitArguments.Count -ge 2 -and $gitArguments[0] -eq 'ls-files' -and $gitArguments[1] -eq '--stage'
 $isOthers = $gitArguments.Count -ge 1 -and $gitArguments[0] -eq 'ls-files' -and $gitArguments -contains '--others'
 $isTree = $gitArguments.Count -ge 1 -and $gitArguments[0] -eq 'ls-tree'
+$isObjectFormat = $gitArguments.Count -ge 2 -and $gitArguments[0] -eq 'rev-parse' -and $gitArguments[1] -eq '--show-object-format'
 switch ($payload.Mode) {
     'duplicate-index' {
         $result = Invoke-RealGit $gitArguments
@@ -160,6 +175,92 @@ switch ($payload.Mode) {
         }
         Write-Result $result
     }
+    'sha256-format' {
+        if ($isObjectFormat) {
+            Write-Result ([pscustomobject] @{ ExitCode=0; Output=[Text.Encoding]::ASCII.GetBytes("sha256`n"); Error='' })
+        }
+        Write-Result (Invoke-RealGit $gitArguments)
+    }
+    'missing' {
+        if ($isOthers) {
+            $bytes = [Text.Encoding]::UTF8.GetBytes('source/Private/disappeared.ps1')
+            Write-Result ([pscustomobject] @{ ExitCode=0; Output=[byte[]] @($bytes + [byte] 0); Error='' })
+        }
+        Write-Result (Invoke-RealGit $gitArguments)
+    }
+    'invalid-path' {
+        if ($isOthers) {
+            Write-Result ([pscustomobject] @{ ExitCode=0; Output=[byte[]] @(255, 0); Error='' })
+        }
+        Write-Result (Invoke-RealGit $gitArguments)
+    }
+    'unmerged-stage' {
+        $result = Invoke-RealGit $gitArguments
+        if ($isStage -and $result.ExitCode -eq 0) {
+            $text = [Text.Encoding]::Latin1.GetString($result.Output)
+            $text = [Text.RegularExpressions.Regex]::Replace(
+                $text,
+                '(?<= [0-9a-f]{40} )0(?=\t)',
+                [string] $payload.Configuration.Stage,
+                1
+            )
+            $result.Output = [Text.Encoding]::Latin1.GetBytes($text)
+        }
+        Write-Result $result
+    }
+    'case-collision' {
+        $result = Invoke-RealGit $gitArguments
+        if ($isStage -and $result.ExitCode -eq 0) {
+            $all = [Text.Encoding]::Latin1.GetString($result.Output)
+            $pathOffset = $all.IndexOf('Tracked-One.ps1', [StringComparison]::Ordinal)
+            if ($pathOffset -lt 0) { throw 'The case-collision shim could not find its tracked fixture path.' }
+            $recordStart = $all.LastIndexOf([char] 0, $pathOffset) + 1
+            $recordEnd = $all.IndexOf([char] 0, $pathOffset)
+            $record = $all.Substring($recordStart, $recordEnd - $recordStart)
+            $alias = [Text.Encoding]::Latin1.GetBytes($record.Replace('Tracked-One.ps1', 'tracked-one.ps1'))
+            $joined = [byte[]]::new($result.Output.Length + $alias.Length + 1)
+            [Array]::Copy($result.Output, 0, $joined, 0, $result.Output.Length)
+            [Array]::Copy($alias, 0, $joined, $result.Output.Length, $alias.Length)
+            $joined[$joined.Length - 1] = 0
+            $result.Output = $joined
+        }
+        Write-Result $result
+    }
+    'normalization-collision' {
+        $result = Invoke-RealGit $gitArguments
+        if ($isStage -and $result.ExitCode -eq 0) {
+            $tab = [Array]::IndexOf($result.Output, [byte] 9)
+            $header = [Text.Encoding]::ASCII.GetString($result.Output, 0, $tab + 1)
+            $first = [Text.Encoding]::UTF8.GetBytes($header + "source/Private/Caf$([char]0x00e9).ps1")
+            $second = [Text.Encoding]::UTF8.GetBytes($header + "source/Private/Cafe$([char]0x0301).ps1")
+            $joined = [byte[]]::new($result.Output.Length + $first.Length + $second.Length + 2)
+            [Array]::Copy($result.Output, 0, $joined, 0, $result.Output.Length)
+            $offset = $result.Output.Length
+            [Array]::Copy($first, 0, $joined, $offset, $first.Length); $offset += $first.Length + 1
+            [Array]::Copy($second, 0, $joined, $offset, $second.Length)
+            $result.Output = $joined
+        }
+        Write-Result $result
+    }
+    'reverse-untracked' {
+        $result = Invoke-RealGit $gitArguments
+        if ($isOthers -and $result.ExitCode -eq 0) {
+            $records = [Collections.Generic.List[byte[]]]::new()
+            $offset = 0
+            while ($offset -lt $result.Output.Length) {
+                $end = [Array]::IndexOf($result.Output, [byte] 0, $offset)
+                $record = [byte[]]::new($end - $offset)
+                [Array]::Copy($result.Output, $offset, $record, 0, $record.Length)
+                $records.Add($record); $offset = $end + 1
+            }
+            $stream = [IO.MemoryStream]::new()
+            for ($index = $records.Count - 1; $index -ge 0; $index--) {
+                $stream.Write($records[$index], 0, $records[$index].Length); $stream.WriteByte(0)
+            }
+            $result.Output = $stream.ToArray()
+        }
+        Write-Result $result
+    }
 }
 '@).Replace('__PAYLOAD__', $encodedPayload)
 
@@ -175,13 +276,181 @@ switch ($payload.Mode) {
 
     function Initialize-R8SourceCaptureHelper {
         $script:sourceCaptureHelper | Should -Exist -Because 'the build-time source capture must be independently testable'
-        if (-not ('GraphKit.R8.SourceCapture' -as [type])) {
-            Add-Type -Path $script:sourceCaptureHelper
+        if (-not $script:sourceCaptureType) {
+            $source = Get-Content -LiteralPath $script:sourceCaptureHelper -Raw
+            $marker = '__GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__'
+            if ($source.Contains($marker)) {
+                $namespace = 'GraphKit.R8.QA.N' + [guid]::NewGuid().ToString('N')
+                $types = @(Add-Type -TypeDefinition $source.Replace($marker, $namespace) -PassThru)
+                $script:sourceCaptureType = @($types | Where-Object FullName -CEQ "$namespace.SourceCapture")
+            }
+            else {
+                if (-not ('GraphKit.R8.SourceCapture' -as [type])) {
+                    Add-Type -Path $script:sourceCaptureHelper
+                }
+                $script:sourceCaptureType = 'GraphKit.R8.SourceCapture' -as [type]
+            }
+        }
+        return $script:sourceCaptureType
+    }
+
+    function New-R8ControlledIdentityFixture {
+        $root = New-R8TrainVersionFixture
+        $scripts = Join-Path $root 'scripts'
+        $private = Join-Path $scripts 'private'
+        $null = New-Item -ItemType Directory -Path $private -Force
+        $versionScript = Join-Path $scripts 'Get-GraphKitTrainVersion.ps1'
+        $helper = Join-Path $private 'GraphKit.SourceCapture.cs'
+        $versionSource = (Get-Content -LiteralPath $script:versionScript -Raw).Replace("`r`n", "`n")
+        Set-Content -LiteralPath $versionScript -Value $versionSource -NoNewline -Encoding utf8NoBOM
+        $source = (Get-Content -LiteralPath $script:sourceCaptureHelper -Raw).Replace("`r`n", "`n")
+        $needle = 'return new CapturedSourceFile(before.Mode, before.HasExecutableMode, before.Identity, before.Length, content);'
+        if (-not $source.Contains($needle)) { throw 'The controlled-identity fixture could not locate the capture return contract.' }
+        $replacement = @'
+string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE_IDENTITY") ?? before.Identity;
+            return new CapturedSourceFile(before.Mode, before.HasExecutableMode, proofIdentity, before.Length, content);
+'@
+        Set-Content -LiteralPath $helper -Value $source.Replace($needle, $replacement) -NoNewline -Encoding utf8NoBOM
+        & git -C $root add scripts
+        & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'controlled helper'
+        Set-Content -LiteralPath (Join-Path $root 'source/Private/Untracked.ps1') -Value "'untracked'`n" -NoNewline -Encoding utf8NoBOM
+        [pscustomobject] @{ Root = $root; VersionScript = $versionScript }
+    }
+
+    $script:ambientCaptureSource = @'
+using System;
+using System.IO;
+
+namespace GraphKit.R8
+{
+    public sealed class CapturedSourceFile
+    {
+        public string Mode => "100644";
+        public bool HasExecutableMode => false;
+        public string Identity => "ambient:malicious";
+        public long Length => 0;
+        public byte[] Content => Array.Empty<byte>();
+    }
+
+    public static class SourceCapture
+    {
+        public static string ResolveEffectiveGitMode(string capturedMode, bool hasExecutableMode, string indexMode) => indexMode ?? "100644";
+
+        public static CapturedSourceFile Capture(string repositoryRoot, string relativePath)
+        {
+            string sentinel = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE_SENTINEL");
+            if (!string.IsNullOrEmpty(sentinel)) File.WriteAllText(sentinel, relativePath);
+            throw new InvalidOperationException("ambient helper invoked");
         }
     }
 }
+'@
+}
 
 Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
+    It 'ignores a malicious ambient legacy helper and remains deterministic across repeated calls in one process' {
+        $root = New-R8TrainVersionFixture
+        $revision = (& git -C $root rev-parse HEAD).Trim().Substring(0, 12)
+        $versionLiteral = $script:versionScript.Replace("'", "''")
+        $rootLiteral = $root.Replace("'", "''")
+        $source = $script:ambientCaptureSource
+        $bootstrap = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+$source
+'@
+`$first = & '$versionLiteral' -RepositoryRoot '$rootLiteral'
+`$second = & '$versionLiteral' -RepositoryRoot '$rootLiteral'
+[pscustomobject] @{ first = [string] `$first; second = [string] `$second } | ConvertTo-Json -Compress
+"@
+
+        $result = Invoke-R8Bootstrap -Content $bootstrap
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $values = $result.Output | ConvertFrom-Json
+        $values.first | Should -Be "0.4.0-r8.g$revision"
+        $values.second | Should -Be $values.first
+    }
+
+    It 'rejects raw source paths that collide by ordinal case before capture' {
+        $root = New-R8TrainVersionFixture
+        $shimDirectory = New-R8PortableGitShim -Mode case-collision
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $root
+        }
+        finally { $env:PATH = $savedPath }
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'case|collid|ambiguous'
+    }
+
+    It 'rejects raw source paths that collide after Unicode normalization before capture' {
+        $root = New-R8TrainVersionFixture
+        $shimDirectory = New-R8PortableGitShim -Mode normalization-collision
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $root
+        }
+        finally { $env:PATH = $savedPath }
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'normalization|collid|ambiguous'
+    }
+
+    It 'fails on unmerged index stage <Stage> before invoking worktree capture' -ForEach @(
+        @{ Stage = 1 }
+        @{ Stage = 2 }
+        @{ Stage = 3 }
+    ) {
+        $root = New-R8TrainVersionFixture
+        $sentinel = Join-Path $TestDrive ("capture-stage-$Stage-" + [guid]::NewGuid().ToString('N'))
+        $shimDirectory = New-R8PortableGitShim -Mode unmerged-stage -Configuration @{ Stage = $Stage }
+        $savedPath = $env:PATH
+        $savedSentinel = $env:GRAPHKIT_TEST_CAPTURE_SENTINEL
+        $versionLiteral = $script:versionScript.Replace("'", "''")
+        $rootLiteral = $root.Replace("'", "''")
+        $source = $script:ambientCaptureSource
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $env:GRAPHKIT_TEST_CAPTURE_SENTINEL = $sentinel
+            $bootstrap = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+$source
+'@
+& '$versionLiteral' -RepositoryRoot '$rootLiteral'
+"@
+            $result = Invoke-R8Bootstrap -Content $bootstrap
+        }
+        finally {
+            $env:PATH = $savedPath
+            $env:GRAPHKIT_TEST_CAPTURE_SENTINEL = $savedSentinel
+        }
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'unmerged'
+        Test-Path -LiteralPath $sentinel | Should -BeFalse
+    }
+
+    It 'binds the helper-reported native handle identity into canonical source state' {
+        $fixture = New-R8ControlledIdentityFixture
+        $savedIdentity = $env:GRAPHKIT_TEST_CAPTURE_IDENTITY
+        try {
+            $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = 'test-device:00000001:test-file:00000001'
+            $first = Get-R8TrainVersion -RepositoryRoot $fixture.Root -VersionScript $fixture.VersionScript
+            $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = 'test-device:00000002:test-file:00000001'
+            $second = Get-R8TrainVersion -RepositoryRoot $fixture.Root -VersionScript $fixture.VersionScript
+        }
+        finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
+
+        $first.ExitCode | Should -Be 0 -Because $first.Output
+        $second.ExitCode | Should -Be 0 -Because $second.Output
+        $second.Output | Should -Not -Be $first.Output
+    }
+
     It 'fails closed when HEAD moves to a different commit with the same tree during capture' {
         $root = New-R8TrainVersionFixture
         $firstRevision = (& git -C $root rev-parse HEAD).Trim()
@@ -220,23 +489,22 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
     }
 
     It 'fails closed with an actionable error for a SHA-256 object-format repository' {
-        $root = Join-Path $TestDrive ('sha256-' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $root -Force
-        & git -C $root init --quiet --object-format=sha256
-        if ($LASTEXITCODE -ne 0) { Set-ItResult -Skipped -Because 'the installed Git cannot create SHA-256 repositories'; return }
-        Set-Content -LiteralPath (Join-Path $root 'tracked.ps1') -Value "'tracked'`n" -NoNewline -Encoding utf8NoBOM
-        & git -C $root add tracked.ps1
-        & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'sha256 fixture'
-
-        $result = Get-R8TrainVersion -RepositoryRoot $root
+        $root = New-R8TrainVersionFixture
+        $shimDirectory = New-R8PortableGitShim -Mode sha256-format
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $root
+        }
+        finally { $env:PATH = $savedPath }
 
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'SHA-256.*not supported|unsupported.*SHA-256'
     }
 
     It 'treats a Windows-style clean tracked 100755 entry as clean without losing index mode proof' {
-        Initialize-R8SourceCaptureHelper
-        [GraphKit.R8.SourceCapture]::ResolveEffectiveGitMode('', $false, '100755') | Should -Be '100755'
+        $captureType = Initialize-R8SourceCaptureHelper
+        $captureType::ResolveEffectiveGitMode('', $false, '100755') | Should -Be '100755'
 
         if ($IsWindows) {
             $root = New-R8TrainVersionFixture
@@ -295,10 +563,13 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
         Set-Content -LiteralPath $secondPath -Value "'z'`n" -NoNewline -Encoding utf8NoBOM
         Set-Content -LiteralPath $firstPath -Value "'a'`n" -NoNewline -Encoding utf8NoBOM
         $forward = Get-R8TrainVersion -RepositoryRoot $root
-        Remove-Item -LiteralPath $firstPath, $secondPath -Force
-        Set-Content -LiteralPath $firstPath -Value "'a'`n" -NoNewline -Encoding utf8NoBOM
-        Set-Content -LiteralPath $secondPath -Value "'z'`n" -NoNewline -Encoding utf8NoBOM
-        $reverse = Get-R8TrainVersion -RepositoryRoot $root
+        $shimDirectory = New-R8PortableGitShim -Mode reverse-untracked
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $reverse = Get-R8TrainVersion -RepositoryRoot $root
+        }
+        finally { $env:PATH = $savedPath }
 
         $forward.ExitCode | Should -Be 0 -Because $forward.Output
         $reverse.ExitCode | Should -Be 0 -Because $reverse.Output
@@ -317,20 +588,9 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
         $result.Output | Should -Match 'symbolic link|unsupported'
     }
 
-    It 'fails closed when Git reports an entry that disappears before capture' -Skip:$IsWindows {
+    It 'fails closed when Git reports an entry that disappears before capture' {
         $root = New-R8TrainVersionFixture
-        $shimDirectory = Join-Path $TestDrive ('git-missing-shim-' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $shimDirectory -Force
-        $shimPath = Join-Path $shimDirectory 'git'
-        Set-Content -LiteralPath $shimPath -NoNewline -Encoding utf8NoBOM -Value @'
-#!/bin/sh
-if [ "$1" = "ls-files" ] && printf '%s' "$*" | /usr/bin/grep -q -- '--others'; then
-  printf 'source/Private/disappeared.ps1\0'
-  exit 0
-fi
-exec /usr/bin/git "$@"
-'@
-        & /bin/chmod +x $shimPath
+        $shimDirectory = New-R8PortableGitShim -Mode missing
         $savedPath = $env:PATH
         try {
             $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
@@ -344,20 +604,9 @@ exec /usr/bin/git "$@"
         $result.Output | Should -Match 'disappeared|regular file'
     }
 
-    It 'fails closed for a non-UTF-8 Unix path' -Skip:$IsWindows {
+    It 'fails closed for a non-strict-UTF-8 raw Git path on every host' {
         $root = New-R8TrainVersionFixture
-        $shimDirectory = Join-Path $TestDrive ('git-shim-' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $shimDirectory -Force
-        $shimPath = Join-Path $shimDirectory 'git'
-        Set-Content -LiteralPath $shimPath -NoNewline -Encoding utf8NoBOM -Value @'
-#!/bin/sh
-if [ "$1" = "ls-files" ] && printf '%s' "$*" | /usr/bin/grep -q -- '--others'; then
-  printf '\377\0'
-  exit 0
-fi
-exec /usr/bin/git "$@"
-'@
-        & /bin/chmod +x $shimPath
+        $shimDirectory = New-R8PortableGitShim -Mode invalid-path
         $savedPath = $env:PATH
         try {
             $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
@@ -371,10 +620,15 @@ exec /usr/bin/git "$@"
         $result.Output | Should -Match 'UTF-8|path'
     }
 
-    It 'marks an executable-mode-only tracked change dirty even when core.filemode is false' -Skip:$IsWindows {
+    It 'marks a platform-representable executable-mode change dirty even when core.filemode is false' {
         $root = New-R8TrainVersionFixture
         $path = Join-Path $root 'source/Private/Tracked-One.ps1'
-        & /bin/chmod +x $path
+        if ($IsWindows) {
+            & git -C $root update-index --chmod=+x source/Private/Tracked-One.ps1
+        }
+        else {
+            & /bin/chmod +x $path
+        }
         & git -C $root config core.filemode false
 
         $result = Get-R8TrainVersion -RepositoryRoot $root
@@ -435,9 +689,10 @@ exec /usr/bin/git "$@"
         $result.Output | Should -Match 'gitlink|submodule|unsupported'
     }
 
-    It 'accepts a valid untracked path containing tabs, newlines, and non-ASCII bytes' -Skip:$IsWindows {
+    It 'accepts a platform-valid untracked path containing special and non-ASCII characters' {
         $root = New-R8TrainVersionFixture
-        $path = Join-Path $root "source/Private/tab`tline`n雪.ps1"
+        $relative = if ($IsWindows) { "source/Private/tab`t雪.ps1" } else { "source/Private/tab`tline`n雪.ps1" }
+        $path = Join-Path $root $relative
         Set-Content -LiteralPath $path -Value "'valid path'`n" -NoNewline -Encoding utf8NoBOM
 
         $result = Get-R8TrainVersion -RepositoryRoot $root
@@ -460,16 +715,25 @@ exec /usr/bin/git "$@"
         $result.Output | Should -Match 'duplicate'
     }
 
-    It 'rejects an untracked FIFO promptly before opening it' -Skip:$IsWindows {
+    It 'rejects an unsupported untracked filesystem entry promptly before reading it' {
         $root = New-R8TrainVersionFixture
-        $fifo = Join-Path $root 'source/Private/input.fifo'
-        & /usr/bin/mkfifo $fifo
+        if ($IsWindows) {
+            $outside = Join-Path $TestDrive ('unsupported-target-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $outside -Force
+            $junction = Join-Path $root 'source/Private/input.reparse'
+            & cmd.exe /d /c "mklink /J `"$junction`" `"$outside`"" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'The Windows test host could not create the required directory junction.' }
+        }
+        else {
+            $fifo = Join-Path $root 'source/Private/input.fifo'
+            & /usr/bin/mkfifo $fifo
+        }
 
         $result = Get-R8TrainVersionWithTimeout -RepositoryRoot $root -TimeoutMilliseconds 3000
 
         $result.Running | Should -BeFalse -Because 'special files must be rejected rather than opened'
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match 'regular|special|unsupported'
+        $result.Output | Should -Match 'regular|special|unsupported|reparse|cannot be opened'
     }
 
     It 'fails closed when a non-ignored entry appears after initial enumeration' {
@@ -512,65 +776,138 @@ exec /usr/bin/git "$@"
     }
 
     It 'matches the fixed R8 source-state known vector' {
-        $root = Join-Path $TestDrive ('known-vector-' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path (Join-Path $root 'source/Private') -Force
-        Set-Content -LiteralPath (Join-Path $root '.gitignore') -Value "output/`n" -NoNewline -Encoding utf8NoBOM
-        Set-Content -LiteralPath (Join-Path $root 'source/Private/Tracked.ps1') -Value "'tracked'`n" -NoNewline -Encoding utf8NoBOM
-        & git -C $root init --quiet
-        & git -C $root add .
-        $savedAuthorDate = $env:GIT_AUTHOR_DATE
-        $savedCommitterDate = $env:GIT_COMMITTER_DATE
+        $fixture = New-R8ControlledIdentityFixture
+        $savedIdentity = $env:GRAPHKIT_TEST_CAPTURE_IDENTITY
         try {
-            $env:GIT_AUTHOR_DATE = '2001-02-03T04:05:06Z'
-            $env:GIT_COMMITTER_DATE = '2001-02-03T04:05:06Z'
-            & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'fixed vector'
+            $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = 'known-device:00000001:known-file:00000002'
+            $state = & $fixture.VersionScript -RepositoryRoot $fixture.Root -AsObject
         }
-        finally {
-            $env:GIT_AUTHOR_DATE = $savedAuthorDate
-            $env:GIT_COMMITTER_DATE = $savedCommitterDate
-        }
-        Set-Content -LiteralPath (Join-Path $root 'source/Private/Untracked.ps1') -Value "'untracked'`n" -NoNewline -Encoding utf8NoBOM
+        finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state = & $script:versionScript -RepositoryRoot $root -AsObject
-
-        $state.version | Should -Be '0.4.0-r8.g37b8420a67a0.d374f187ae54c'
-        $state.sourceStateSha256 | Should -Be '374f187ae54cd351758b49728c5a6e4dc342510eb0606c68520f1c32e8331975'
+        $state.sourceStateSha256 | Should -Be '5effd62748cd587364a3853875d70f9994031ed2aeb08c4c95f9009c0ebb4fbe'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d5effd62748cd$'
     }
 }
 
 Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
-    It 'rejects a Unix symbolic link in an intermediate path segment' -Skip:$IsWindows {
-        Initialize-R8SourceCaptureHelper
+    It 'maps Linux statx device fields in ABI order before formatting ordinary-file identity' {
+        $captureType = Initialize-R8SourceCaptureHelper
+        $statxType = $captureType.Assembly.GetType("$($captureType.Namespace).UnixNative+Statx", $true)
+
+        [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'RDeviceMajor').ToInt32() | Should -Be 128
+        [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'RDeviceMinor').ToInt32() | Should -Be 132
+        [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'DeviceMajor').ToInt32() | Should -Be 136
+        [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'DeviceMinor').ToInt32() | Should -Be 140
+    }
+
+    It 'rejects Windows reserved-device, ADS, and suspicious short-alias path forms without a platform skip' {
+        $captureType = Initialize-R8SourceCaptureHelper
+        $validator = $captureType.GetMethod('ValidateWindowsRelativePathForProof')
+        $validator | Should -Not -BeNullOrEmpty -Because 'portable tests must execute the same lexical gate used by native Windows capture'
+
+        foreach ($relativePath in @(
+            'source/CON.ps1',
+            'source/NUL',
+            'source/file.ps1:payload',
+            'source/LONGFI~1.PS1'
+        )) {
+            { $validator.Invoke($null, @($relativePath)) } | Should -Throw -Because $relativePath
+        }
+    }
+
+    It 'rejects a wrong-case segment through a native check or the equivalent raw-inventory gate' {
+        if ($IsWindows) {
+            $captureType = Initialize-R8SourceCaptureHelper
+            $root = Join-Path $TestDrive ('wrong-case-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $root -Force
+            Set-Content -LiteralPath (Join-Path $root 'ExactName.ps1') -Value "'exact'`n" -NoNewline -Encoding utf8NoBOM
+
+            { $captureType::Capture($root, 'exactname.ps1') } | Should -Throw
+        }
+        else {
+            $root = New-R8TrainVersionFixture
+            $shimDirectory = New-R8PortableGitShim -Mode case-collision
+            $savedPath = $env:PATH
+            try {
+                $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+                $result = Get-R8TrainVersion -RepositoryRoot $root
+            }
+            finally { $env:PATH = $savedPath }
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match 'case|collid|ambiguous'
+        }
+    }
+
+    It 'accepts exactly 16 MiB but rejects the next byte before allocating capture buffers' {
+        $captureType = Initialize-R8SourceCaptureHelper
+        $root = Join-Path $TestDrive ('capture-ceiling-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $root -Force
+        $boundary = Join-Path $root 'boundary.bin'
+        $over = Join-Path $root 'over.bin'
+        $boundaryStream = [IO.File]::Open($boundary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $boundaryStream.SetLength(16MB) } finally { $boundaryStream.Dispose() }
+        $overStream = [IO.File]::Open($over, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $overStream.SetLength(16MB + 1) } finally { $overStream.Dispose() }
+
+        $captured = $captureType::Capture($root, 'boundary.bin')
+        $captured.Length | Should -Be 16MB
+        $captured.Content.Length | Should -Be 16MB
+        { $captureType::Capture($root, 'over.bin') } |
+            Should -Throw -ExpectedMessage '*16 MiB*package-source*limit*'
+    }
+
+    It 'rejects an intermediate link or reparse point on every supported platform' {
+        $captureType = Initialize-R8SourceCaptureHelper
         $root = Join-Path $TestDrive ('intermediate-link-' + [guid]::NewGuid().ToString('N'))
         $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N'))
         $null = New-Item -ItemType Directory -Path (Join-Path $root 'source') -Force
         $null = New-Item -ItemType Directory -Path $outside -Force
         Set-Content -LiteralPath (Join-Path $outside 'Tracked.ps1') -Value "'same bytes'`n" -NoNewline -Encoding utf8NoBOM
-        New-Item -ItemType SymbolicLink -Path (Join-Path $root 'source/Private') -Target $outside | Out-Null
-
-        { [GraphKit.R8.SourceCapture]::Capture($root, 'source/Private/Tracked.ps1') } |
-            Should -Throw -ExpectedMessage '*symbolic link*'
-    }
-
-    It 'closes Unix final descriptors when post-open type validation throws' -Skip:$IsWindows {
-        Initialize-R8SourceCaptureHelper
-        $root = Join-Path $TestDrive ('handle-ownership-' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $root -Force
-        $fifo = Join-Path $root 'unsupported.fifo'
-        & /usr/bin/mkfifo $fifo
-        { [GraphKit.R8.SourceCapture]::Capture($root, 'unsupported.fifo') } | Should -Throw
-        $before = @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
-
-        1..64 | ForEach-Object {
-            { [GraphKit.R8.SourceCapture]::Capture($root, 'unsupported.fifo') } | Should -Throw
+        $link = Join-Path $root 'source/Private'
+        if ($IsWindows) {
+            & cmd.exe /d /c "mklink /J `"$link`" `"$outside`"" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'The Windows test host could not create the required directory junction.' }
+        }
+        else {
+            New-Item -ItemType SymbolicLink -Path $link -Target $outside | Out-Null
         }
 
-        $after = @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
-        ($after - $before) | Should -BeLessOrEqual 2 -Because 'every descriptor returned by openat must immediately gain a safe owner'
+        { $captureType::Capture($root, 'source/Private/Tracked.ps1') } |
+            Should -Throw -ExpectedMessage $(if ($IsWindows) { '*reparse point*' } else { '*symbolic link*' })
+    }
+
+    It 'closes final handles when an unsupported final entry is rejected' {
+        $captureType = Initialize-R8SourceCaptureHelper
+        $root = Join-Path $TestDrive ('handle-ownership-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $root -Force
+        if ($IsWindows) {
+            $null = New-Item -ItemType Directory -Path (Join-Path $root 'unsupported.entry')
+            { $captureType::Capture($root, 'unsupported.entry') } | Should -Throw
+            $before = [Diagnostics.Process]::GetCurrentProcess().HandleCount
+        }
+        else {
+            $fifo = Join-Path $root 'unsupported.fifo'
+            & /usr/bin/mkfifo $fifo
+            { $captureType::Capture($root, 'unsupported.fifo') } | Should -Throw
+            $before = @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
+        }
+
+        1..64 | ForEach-Object {
+            { $captureType::Capture($root, $(if ($IsWindows) { 'unsupported.entry' } else { 'unsupported.fifo' })) } | Should -Throw
+        }
+
+        $after = if ($IsWindows) {
+            [Diagnostics.Process]::GetCurrentProcess().HandleCount
+        }
+        else {
+            @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
+        }
+        ($after - $before) | Should -BeLessOrEqual 2 -Because 'every native handle must immediately gain a safe owner'
     }
 
     It 'rejects a Windows reparse point in an intermediate path segment without retaining handles' {
-        Initialize-R8SourceCaptureHelper
+        $captureType = Initialize-R8SourceCaptureHelper
         $root = Join-Path $TestDrive ('reparse-root-' + [guid]::NewGuid().ToString('N'))
         $outside = Join-Path $TestDrive ('reparse-outside-' + [guid]::NewGuid().ToString('N'))
         $null = New-Item -ItemType Directory -Path (Join-Path $root 'source') -Force
@@ -582,16 +919,16 @@ Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
             if ($LASTEXITCODE -ne 0) { throw 'The Windows test host could not create the required directory junction.' }
             $before = [Diagnostics.Process]::GetCurrentProcess().HandleCount
             1..16 | ForEach-Object {
-                { [GraphKit.R8.SourceCapture]::Capture($root, 'source/Private/Tracked.ps1') } |
+                { $captureType::Capture($root, 'source/Private/Tracked.ps1') } |
                     Should -Throw -ExpectedMessage '*reparse point*'
             }
             $after = [Diagnostics.Process]::GetCurrentProcess().HandleCount
         } else {
             New-Item -ItemType SymbolicLink -Path $link -Target $outside | Out-Null
-            { [GraphKit.R8.SourceCapture]::Capture($root, 'source/Private/Tracked.ps1') } | Should -Throw
+            { $captureType::Capture($root, 'source/Private/Tracked.ps1') } | Should -Throw
             $before = @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
             1..16 | ForEach-Object {
-                { [GraphKit.R8.SourceCapture]::Capture($root, 'source/Private/Tracked.ps1') } | Should -Throw
+                { $captureType::Capture($root, 'source/Private/Tracked.ps1') } | Should -Throw
             }
             $after = @([IO.Directory]::EnumerateFileSystemEntries('/dev/fd')).Count
         }
