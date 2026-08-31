@@ -54,18 +54,22 @@ BeforeAll {
 `$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
 Import-Module '$($isolatedManifest.Replace("'", "''"))' -Force -ErrorAction Stop
 `$operation = Get-GraphOperation -Type ManagedDevice -Operation List
+`$graphAuthenticationLoaded = [bool] (Get-Module Microsoft.Graph.Authentication)
 `$secretManagementLoaded = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
 # PowerShell re-adds its default module roots while resolving RequiredModules during import.
 # Reset the path after import, then refresh discovery so this is an availability proof rather
 # than a check against either the loaded-module table or stale module-analysis cache state.
 `$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
+`$graphAuthenticationAvailable = [bool] (Get-Module Microsoft.Graph.Authentication -ListAvailable -Refresh)
 `$secretManagementAvailable = [bool] (Get-Module Microsoft.PowerShell.SecretManagement -ListAvailable -Refresh)
 [pscustomobject]@{
-    Imported                  = `$true
-    ModuleBase                = (Get-Module GraphKit).ModuleBase
-    OperationName             = "`$(`$operation.Type).`$(`$operation.Operation)"
-    SecretManagementLoaded    = `$secretManagementLoaded
-    SecretManagementAvailable = `$secretManagementAvailable
+    Imported                     = `$true
+    ModuleBase                   = (Get-Module GraphKit).ModuleBase
+    OperationName                = "`$(`$operation.Type).`$(`$operation.Operation)"
+    GraphAuthenticationLoaded    = `$graphAuthenticationLoaded
+    GraphAuthenticationAvailable = `$graphAuthenticationAvailable
+    SecretManagementLoaded       = `$secretManagementLoaded
+    SecretManagementAvailable    = `$secretManagementAvailable
 } | ConvertTo-Json -Compress
 "@
 
@@ -102,7 +106,7 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
         $dependencyMap['Microsoft.PowerShell.SecretManagement'] | Should -Be '1.1.2'
     }
 
-    It 'imports the isolated artifact with its required SecretManagement runtime dependency' {
+    It 'imports the isolated artifact with both required runtime dependencies' {
         $modulePath = New-IsolatedGraphKitModulePath -Root (Join-Path $TestDrive 'non-vault')
         $result = Invoke-IsolatedGraphKitProbe -ModulePath $modulePath
 
@@ -110,6 +114,8 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
         $result.Data.Imported | Should -BeTrue
         $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:baseVersion")
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
+        $result.Data.GraphAuthenticationLoaded | Should -BeTrue -Because 'Graph Authentication remains the R8 transition MSAL delivery vehicle'
+        $result.Data.GraphAuthenticationAvailable | Should -BeTrue -Because 'Graph Authentication remains a required runtime package dependency until cutover'
         $result.Data.SecretManagementLoaded | Should -BeTrue -Because 'SecretManagement is restored as a runtime RequiredModule'
         $result.Data.SecretManagementAvailable | Should -BeTrue -Because 'SecretManagement is a required runtime package dependency'
     }
