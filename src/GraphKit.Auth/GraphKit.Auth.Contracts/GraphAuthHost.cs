@@ -1,6 +1,7 @@
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Runtime.Loader;
-using System.Security.Cryptography;
 
 namespace GraphKit.Auth;
 
@@ -10,6 +11,10 @@ public sealed class GraphAuthHost : IDisposable
 
     private const string ExpectedContractMarker = "GraphKit.Auth.Abi/1";
     private const string FactoryTypeName = "GraphKit.Auth.GraphTokenSourceFactory";
+    private const int Running = 0;
+    private const int ShutdownOwnerDisposingSources = 1;
+    private const int SourcesDisposedAwaitingDrain = 2;
+    private const int Finalized = 3;
     private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan MaximumShutdownTimeout = TimeSpan.FromMinutes(2);
 
@@ -17,6 +22,7 @@ public sealed class GraphAuthHost : IDisposable
     private readonly HashSet<GraphTokenSourceProxy> _sources = [];
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ManualResetEventSlim _drained = new(initialState: true);
+    private readonly ManualResetEventSlim _shutdownCompleted = new(initialState: false);
     private readonly TimeSpan _shutdownTimeout;
     private IGraphTokenSourceFactory? _factory;
     private GraphAuthLoadContext? _loadContext;
@@ -110,11 +116,28 @@ public sealed class GraphAuthHost : IDisposable
 
     public void Dispose()
     {
-        List<Exception>? failures = null;
-        bool ownsShutdown = Interlocked.CompareExchange(ref _state, 1, 0) == 0;
-        if (ownsShutdown)
+        bool ownsShutdown = Interlocked.CompareExchange(
+            ref _state,
+            ShutdownOwnerDisposingSources,
+            Running) == Running;
+        if (!ownsShutdown)
         {
-            _shutdown.Cancel();
+            _shutdownCompleted.Wait(_shutdownTimeout);
+            return;
+        }
+
+        List<Exception>? failures = null;
+        try
+        {
+            try
+            {
+                _shutdown.Cancel();
+            }
+            catch (Exception exception)
+            {
+                failures = [exception];
+            }
+
             GraphTokenSourceProxy[] sources;
             lock (_gate)
             {
@@ -134,9 +157,9 @@ public sealed class GraphAuthHost : IDisposable
                 }
             }
         }
-
-        if (Volatile.Read(ref _state) == 1)
+        finally
         {
+            Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
             _drained.Wait(_shutdownTimeout);
             TryFinalizeUnload();
         }
@@ -158,7 +181,7 @@ public sealed class GraphAuthHost : IDisposable
             _drained.Reset();
         }
 
-        if (Volatile.Read(ref _state) != 0)
+        if (Volatile.Read(ref _state) != Running)
         {
             ExitOperation();
             throw new ObjectDisposedException(nameof(GraphAuthHost));
@@ -236,21 +259,33 @@ public sealed class GraphAuthHost : IDisposable
             throw IncompatibleContracts(
                 $"the loaded contracts location is not the declared package candidate: {exception.Message}");
         }
-        StringComparison pathComparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        if (!string.Equals(physicalLoaded, physicalCandidate, pathComparison))
+        if (!string.Equals(physicalLoaded, physicalCandidate, StringComparison.Ordinal))
         {
             throw IncompatibleContracts(
                 $"the default context contains contracts from '{physicalLoaded}', not package candidate '{physicalCandidate}'.");
         }
 
-        AssemblyName candidateIdentity = AssemblyName.GetAssemblyName(physicalCandidate);
-        if (!AssemblyIdentity.EqualsExactReference(loadedIdentity, candidateIdentity) ||
-            !FilesHaveSameSha256(physicalLoaded, physicalCandidate))
+        (AssemblyName CandidateIdentity, Guid CandidateMvid) candidateMetadata;
+        try
+        {
+            candidateMetadata = ReadManagedAssemblyMetadata(physicalCandidate);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or IOException or UnauthorizedAccessException)
         {
             throw IncompatibleContracts(
-                $"the loaded contracts identity or bytes do not match package candidate '{physicalCandidate}'.");
+                $"package candidate '{physicalCandidate}' cannot be inspected as a managed contracts assembly: {exception.Message}");
+        }
+
+        Guid loadedMvid = contractsAssembly.ManifestModule.ModuleVersionId;
+        if (!AssemblyIdentity.EqualsExactReference(
+                loadedIdentity,
+                candidateMetadata.CandidateIdentity) ||
+            loadedMvid != candidateMetadata.CandidateMvid)
+        {
+            throw IncompatibleContracts(
+                $"the resident contracts identity or MVID does not match package candidate '{physicalCandidate}' " +
+                $"(resident MVID '{loadedMvid:D}', candidate MVID '{candidateMetadata.CandidateMvid:D}').");
         }
 
         return contractsAssembly;
@@ -361,7 +396,7 @@ public sealed class GraphAuthHost : IDisposable
 
         Assembly typeAssembly = type.Assembly;
         if (ReferenceEquals(typeAssembly, contractsAssembly) ||
-            AssemblyIdentity.IsFrameworkAssembly(typeAssembly.GetName()))
+            AssemblyIdentity.IsTrustedPlatformAssembly(typeAssembly))
         {
             return;
         }
@@ -389,13 +424,37 @@ public sealed class GraphAuthHost : IDisposable
         }
     }
 
-    private static bool FilesHaveSameSha256(string firstPath, string secondPath)
+    private static (AssemblyName Identity, Guid ModuleVersionId) ReadManagedAssemblyMetadata(
+        string assemblyPath)
     {
-        using FileStream first = File.OpenRead(firstPath);
-        using FileStream second = File.OpenRead(secondPath);
-        byte[] firstHash = SHA256.HashData(first);
-        byte[] secondHash = SHA256.HashData(second);
-        return CryptographicOperations.FixedTimeEquals(firstHash, secondHash);
+        using FileStream stream = new(
+            assemblyPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        using PEReader peReader = new(stream, PEStreamOptions.LeaveOpen);
+        if (!peReader.HasMetadata)
+        {
+            throw new BadImageFormatException(
+                $"Assembly candidate '{assemblyPath}' has no managed metadata.");
+        }
+
+        MetadataReader metadata = peReader.GetMetadataReader();
+        AssemblyDefinition assemblyDefinition = metadata.GetAssemblyDefinition();
+        AssemblyName identity = new(metadata.GetString(assemblyDefinition.Name))
+        {
+            Version = assemblyDefinition.Version,
+            CultureName = assemblyDefinition.Culture.IsNil
+                ? null
+                : metadata.GetString(assemblyDefinition.Culture)
+        };
+        if (!assemblyDefinition.PublicKey.IsNil)
+        {
+            identity.SetPublicKey(metadata.GetBlobBytes(assemblyDefinition.PublicKey));
+        }
+
+        ModuleDefinition moduleDefinition = metadata.GetModuleDefinition();
+        return (identity, metadata.GetGuid(moduleDefinition.Mvid));
     }
 
     private static InvalidOperationException IncompatibleContracts(string detail)
@@ -407,7 +466,7 @@ public sealed class GraphAuthHost : IDisposable
 
     private void ThrowIfStopping()
     {
-        if (Volatile.Read(ref _state) != 0)
+        if (Volatile.Read(ref _state) != Running)
         {
             throw new ObjectDisposedException(
                 nameof(GraphAuthHost),
@@ -420,7 +479,7 @@ public sealed class GraphAuthHost : IDisposable
         if (Interlocked.Decrement(ref _activeOperations) == 0)
         {
             _drained.Set();
-            if (Volatile.Read(ref _state) == 1)
+            if (Volatile.Read(ref _state) == SourcesDisposedAwaitingDrain)
             {
                 TryFinalizeUnload();
             }
@@ -430,24 +489,34 @@ public sealed class GraphAuthHost : IDisposable
     private void TryFinalizeUnload()
     {
         if (Volatile.Read(ref _activeOperations) != 0 ||
-            Interlocked.CompareExchange(ref _state, 2, 1) != 1)
+            Interlocked.CompareExchange(
+                ref _state,
+                Finalized,
+                SourcesDisposedAwaitingDrain) != SourcesDisposedAwaitingDrain)
         {
             return;
         }
 
-        GraphAuthLoadContext? loadContext;
-        lock (_gate)
+        try
         {
-            _sources.Clear();
-            _factory = null;
-            _factoryType = null;
-            _providerAssembly = null;
-            loadContext = _loadContext;
-            _loadContext = null;
-        }
+            GraphAuthLoadContext? loadContext;
+            lock (_gate)
+            {
+                _sources.Clear();
+                _factory = null;
+                _factoryType = null;
+                _providerAssembly = null;
+                loadContext = _loadContext;
+                _loadContext = null;
+            }
 
-        loadContext?.Unload();
-        _shutdown.Dispose();
+            loadContext?.Unload();
+            _shutdown.Dispose();
+        }
+        finally
+        {
+            _shutdownCompleted.Set();
+        }
     }
 
     internal sealed class GraphAuthOperationLease : IDisposable

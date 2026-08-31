@@ -1,6 +1,6 @@
 namespace GraphKit.Auth;
 
-public sealed class GraphTokenSourceProxy : IGraphTokenSource
+internal sealed class GraphTokenSourceProxy : IGraphTokenSource
 {
     private IGraphTokenSource? _inner;
     private IGraphTokenSource? _retiredInner;

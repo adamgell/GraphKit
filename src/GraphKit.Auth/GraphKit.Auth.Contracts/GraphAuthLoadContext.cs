@@ -79,9 +79,11 @@ internal sealed class GraphAuthLoadContext : AssemblyLoadContext
         string? resolvedPath = _resolver.ResolveAssemblyToPath(assemblyName);
         if (resolvedPath is null)
         {
-            if (AssemblyIdentity.IsFrameworkAssembly(assemblyName))
+            Assembly? trustedPlatformAssembly =
+                AssemblyIdentity.ResolveTrustedPlatformAssemblyReference(assemblyName);
+            if (trustedPlatformAssembly is not null)
             {
-                return null;
+                return trustedPlatformAssembly;
             }
 
             throw new FileNotFoundException(
@@ -152,6 +154,9 @@ internal sealed class GraphAuthLoadContext : AssemblyLoadContext
 
 internal static class AssemblyIdentity
 {
+    private static readonly Lazy<AssemblyName[]> TrustedPlatformAssemblyIdentities =
+        new(LoadTrustedPlatformAssemblyIdentities, LazyThreadSafetyMode.ExecutionAndPublication);
+
     internal static bool EqualsExactReference(AssemblyName requested, AssemblyName actual)
     {
         return string.Equals(requested.Name, actual.Name, StringComparison.Ordinal) &&
@@ -163,11 +168,70 @@ internal static class AssemblyIdentity
             requested.GetPublicKeyToken().AsSpan().SequenceEqual(actual.GetPublicKeyToken());
     }
 
-    internal static bool IsFrameworkAssembly(AssemblyName identity)
+    internal static bool IsTrustedPlatformAssemblyReference(AssemblyName identity)
     {
-        string name = identity.Name ?? string.Empty;
-        return name is "mscorlib" or "netstandard" or "Microsoft.CSharp" or "System" or "System.Private.CoreLib" ||
-            name.StartsWith("System.", StringComparison.Ordinal);
+        return TrustedPlatformAssemblyIdentities.Value.Any(
+            trusted => EqualsExactReference(identity, trusted));
+    }
+
+    internal static Assembly? ResolveTrustedPlatformAssemblyReference(AssemblyName reference)
+    {
+        bool trustedSimpleName = TrustedPlatformAssemblyIdentities.Value.Any(
+            trusted => string.Equals(
+                reference.Name,
+                trusted.Name,
+                StringComparison.Ordinal));
+        if (!trustedSimpleName)
+        {
+            return null;
+        }
+
+        try
+        {
+            Assembly resolved = AssemblyLoadContext.Default.LoadFromAssemblyName(reference);
+            return IsTrustedPlatformAssembly(resolved) ? resolved : null;
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or FileLoadException or BadImageFormatException)
+        {
+            return null;
+        }
+    }
+
+    internal static bool IsTrustedPlatformAssembly(Assembly assembly)
+    {
+        return ReferenceEquals(
+                AssemblyLoadContext.GetLoadContext(assembly),
+                AssemblyLoadContext.Default) &&
+            IsTrustedPlatformAssemblyReference(assembly.GetName());
+    }
+
+    private static AssemblyName[] LoadTrustedPlatformAssemblyIdentities()
+    {
+        string? trustedPlatformAssemblies =
+            AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string;
+        if (string.IsNullOrWhiteSpace(trustedPlatformAssemblies))
+        {
+            return [];
+        }
+
+        List<AssemblyName> identities = [];
+        foreach (string path in trustedPlatformAssemblies.Split(
+                     Path.PathSeparator,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                identities.Add(AssemblyName.GetAssemblyName(path));
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or IOException or UnauthorizedAccessException)
+            {
+                // An unreadable TPA entry is not trusted. The fallback remains fail-closed.
+            }
+        }
+
+        return [.. identities];
     }
 }
 
@@ -216,7 +280,7 @@ internal static class PhysicalPath
             throw new IOException($"Path '{fullPath}' has no filesystem root.");
         }
 
-        string current = pathRoot;
+        string current = new DirectoryInfo(pathRoot).FullName;
         string remainder = fullPath[pathRoot.Length..];
         string[] components = remainder.Split(
             [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
@@ -224,16 +288,8 @@ internal static class PhysicalPath
 
         foreach (string component in components)
         {
-            current = Path.Combine(current, component);
-            FileSystemInfo info = Directory.Exists(current)
-                ? new DirectoryInfo(current)
-                : new FileInfo(current);
-            if (!info.Exists)
-            {
-                throw new FileNotFoundException(
-                    $"Cannot resolve physical path because '{current}' does not exist.",
-                    current);
-            }
+            FileSystemInfo info = ResolveActualChild(current, component);
+            current = info.FullName;
 
             FileSystemInfo? target = info.ResolveLinkTarget(returnFinalTarget: true);
             if (target is not null)
@@ -247,16 +303,48 @@ internal static class PhysicalPath
 
     private static bool IsDescendant(string candidate, string root)
     {
-        StringComparison comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
         string normalizedRoot = Path.TrimEndingDirectorySeparator(root);
-        if (string.Equals(candidate, normalizedRoot, comparison))
+        if (string.Equals(candidate, normalizedRoot, StringComparison.Ordinal))
         {
             return false;
         }
 
         string prefix = normalizedRoot + Path.DirectorySeparatorChar;
-        return candidate.StartsWith(prefix, comparison);
+        return candidate.StartsWith(prefix, StringComparison.Ordinal);
+    }
+
+    private static FileSystemInfo ResolveActualChild(
+        string physicalParent,
+        string requestedName)
+    {
+        DirectoryInfo parent = new(physicalParent);
+        FileSystemInfo[] entries = parent.GetFileSystemInfos();
+        FileSystemInfo? exact = entries.SingleOrDefault(
+            entry => string.Equals(entry.Name, requestedName, StringComparison.Ordinal));
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        string requestedPath = Path.Combine(physicalParent, requestedName);
+        if (!Directory.Exists(requestedPath) && !File.Exists(requestedPath))
+        {
+            throw new FileNotFoundException(
+                $"Cannot resolve physical path because '{requestedPath}' does not exist.",
+                requestedPath);
+        }
+
+        FileSystemInfo[] aliases = [.. entries.Where(
+            entry => string.Equals(
+                entry.Name,
+                requestedName,
+                StringComparison.OrdinalIgnoreCase))];
+        if (aliases.Length != 1)
+        {
+            throw new IOException(
+                $"Cannot resolve the filesystem spelling of '{requestedPath}' unambiguously.");
+        }
+
+        return aliases[0];
     }
 }
