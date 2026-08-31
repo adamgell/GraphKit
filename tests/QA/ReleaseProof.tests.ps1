@@ -102,6 +102,7 @@ BeforeAll {
             [int] $Passed = -1,
             [bool] $Executed = $true,
             [switch] $ForGenerator,
+            [switch] $IncludeGraphKitAuth,
             [string] $BaseVersion = '0.4.0',
             [switch] $DirtySource,
             [int] $Total = 896
@@ -118,7 +119,8 @@ BeforeAll {
         $gateDir = Join-Path $fixtureRoot 'tests/QA'
         $scriptsDir = Join-Path $fixtureRoot 'scripts'
         $privateScriptsDir = Join-Path $scriptsDir 'private'
-        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir, $privateScriptsDir -Force | Out-Null
+        $buildDir = Join-Path $fixtureRoot '.build'
+        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir, $privateScriptsDir, $buildDir -Force | Out-Null
 
         Copy-Item -LiteralPath (Join-Path $script:repoRoot 'tests/QA/Assert-GateResult.ps1') `
             -Destination (Join-Path $gateDir 'Assert-GateResult.ps1')
@@ -130,6 +132,12 @@ BeforeAll {
             -Destination (Join-Path $scriptsDir 'Publish-GraphKitPackage.ps1')
         Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/Publish-GraphKitToGallery.ps1') `
             -Destination (Join-Path $scriptsDir 'Publish-GraphKitToGallery.ps1')
+        if ($IncludeGraphKitAuth) {
+            Copy-Item -LiteralPath (Join-Path $script:repoRoot '.build/GraphKitAuth.tasks.ps1') `
+                -Destination (Join-Path $buildDir 'GraphKitAuth.tasks.ps1')
+            Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs') `
+                -Destination (Join-Path $privateScriptsDir 'GraphKit.AuthStageCapture.cs')
+        }
 
         if ($ForGenerator) {
             Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') `
@@ -144,6 +152,10 @@ BeforeAll {
             $version = (& (Join-Path $scriptsDir 'Get-GraphKitTrainVersion.ps1') -RepositoryRoot $fixtureRoot).Trim()
         }
         $prerelease = $version.Substring($baseVersion.Length + 1)
+        $requiredAssembliesLine = if ($IncludeGraphKitAuth) {
+            "    RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')`n"
+        }
+        else { '' }
 
         $payloads = [ordered] @{
             'Data/Operations/Probe.List.psd1' = "@{ SchemaVersion = 1; Type = 'Probe'; Operation = 'List' }`n"
@@ -158,7 +170,7 @@ BeforeAll {
     Copyright = '(c) Fixture Author'
     Description = 'Fixture GraphKit release-proof module package.'
     FunctionsToExport = @('Get-GraphProbe')
-    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' })
+$requiredAssembliesLine    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' })
     PrivateData = @{ PSData = @{
         Tags = @('Fixture', 'Graph')
         LicenseUri = 'https://opensource.org/licenses/MIT'
@@ -170,6 +182,13 @@ BeforeAll {
             'GraphKit.psm1' = "function Get-GraphProbe { 'fixture' }`n"
             'en-US/about_GraphKit.help.txt' = "TOPIC`n    about_GraphKit`n"
         }
+        if ($IncludeGraphKitAuth) {
+            $payloads['Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'] = 'fixture contracts bytes'
+            $payloads['Assemblies/GraphKit.Auth/GraphKit.Auth.dll'] = 'fixture provider bytes'
+            $payloads['Assemblies/GraphKit.Auth/GraphKit.Auth.deps.json'] = '{"runtimeTarget":{"name":"fixture"}}'
+            $payloads['Assemblies/GraphKit.Auth/Microsoft.Identity.Client.dll'] = 'fixture msal bytes'
+            $payloads['Assemblies/GraphKit.Auth/Microsoft.IdentityModel.Abstractions.dll'] = 'fixture abstractions bytes'
+        }
 
         foreach ($relativePath in $payloads.Keys) {
             $path = Join-Path $moduleDir $relativePath
@@ -177,6 +196,12 @@ BeforeAll {
             Set-Content -LiteralPath $path -Value $payloads[$relativePath] -NoNewline -Encoding utf8NoBOM
         }
         Set-Content -LiteralPath (Join-Path $fixtureRoot 'LICENSE') -Value 'Fixture license.' -NoNewline -Encoding utf8NoBOM
+        if ($IncludeGraphKitAuth) {
+            . (Join-Path $buildDir 'GraphKitAuth.tasks.ps1') -SkipTaskRegistration
+            $null = New-GraphKitAuthSealedStage -OutputRoot (Join-Path $fixtureRoot 'output') `
+                -FullVersion $version `
+                -PayloadSourceRoot (Join-Path $moduleDir 'Assemblies/GraphKit.Auth')
+        }
 
         $packagePath = Join-Path $fixtureRoot "output/GraphKit.$version.nupkg"
         Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -500,6 +525,11 @@ function Test-ModuleManifest {
 Describe 'Canonical tested release proof' {
     AfterEach {
         if ($script:fixture) {
+            $fixtureStageRoot = Join-Path $script:fixture.Root 'output/GraphKit.Auth/stage'
+            if (Test-Path -LiteralPath $fixtureStageRoot -PathType Container) {
+                . (Join-Path $script:fixture.Root '.build/GraphKitAuth.tasks.ps1') -SkipTaskRegistration
+                Invoke-GraphKitAuthPrepareClean -OutputRoot (Join-Path $script:fixture.Root 'output') | Out-Null
+            }
             Remove-Item -LiteralPath $script:fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
             $script:fixture = $null
         }
@@ -513,6 +543,16 @@ Describe 'Canonical tested release proof' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Output | Should -Match 'VERIFIED TESTED RELEASE'
         $result.Output | Should -Match '5 shipped file'
+    }
+
+    It 'accepts GraphKit.Auth runtime bytes when the data-file Hashtable declares the exact contracts prerequisite' {
+        $script:fixture = New-GraphKitReleaseProofFixture -IncludeGraphKitAuth
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'VERIFIED TESTED RELEASE'
+        $result.Output | Should -Match '10 shipped file'
     }
 
     It 'accepts a prerelease package from its base-version module directory and records source provenance' {
@@ -682,11 +722,60 @@ Describe 'Canonical tested release proof' {
         $result.Output | Should -Match 'duplicate entry path'
     }
 
+    It 'rejects NFC-equivalent package entry paths before file-set comparison' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::Open(
+            $script:fixture.PackagePath,
+            [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            Add-GraphKitFixtureArchiveText -Archive $archive -EntryName "Data/probé.ps1" -Content 'composed'
+            Add-GraphKitFixtureArchiveText -Archive $archive -EntryName "Data/probe$([char]0x0301).ps1" -Content 'decomposed'
+        }
+        finally {
+            $archive.Dispose()
+        }
+        Update-GraphKitFixtureProofPackageHash -Fixture $script:fixture
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'Unicode|normalization|NFC'
+    }
+
+    It 'rejects a ZIP entry encoded as <Kind>' -ForEach @(
+        @{ Kind = 'a Unix symbolic link'; ExternalAttributes = ((0xA000 -bor 0x1A4) -shl 16) }
+        @{ Kind = 'a Unix non-regular device'; ExternalAttributes = ((0x2000 -bor 0x180) -shl 16) }
+        @{ Kind = 'a Windows reparse point'; ExternalAttributes = 0x0400 }
+        @{ Kind = 'a Windows DOS directory'; ExternalAttributes = 0x0010 }
+    ) {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::Open(
+            $script:fixture.PackagePath,
+            [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $archive.GetEntry('GraphKit.psm1')
+            $entry.ExternalAttributes = $ExternalAttributes
+        }
+        finally {
+            $archive.Dispose()
+        }
+        Update-GraphKitFixtureProofPackageHash -Fixture $script:fixture
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'non-regular|link|reparse'
+    }
+
     It 'rejects unsafe package path <EntryName>' -ForEach @(
         @{ EntryName = '../outside/' }
         @{ EntryName = '/absolute.ps1' }
         @{ EntryName = 'C:/absolute.ps1' }
         @{ EntryName = 'Data\\evil.ps1' }
+        @{ EntryName = 'Data//evil.ps1' }
+        @{ EntryName = 'Data/./evil.ps1' }
         @{ EntryName = 'Data/../evil.ps1' }
         @{ EntryName = 'package/services/metadata/core-properties/../../../../evil.ps1' }
     ) {
@@ -721,6 +810,23 @@ Describe 'Canonical tested release proof' {
 
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'case-colliding|duplicate module-file'
+    }
+
+    It 'rejects NFC-equivalent proof file paths' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $proof = Get-Content -LiteralPath $script:fixture.ProofPath -Raw | ConvertFrom-Json
+        $hash = ('d' * 64) -join ''
+        $proof.module.files = @($proof.module.files) + @(
+            [pscustomobject] @{ path = "Data/probé.ps1"; sha256 = $hash }
+            [pscustomobject] @{ path = "Data/probe$([char]0x0301).ps1"; sha256 = $hash }
+        )
+        $proof | ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $script:fixture.ProofPath -NoNewline -Encoding utf8NoBOM
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'Unicode|normalization|NFC'
     }
 
     It 'rejects nuspec <Field> drift' -ForEach @(
@@ -937,15 +1043,20 @@ Describe 'Test workflow release-proof generation' {
 
         $defaultWorkflow | Should -Match '(?s)-\s+pack.*-\s+test'
         @([regex]::Matches($testWorkflow, '(?m)^\s*-\s+Capture_Tested_Release_Proof_Candidate\s*$')).Count | Should -Be 1
-        @([regex]::Matches($testWorkflow, '(?m)^\s*-\s+Pester_Tests_Stop_On_Fail\s*$')).Count | Should -Be 1
+        @([regex]::Matches($testWorkflow, '(?m)^\s*-\s+Pester_Tests_With_GraphKitAuth_ABI_Fixture\s*$')).Count | Should -Be 1
         @([regex]::Matches($testWorkflow, '(?m)^\s*-\s+Record_Tested_Release_Proof\s*$')).Count | Should -Be 1
-        $testWorkflow.IndexOf('Capture_Tested_Release_Proof_Candidate') | Should -BeLessThan $testWorkflow.IndexOf('Pester_Tests_Stop_On_Fail')
-        $testWorkflow.IndexOf('Pester_Tests_Stop_On_Fail') | Should -BeLessThan $testWorkflow.IndexOf('Record_Tested_Release_Proof')
+        $testWorkflow.IndexOf('Capture_Tested_Release_Proof_Candidate') | Should -BeLessThan $testWorkflow.IndexOf('Pester_Tests_With_GraphKitAuth_ABI_Fixture')
+        $testWorkflow.IndexOf('Pester_Tests_With_GraphKitAuth_ABI_Fixture') | Should -BeLessThan $testWorkflow.IndexOf('Record_Tested_Release_Proof')
         $testTaskLines = @(
             $testWorkflow -split '\r?\n' |
                 Where-Object { $_ -match '^\s*-\s+[A-Za-z]' }
         )
         $testTaskLines[-1] | Should -Match 'Record_Tested_Release_Proof\s*$'
+
+        $authTasks = Get-Content -LiteralPath (Join-Path $script:repoRoot '.build/GraphKitAuth.tasks.ps1') -Raw
+        $guardedTask = [regex]::Match($authTasks,
+            '(?ms)^\s*task Pester_Tests_With_GraphKitAuth_ABI_Fixture \{.*?^\s*\}\s*^\}').Value
+        $guardedTask | Should -Match '(?s)try\s*\{.*Pester_Tests_Stop_On_Fail.*\}\s*finally\s*\{.*Remove-GraphKitAuthAbiTestFixture'
 
         $ci = Get-Content -LiteralPath (Join-Path $script:repoRoot '.github/workflows/ci.yml') -Raw
         $ci | Should -Match 'tested-release-proof\.json'

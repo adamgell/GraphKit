@@ -44,6 +44,15 @@ Describe 'Built module' -Skip:($null -eq $script:BuiltBase) {
             $names | Should -Contain 'Microsoft.PowerShell.SecretManagement'
         }
 
+        It 'loads exactly the packaged GraphKit.Auth contracts assembly before module import' {
+            $d = Import-PowerShellDataFile $script:Manifest
+            (@($d.RequiredAssemblies | Where-Object { $null -ne $_ }) -join '|') |
+                Should -BeExactly 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            Test-Path -LiteralPath (
+                Join-Path $script:BuiltBase.FullName 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            ) -PathType Leaf | Should -BeTrue
+        }
+
         It 'registers the format file via FormatsToProcess' {
             # CopyPaths packages it; only FormatsToProcess makes the views apply.
             (Import-PowerShellDataFile $script:Manifest).FormatsToProcess |

@@ -333,80 +333,213 @@ git commit -m "feat: add the isolated GraphKit Auth provider"
 
 ### Task 5: Integrate compiled build, package, and CI
 
+**Approved base:** `a8b74d8df692e70bb89d1645796c6cecae31aafc`, independently approved with
+no Critical, Important, or Minor findings. Verify this literal HEAD and a clean tracked worktree
+before writing tests; stop if either differs.
+
 **Files:**
 
 - Create: `.build/GraphKitAuth.tasks.ps1`
+- Create: `scripts/private/GraphKit.AuthStageCapture.cs`
 - Modify: `build.yaml`
-- Modify: `source/GraphKit.psd1`
 - Modify: `.github/workflows/ci.yml`
+- Modify: this complete Task 5 section
+- Modify: `scripts/Test-GraphKitReleaseProof.ps1`
+- Modify: `source/GraphKit.psd1` only if needed to make its empty source-manifest
+  `RequiredAssemblies` intent explicit
 - Test: `tests/QA/GraphKitAuthPackage.tests.ps1`
 - Test: `tests/QA/BuiltModule.tests.ps1`
+- Test: `tests/QA/ReleaseProof.tests.ps1`
 
-- [ ] **Step 1: Require digest-bound immutable staging before package copy or import**
+Do not modify the PowerShell authentication bridge, remove `Microsoft.Graph.Authentication`, alter
+public commands, perform live authentication, touch a vault or tenant, create Azure resources, or
+implement Tasks 6-10. Preserve the immutable public `0.3.0` artifact.
 
-Treat the archive/package digest as an input assertion only; an archive digest by itself is
-insufficient to bind the bytes that the module later copies or imports. After locked publish,
-derive an exact manifest of the permitted runtime closure and SHA-256 digest of every staged file.
-Create a new permission-restricted immutable-per-version staging directory with create-new
-semantics: it must never reuse, merge with, or overwrite an existing version directory. Copy only
-the manifest-bound bytes into that directory, reject symbolic links, hard links, junctions,
-reparse-point aliases, path escapes, and any directory or file that retains a writable mutation
-route, then seal the complete directory and files against mutation.
+#### Controller rulings
 
-Immediately before `Copy_GraphKitAuth_Into_BuiltModule` and again before the package import proof,
-re-open the sealed staging root, verify its exact file closure and every digest against the bound
-manifest, verify that the staging root is still permission-restricted and immutable, and fail closed
-if any entry is missing, extra, linked/aliased, writable, replaced, or changed. Tests must prove that
-an existing version directory cannot be reused or overwritten, a post-digest mutation is rejected,
-links/reparse aliases and writable routes are rejected, and only the freshly created sealed staged
-bytes can reach copy/import.
+The sealed stage protects against accidental mutation and unprivileged or different-identity
+writers. Require fresh create-new topology, physical containment, no links or aliases, stable native
+identities, regular-file link count one, exact closure and digest revalidation, and owner-only sealed
+permissions. Directory link counts are platform-defined and are not required to be one. Do not
+claim resistance to the filesystem owner, administrator/root, writable ancestors, or an actor able
+to re-grant permissions. The path-based loader is not an adversarial atomic byte-binding mechanism.
 
-- [ ] **Step 2: Add the locked build and allowlisted copy tasks**
+Keep mutable compiler output and authorized stage bytes separate:
 
-`Build_GraphKitAuth` runs locked restore, .NET tests, and Release publish into
-`output/GraphKit.Auth/stage`. `Copy_GraphKitAuth_Into_BuiltModule` accepts only:
-
-```powershell
-$allowed = @(
-    'GraphKit.Auth.Contracts.dll',
-    'GraphKit.Auth.dll',
-    'GraphKit.Auth.deps.json',
-    'Microsoft.Identity.Client.dll',
-    'Microsoft.IdentityModel.Abstractions.dll'
-)
+```text
+output/GraphKit.Auth/publish/<unique-untrusted-run-id>/
+output/GraphKit.Auth/capture/<unique-secure-run-id>/{manifest.json,payload/}
+output/GraphKit.Auth/stage/<full-module-version>/<manifest-sha256>/{manifest.json,payload/}
 ```
 
-If MSAL 4.82.1's locked runtime closure adds another managed dependency, add that exact filename to
-the allowlist and package test in the same commit; never use `Copy-Item *`.
+`stage` is never the direct `dotnet publish` destination. A version path is create-new and fails
+closed if it exists; it is never reused, merged, or overwritten. Bind Task 5 to one Release lineage:
+locked restore, build without restore, machine-readable xUnit with no build or restore and no
+skipped/unexecuted outcome, then provider publish without build or restore. Contracts, tested
+provider, and published provider must come from that one build.
 
-- [ ] **Step 3: Wire the workflow and built manifest**
+The focused private C# helper is authorized only for relative no-follow opens, physical
+containment, native identity and link count, stable-handle hashing, and platform permission
+evidence. Do not modify `GraphKit.SourceCapture.cs` or embed a large native implementation in the
+Invoke-Build task. The helper is build-time/private and changes no public or runtime ABI.
 
-Insert the two build tasks in the order fixed by the R8 design. Set
-`RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')` only in the built
-manifest after the allowlisted contracts DLL exists, then run `Test-ModuleManifest` against that
-built path. Keep source `RequiredAssemblies` empty so source validation never points at a generated
-file absent from `source/`. Add `actions/setup-dotnet@v4` with `10.0.400` before dependency restore
-in each existing matrix row.
+- [ ] **Step 1: Record the approved baseline and write genuine failing tests**
 
-- [ ] **Step 4: Pack and run package tests**
+Record the approved boundary before implementation: 48 .NET tests; 23 focused
+`GraphKitAuth.Tests.ps1` cases; 8 package cases; and 31 combined cases with 26 passed and exactly
+five missing direct package paths. Reds must be attributable to absent Task 5 behavior, with no
+discovery error, skip, or NotRun.
 
-Run:
+Test all five package paths, exact five-file closure, existing-version refusal without mutation,
+and missing, extra, renamed, writable, byte-mutated, byte-identical-replaced, hard-linked,
+escaped-linked, case-aliased, separator-aliased, Unicode-normalization-aliased, symlink, and
+junction/reparse mutations. Require native identity stability and link count one for regular files
+and the manifest, but never require directory link count one. Keep the source `RequiredAssemblies`
+empty and the built value exact. Match stage, built-module, and archive digests. Use a fresh process
+to load contracts in Default ALC and the provider/MSAL/IdentityModel in one named collectible ALC,
+construct without acquisition from the reverified sealed payload, preserve any Default-ALC MSAL,
+and prove unload.
 
-```powershell
-./build.ps1 -ResolveDependency -Tasks noop
-./build.ps1 -Tasks pack
-Invoke-Pester ./tests/QA/GraphKitAuthPackage.tests.ps1,./tests/QA/BuiltModule.tests.ps1 -Output Detailed
+Extend release-proof mutations for exact duplicates, portable case, NFC, separators, traversal,
+and ZIP external attributes encoding symlinks, reparse points, or non-regular files. Negative
+fixtures must not contact Graph, read a vault, acquire a token, or require external state.
+
+- [ ] **Step 2: Implement one locked build lineage and fresh sealed staging**
+
+`Build_GraphKitAuth` asserts `dotnet --version` is exactly `10.0.400`, restores the solution once
+with `--locked-mode`, builds the complete Release solution with `--no-restore`, runs the Release test
+project with `--no-build --no-restore`, and publishes only the already-built provider with
+`--no-build --no-restore --no-self-contained` and no RID. Parse TRX and require at least the approved
+48 tests with `total = executed = passed` and zero failed, skipped, not-executed, aborted, timeout,
+or error outcomes. Preserve `TreatWarningsAsErrors` and compare provider and dependency identities
+and digests across the build/test/publish lineage.
+
+Raw provider publish is untrusted and contains exactly:
+
+```text
+GraphKit.Auth.dll
+GraphKit.Auth.deps.json
+Microsoft.Identity.Client.dll
+Microsoft.IdentityModel.Abstractions.dll
 ```
 
-Expected: contracts load in Default ALC; provider and exact MSAL load in the named non-default ALC;
-every packaged runtime file is allowlisted; no PDB/ref/native file exists.
+Obtain `GraphKit.Auth.Contracts.dll` separately from the same build, verify its dependency-free
+identity and lineage, and form the exact fixed five-file payload. Verify managed identities,
+including MSAL `4.82.1.0` and IdentityModel `8.14.0.0`; do not permit another runtime dependency.
 
-- [ ] **Step 5: Commit**
+Create an owner-only capture on the same filesystem. Copy each file individually with create-new
+semantics, flush it, reopen without following links, and verify digest, native identity, link count,
+closure, containment, and aliases. Write a fixed-property-order canonical UTF-8-without-BOM manifest
+containing no absolute path, run ID, timestamp, or volatile data. It records full module version,
+ordinal payload paths, lengths, SHA-256 values, native file identities, link counts, directory
+identities, and final permission policy; it does not recursively contain its own hash or identity.
+The manifest itself is a no-follow regular link-count-one file.
+
+Seal all files and directories against owner writes, using exact Unix modes or protected Windows
+ACLs rather than the read-only attribute alone. Hash canonical manifest bytes, same-filesystem
+atomically rename the capture into `stage/<full-version>/<manifest-sha256>`, then reopen and
+revalidate the manifest-name/hash binding, closures, identities, permissions, aliases, and physical
+containment. `manifest.json` is metadata; only `payload/` supplies runtime bytes.
+
+`Prepare_GraphKitAuth_Clean` runs before Sampler `Clean`. It first verifies every prior stage and
+may unseal only exact physically contained envelopes whose canonical manifest, digest path,
+identities, permissions, and closure pass. Missing or forged manifests, partial sealing, links,
+aliases, and containment ambiguity fail closed before `Clean`.
+
+Machine-readable .NET results live only below a unique
+`output/GraphKit.Auth/dotnet-test/<run-id>/`. After capture and before the build task returns, move
+only these literal generated roots intact into a recoverable task-specific temporary quarantine,
+including on failure:
+
+```text
+src/GraphKit.Auth/GraphKit.Auth.Contracts/bin
+src/GraphKit.Auth/GraphKit.Auth.Contracts/obj
+src/GraphKit.Auth/GraphKit.Auth/bin
+src/GraphKit.Auth/GraphKit.Auth/obj
+src/GraphKit.Auth/GraphKit.Auth.Tests/bin
+src/GraphKit.Auth/GraphKit.Auth.Tests/obj
+src/GraphKit.Auth/GraphKit.Auth.Tests/TestResults
+```
+
+Do not resolve these through recursion, wildcard expansion, or discovery. Quarantine must finish
+before module version or proof state is recaptured.
+
+The approved Task 3/4 ABI Pester boundary resolves its actual-provider candidate from three of
+those historical source-build paths. After release-proof capture, materialize only the sealed,
+immediately reverified five payload files at those exact paths for that test boundary; refuse any
+pre-existing destination and require every copied digest and link count to match the manifest.
+Use a temporary process-scoped `core.excludesFile` containing exactly five root-anchored literal
+file patterns, saving and restoring every inherited `GIT_CONFIG_*` value without changing any Git
+configuration file. Prove an unrelated untracked sentinel still changes source identity. One
+outer `try/finally` runs Pester, removes exactly the five files and only empty literal parents,
+restores Git environment, and proves fingerprint/status restoration before release-proof
+finalization runs with no exclusion active. This is test-fixture projection from the authorized
+stage, not another build or another package source.
+
+- [ ] **Step 3: Copy only a freshly reverified stage into the built module**
+
+Immediately before copy, repeat the full sealed-stage verification. Create
+`Assemblies/GraphKit.Auth` fresh and copy the five literal names individually with create-new
+semantics; never use `Copy-Item *`. Rehash destinations and reject extras, links, aliases, or
+replacement. Only after contracts exists, update only the built manifest so `RequiredAssemblies`
+is exactly `@('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')`, then run
+`Test-ModuleManifest`. Keep the source value empty and retain both current runtime modules.
+
+The build order is exact:
+
+```text
+Prepare_GraphKitAuth_Clean
+  -> Clean
+  -> Build_GraphKitAuth
+  -> Build_Module_ModuleBuilder
+  -> Copy_GraphKitAuth_Into_BuiltModule
+  -> Build_NestedModules_ModuleBuilder
+  -> Create_changelog_release_output
+  -> package_graphkit_r8_nupkg
+```
+
+- [ ] **Step 4: Reverify before import and harden canonical proof**
+
+The release-proof verifier must match packed runtime bytes to the sealed manifest and reject
+duplicates, portable-case and NFC-equivalent collisions, backslashes, absolute/drive paths,
+empty/dot/dot-dot segments, and ZIP link/reparse/non-regular encodings. The package test
+independently proves the exact five-file auth subtree. Reverify the stage immediately before the
+fresh-process `GraphAuthHost` probe; never load that probe from raw publish or the mutable built
+copy. Built and archive bytes independently match all five stage digests.
+
+PowerShell 7.4 CI is the future .NET 8 runtime/import evidence; local xUnit on this host rolls the
+net8 project to installed .NET 10. Record the distinction and do not claim observed .NET 8 evidence
+until the exact-SHA PowerShell 7.4 row passes.
+
+- [ ] **Step 5: Enforce exact-event-source CI and run all gates**
+
+CI retains all six Windows/Ubuntu/macOS by PowerShell `7.4.19`/`7.6.5` rows and triggers on pushes
+to `main` and `codex/**`, pull requests, and manual dispatch. Checkout selects PR head repository
+and full head SHA for PRs, otherwise current repository and `github.sha`, with `fetch-depth: 0`.
+Immediately assert `git rev-parse HEAD` ordinally against that event SHA before SDK setup or restore.
+Use one `actions/setup-dotnet@v4` for `10.0.400`, assert the complete three-part PowerShell version,
+and reach `Build_GraphKitAuth` through pack in every row. A same-SHA push run is later release
+authority; the PR merge-ref run is supplementary.
+
+Run locked dependency restore, pack, focused Auth ABI/package/built/release-proof Pester, then the
+full `./build.ps1 -Tasks test`. Require zero failures, discovery errors, skips, and NotRun. After
+the dirty candidate is green, commit once, then repeat pack/test on the exact clean commit because
+its prerelease identity changes. Run the standalone whole-result gate and canonical verifier
+against the already-tested package. Require clean status, `git diff --check`, unchanged lock graphs,
+exact five-file closure, no generated files tracked, all seven literal generated roots absent, and
+no blanket ignore rule. Retain ignored package, proof, and stage evidence.
+
+- [ ] **Step 6: Commit and report**
 
 ```bash
-git add .build/GraphKitAuth.tasks.ps1 build.yaml source/GraphKit.psd1 .github/workflows/ci.yml tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/BuiltModule.tests.ps1
+git add .build/GraphKitAuth.tasks.ps1 scripts/private/GraphKit.AuthStageCapture.cs build.yaml source/GraphKit.psd1 .github/workflows/ci.yml docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md scripts/Test-GraphKitReleaseProof.ps1 tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/BuiltModule.tests.ps1 tests/QA/ReleaseProof.tests.ps1
 git commit -m "build: package the isolated GraphKit Auth runtime"
 ```
+
+Write ignored `.superpowers/sdd/2026-08-30-r8-graphkit-auth/task-5-report.md` after the commit with
+the exact SHA, red/green counts, SDK/runtime distinction, threat boundary, platform fixtures,
+dependency closure, stage/build/archive digests, remaining external CI evidence, and concerns. No
+push, PR, publication, tenant, vault, token acquisition, Azure, merge, or gallery action occurs.
 
 ### Task 6: Cut built-in context construction over to compiled sources
 

@@ -149,6 +149,7 @@ if ($proofMinimumTests -ne $minimumTests -or
 }
 
 $proofFileMap = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$proofNormalizedPathMap = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($fileRecord in $proofModuleFiles) {
     try {
         $relativePath = [string] $fileRecord.path
@@ -161,7 +162,9 @@ foreach ($fileRecord in $proofModuleFiles) {
     $segments = @($relativePath -split '/')
     if ([string]::IsNullOrWhiteSpace($relativePath) -or
         [System.IO.Path]::IsPathRooted($relativePath) -or
+        $relativePath -match '^[A-Za-z]:' -or
         $relativePath.IndexOf('\') -ge 0 -or
+        $segments -contains '' -or
         $segments -contains '.' -or
         $segments -contains '..' -or
         $relativeHash -notmatch '^[0-9a-fA-F]{64}$') {
@@ -169,6 +172,11 @@ foreach ($fileRecord in $proofModuleFiles) {
     }
     if (-not $proofFileMap.TryAdd($relativePath, $relativeHash.ToLowerInvariant())) {
         throw "The tested release proof contains a duplicate or case-colliding module-file record for '$relativePath'."
+    }
+    $normalizedPath = $relativePath.Normalize([Text.NormalizationForm]::FormC)
+    if ($relativePath -cne $normalizedPath -or
+        -not $proofNormalizedPathMap.TryAdd($normalizedPath, $relativePath)) {
+        throw "The tested release proof contains a Unicode-normalization or NFC-colliding module-file record for '$relativePath'."
     }
 }
 if ($proofFileMap.Count -eq 0) {
@@ -188,9 +196,13 @@ if (-not (Test-Path -LiteralPath $builtModuleDirectory -PathType Container)) {
 )
 [System.Array]::Sort($currentRelativePaths, [System.StringComparer]::Ordinal)
 $currentPathMap = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$currentNormalizedPathMap = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($relativePath in $currentRelativePaths) {
-    if (-not $currentPathMap.TryAdd($relativePath, $relativePath)) {
-        throw "The built module contains case-colliding paths for '$relativePath'."
+    $normalizedPath = $relativePath.Normalize([Text.NormalizationForm]::FormC)
+    if ($relativePath -cne $normalizedPath -or
+        -not $currentPathMap.TryAdd($relativePath, $relativePath) -or
+        -not $currentNormalizedPathMap.TryAdd($normalizedPath, $relativePath)) {
+        throw "The built module contains case- or Unicode-normalization-colliding paths for '$relativePath'."
     }
 }
 
@@ -232,6 +244,53 @@ if ([string] $builtManifest.PrivateData.PSData.Prerelease -cne $expectedPrerelea
     throw "The built GraphKit.psd1 prerelease '$($builtManifest.PrivateData.PSData.Prerelease)' does not match proof version '$moduleVersion'."
 }
 
+$graphKitAuthContractPath = 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+$builtRequiredAssemblies = if ($builtManifest -is [Collections.IDictionary] -and
+    $builtManifest.Contains('RequiredAssemblies')) {
+    @($builtManifest['RequiredAssemblies'] | ForEach-Object { [string]$_ })
+}
+else {
+    @()
+}
+$proofGraphKitAuthPaths = @($proofFileMap.Keys | Where-Object { $_.StartsWith('Assemblies/GraphKit.Auth/', [StringComparison]::Ordinal) })
+$verifiedGraphKitAuthStage = $null
+if (($builtRequiredAssemblies -join '|') -ceq $graphKitAuthContractPath) {
+    $taskPath = Join-Path $RepositoryRoot '.build/GraphKitAuth.tasks.ps1'
+    $helperPath = Join-Path $RepositoryRoot 'scripts/private/GraphKit.AuthStageCapture.cs'
+    if (-not (Test-Path -LiteralPath $taskPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
+        throw 'The built GraphKit.Auth prerequisite has no tracked sealed-stage verifier.'
+    }
+    . $taskPath -SkipTaskRegistration
+    $stageVersionRoot = Join-Path $RepositoryRoot "output/GraphKit.Auth/stage/$moduleVersion"
+    if (-not (Test-Path -LiteralPath $stageVersionRoot -PathType Container)) {
+        throw "The sealed GraphKit.Auth stage for '$moduleVersion' is missing."
+    }
+    $stageEntries = @([IO.Directory]::EnumerateFileSystemEntries($stageVersionRoot))
+    if ($stageEntries.Count -ne 1 -or -not (Test-Path -LiteralPath $stageEntries[0] -PathType Container)) {
+        throw "The sealed GraphKit.Auth stage for '$moduleVersion' is not one exact digest envelope."
+    }
+    $verifiedGraphKitAuthStage = Test-GraphKitAuthSealedStage -StagePath $stageEntries[0] -FullVersion $moduleVersion
+    $stageModulePaths = @($verifiedGraphKitAuthStage.Manifest.files | ForEach-Object {
+        "Assemblies/GraphKit.Auth/$([IO.Path]::GetFileName([string]$_.path))"
+    })
+    $proofGraphKitAuthSet = @($proofGraphKitAuthPaths | Sort-Object) -join '|'
+    $stageGraphKitAuthSet = @($stageModulePaths | Sort-Object) -join '|'
+    if ($proofGraphKitAuthSet -cne $stageGraphKitAuthSet) {
+        throw 'The tested release proof GraphKit.Auth subtree does not match the sealed five-file manifest.'
+    }
+    foreach ($stageFile in @($verifiedGraphKitAuthStage.Manifest.files)) {
+        $modulePath = "Assemblies/GraphKit.Auth/$([IO.Path]::GetFileName([string]$stageFile.path))"
+        if (-not $proofFileMap.ContainsKey($modulePath) -or
+            $proofFileMap[$modulePath] -cne [string]$stageFile.sha256) {
+            throw "The tested release proof '$modulePath' digest does not match the sealed GraphKit.Auth stage."
+        }
+    }
+}
+elseif ($proofGraphKitAuthPaths.Count -ne 0) {
+    throw 'The tested release proof contains GraphKit.Auth runtime bytes without the exact built contracts prerequisite.'
+}
+
 $currentPackageHash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($currentPackageHash -cne $proofPackageHash) {
     throw "The '$($package.Name)' package archive changed after the passing test run."
@@ -252,6 +311,9 @@ try {
     $archivePathMap = [System.Collections.Generic.Dictionary[string, System.IO.Compression.ZipArchiveEntry]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
+    $archiveNormalizedPathMap = [System.Collections.Generic.Dictionary[string, string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($entry in $archive.Entries) {
         $entryPath = [string] $entry.FullName
         $segments = @($entryPath -split '/')
@@ -268,6 +330,20 @@ try {
         }
         if (-not $archivePathMap.TryAdd($entryPath, $entry)) {
             throw "Package '$($package.Name)' contains a duplicate entry path or case-colliding path '$entryPath'."
+        }
+        $normalizedEntryPath = $entryPath.Normalize([Text.NormalizationForm]::FormC)
+        if ($entryPath -cne $normalizedEntryPath -or
+            -not $archiveNormalizedPathMap.TryAdd($normalizedEntryPath, $entryPath)) {
+            throw "Package '$($package.Name)' contains a Unicode-normalization or NFC-colliding package entry path '$entryPath'."
+        }
+        $externalAttributes = ([int64]$entry.ExternalAttributes) -band 0xffffffffL
+        $unixMode = ($externalAttributes -shr 16) -band 0xffff
+        $unixFileType = $unixMode -band 0xf000
+        $windowsAttributes = $externalAttributes -band 0xffff
+        if (($windowsAttributes -band 0x0010) -ne 0 -or
+            ($windowsAttributes -band 0x0400) -ne 0 -or
+            ($unixFileType -ne 0 -and $unixFileType -ne 0x8000)) {
+            throw "Package '$($package.Name)' contains a link, reparse point, or non-regular ZIP entry '$entryPath'."
         }
     }
 
