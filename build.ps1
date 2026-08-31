@@ -329,6 +329,21 @@ process
             . $taskFile.FullName
         }
 
+        task package_graphkit_r8_nupkg {
+            . Set-SamplerTaskVariable
+
+            if (-not $BuiltModuleManifest) {
+                throw "No valid manifest found for project $ProjectName."
+            }
+            if (-not (Get-Command -Name Compress-PSResource -ErrorAction SilentlyContinue)) {
+                throw 'Compress-PSResource is required to create GraphKit R8 prerelease packages.'
+            }
+
+            Get-ChildItem -LiteralPath $OutputDirectory -Filter "$ProjectName.*.nupkg" -File -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction Stop
+            Compress-PSResource -Path $BuiltModuleBase -DestinationPath $OutputDirectory -ErrorAction Stop
+        }
+
         # Synopsis: Empty task, useful to test the bootstrap process.
         task noop { }
 
@@ -523,6 +538,9 @@ begin
     if ($MyInvocation.ScriptName -notlike '*Invoke-Build.ps1')
     {
         Write-Verbose -Message "Bootstrap completed. Handing back to InvokeBuild."
+
+        $versionScript = Join-Path $PSScriptRoot 'scripts/Get-GraphKitTrainVersion.ps1'
+        $env:ModuleVersion = (& $versionScript -RepositoryRoot $PSScriptRoot).Trim()
 
         if ($PSBoundParameters.ContainsKey('ResolveDependency'))
         {

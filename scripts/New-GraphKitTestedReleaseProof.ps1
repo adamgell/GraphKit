@@ -37,6 +37,32 @@ $proofPath = Join-Path $resultsDirectory 'tested-release-proof.json'
 function Get-GraphKitReleaseCandidateState {
     param([Parameter(Mandatory)] [string] $Root)
 
+    $versionScript = Join-Path $Root 'scripts/Get-GraphKitTrainVersion.ps1'
+    if (-not (Test-Path -LiteralPath $versionScript -PathType Leaf)) {
+        throw "Release proof requires '$versionScript'."
+    }
+    $fullVersion = (& $versionScript -RepositoryRoot $Root).Trim()
+    if ($LASTEXITCODE -ne 0 -or $fullVersion -notmatch '^(?<base>\d+\.\d+\.\d+)-r8\.g(?<revision>[0-9a-f]{12})(?:\.d(?<diff>[0-9a-f]{12}))?$') {
+        throw "Release proof received an invalid GraphKit train version '$fullVersion'."
+    }
+    $baseVersion = $Matches['base']
+    $sourceRevision = (& git -C $Root rev-parse HEAD).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "Release proof cannot resolve a 40-character source revision for '$Root'."
+    }
+    $sourceDiff = (& git -C $Root diff --binary HEAD)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release proof cannot determine the source state for '$Root'."
+    }
+    $sourceClean = [string]::IsNullOrEmpty($sourceDiff)
+    $sourceDiffHash = if ($sourceClean) {
+        $null
+    }
+    else {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($sourceDiff)
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    }
+
     $moduleRoot = Join-Path $Root 'output/module/GraphKit'
     $versionDirectories = @(
         Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction SilentlyContinue
@@ -51,8 +77,12 @@ function Get-GraphKitReleaseCandidateState {
         throw "Built GraphKit manifest is missing at '$manifestPath'."
     }
     $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
-    if ([string] $manifest.ModuleVersion -cne $version) {
+    if ($version -cne $baseVersion -or [string] $manifest.ModuleVersion -cne $baseVersion) {
         throw "Built manifest version '$($manifest.ModuleVersion)' does not match its version directory '$version'."
+    }
+    $expectedPrerelease = $fullVersion.Substring($baseVersion.Length + 1)
+    if ([string] $manifest.PrivateData.PSData.Prerelease -cne $expectedPrerelease) {
+        throw "Built manifest prerelease '$($manifest.PrivateData.PSData.Prerelease)' does not match release candidate '$fullVersion'."
     }
 
     [string[]] $relativePaths = @(
@@ -74,7 +104,7 @@ function Get-GraphKitReleaseCandidateState {
         }
     )
 
-    $packagePath = Join-Path $Root "output/GraphKit.$version.nupkg"
+    $packagePath = Join-Path $Root "output/GraphKit.$fullVersion.nupkg"
     if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
         throw "Release candidate package '$packagePath' is missing. Run ./build.ps1 -Tasks pack before test."
     }
@@ -82,8 +112,14 @@ function Get-GraphKitReleaseCandidateState {
     [pscustomobject] [ordered] @{
         module = [pscustomobject] [ordered] @{
             name = 'GraphKit'
-            version = $version
+            version = $fullVersion
+            baseVersion = $baseVersion
             files = $files
+        }
+        source = [pscustomobject] [ordered] @{
+            revision = $sourceRevision
+            clean = $sourceClean
+            diffSha256 = $sourceDiffHash
         }
         package = [pscustomobject] [ordered] @{
             name = Split-Path -Leaf $packagePath
@@ -103,6 +139,7 @@ function Assert-GraphKitReleaseCandidateUnchanged {
     $moduleChanged =
         [string] $Captured.module.name -cne [string] $Current.module.name -or
         [string] $Captured.module.version -cne [string] $Current.module.version -or
+        [string] $Captured.module.baseVersion -cne [string] $Current.module.baseVersion -or
         $capturedFiles.Count -ne $currentFiles.Count
     if (-not $moduleChanged) {
         for ($index = 0; $index -lt $capturedFiles.Count; $index++) {
@@ -115,6 +152,11 @@ function Assert-GraphKitReleaseCandidateUnchanged {
     }
     if ($moduleChanged) {
         throw 'The built module candidate changed after capture; no tested release proof was emitted.'
+    }
+    if ([string] $Captured.source.revision -cne [string] $Current.source.revision -or
+        [bool] $Captured.source.clean -ne [bool] $Current.source.clean -or
+        [string] $Captured.source.diffSha256 -cne [string] $Current.source.diffSha256) {
+        throw 'The source candidate changed after capture; no tested release proof was emitted.'
     }
     if ([string] $Captured.package.name -cne [string] $Current.package.name -or
         [string] $Captured.package.sha256 -cne [string] $Current.package.sha256) {
@@ -264,9 +306,10 @@ if ($Stage -eq 'Capture') {
 
     $candidate = Get-GraphKitReleaseCandidateState -Root $RepositoryRoot
     $capture = [pscustomobject] [ordered] @{
-        schemaVersion = 1
+        schemaVersion = 2
         runId = [guid]::NewGuid().ToString('D')
         module = $candidate.module
+        source = $candidate.source
         package = $candidate.package
     }
     $stagedCandidatePath = "$candidatePath.tmp-$PID-$([guid]::NewGuid().ToString('N'))"
@@ -295,7 +338,7 @@ catch {
     throw "The pre-test candidate capture is unreadable: $($_.Exception.Message)"
 }
 $parsedRunId = [guid]::Empty
-if ([int] $captured.schemaVersion -ne 1 -or
+if ([int] $captured.schemaVersion -ne 2 -or
     -not [guid]::TryParse([string] $captured.runId, [ref] $parsedRunId) -or
     $parsedRunId -eq [guid]::Empty) {
     throw 'The pre-test candidate capture has an invalid schema version or run id.'
@@ -335,8 +378,9 @@ $postGateCandidate = Get-GraphKitReleaseCandidateState -Root $RepositoryRoot
 Assert-GraphKitReleaseCandidateUnchanged -Captured $captured -Current $postGateCandidate
 
 $releaseProof = [pscustomobject] [ordered] @{
-    schemaVersion = 1
+    schemaVersion = 2
     runId = [string] $captured.runId
+    source = $captured.source
     module = $captured.module
     package = $captured.package
     testRun = [pscustomobject] [ordered] @{

@@ -2,9 +2,24 @@ BeforeAll {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
-    $script:expectedVersion = '0.3.0'
+    $script:baseVersion = '0.4.0'
+    $script:train = 'r8'
     $script:sourceManifestPath = Join-Path $script:repoRoot 'source/GraphKit.psd1'
-    $script:builtManifestPath = Join-Path $script:repoRoot "output/module/GraphKit/$script:expectedVersion/GraphKit.psd1"
+
+    $script:revision = (& git -C $script:repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
+    $script:diff = (& git -C $script:repoRoot diff --binary HEAD)
+    $script:dirtySuffix = if ([string]::IsNullOrEmpty($script:diff)) {
+        ''
+    }
+    else {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($script:diff)
+        $hash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        ".d$($hash.Substring(0, 12))"
+    }
+    $script:expectedVersion = "$($script:baseVersion)-$($script:train).g$($script:revision.Substring(0, 12))$($script:dirtySuffix)"
+    $script:expectedPrerelease = $script:expectedVersion.Substring($script:baseVersion.Length + 1)
+    $script:versionScriptPath = Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1'
+    $script:builtManifestPath = Join-Path $script:repoRoot "output/module/GraphKit/$script:baseVersion/GraphKit.psd1"
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:expectedVersion.nupkg"
 
     function Get-GraphKitPackageMetadata {
@@ -31,34 +46,45 @@ BeforeAll {
 }
 
 Describe 'GraphKit release package identity' -Tag 'QA' {
-    It 'declares released version 0.3.0 in source and release metadata' {
+    It 'declares the 0.4.0 r8 successor seed in source metadata' {
         $source = Import-PowerShellDataFile $script:sourceManifestPath
 
-        [string] $source.ModuleVersion | Should -Be $script:expectedVersion
-        [string] $source.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.3\.0(?:\r?\n)'
+        [string] $source.ModuleVersion | Should -Be $script:baseVersion
+        [string] $source.PrivateData.PSData.Prerelease | Should -Be $script:train
+        [string] $source.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.4\.0(?:\r?\n)'
     }
 
-    It 'builds and packages the 0.3.0 identity' {
+    It 'derives the complete package version from the exact repository source state' {
+        Test-Path -LiteralPath $script:versionScriptPath -PathType Leaf | Should -BeTrue
+        if (Test-Path -LiteralPath $script:versionScriptPath -PathType Leaf) {
+            (& $script:versionScriptPath -RepositoryRoot $script:repoRoot) | Should -Be $script:expectedVersion
+        }
+    }
+
+    It 'builds the base module directory and packages the full r8 identity' {
         Test-Path $script:builtManifestPath -PathType Leaf | Should -BeTrue
         Test-Path $script:packagePath -PathType Leaf | Should -BeTrue
+        Test-Path (Join-Path $script:repoRoot 'output/GraphKit.0.3.0.nupkg') -PathType Leaf | Should -BeFalse
     }
 
-    It 'preserves 0.3.0 in the built manifest and exact package metadata' {
+    It 'preserves base and full prerelease identities in the built manifest and package metadata' {
         Test-Path $script:builtManifestPath -PathType Leaf | Should -BeTrue
         Test-Path $script:packagePath -PathType Leaf | Should -BeTrue
 
         $builtManifest = Import-PowerShellDataFile $script:builtManifestPath
         $packageMetadata = Get-GraphKitPackageMetadata $script:packagePath
-        [string] $builtManifest.ModuleVersion | Should -Be $script:expectedVersion
+        [string] $builtManifest.ModuleVersion | Should -Be $script:baseVersion
+        [string] $builtManifest.PrivateData.PSData.Prerelease | Should -Be $script:expectedPrerelease
         [string] $packageMetadata.version | Should -Be $script:expectedVersion
     }
 
-    It 'preserves 0.3.0 in the manifest extracted from the exact nupkg' {
+    It 'preserves the base module manifest in the exact prerelease nupkg' {
         Test-Path $script:packagePath -PathType Leaf | Should -BeTrue
 
         $extractRoot = Join-Path $TestDrive 'release'
         [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $extractRoot)
         $packagedManifest = Import-PowerShellDataFile (Join-Path $extractRoot 'GraphKit.psd1')
-        [string] $packagedManifest.ModuleVersion | Should -Be $script:expectedVersion
+        [string] $packagedManifest.ModuleVersion | Should -Be $script:baseVersion
+        [string] $packagedManifest.PrivateData.PSData.Prerelease | Should -Be $script:expectedPrerelease
     }
 }

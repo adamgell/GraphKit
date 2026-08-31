@@ -18,6 +18,7 @@
     ModuleBuilder               = '3.1.8'
     ChangelogManagement         = '3.1.0'
     Sampler                     = '0.120.1'
+    'Microsoft.PowerShell.PSResourceGet' = '1.2.0'
 
 
 

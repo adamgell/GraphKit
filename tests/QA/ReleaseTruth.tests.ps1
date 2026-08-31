@@ -61,10 +61,11 @@ Describe 'GraphKit current release truth' -Tag 'QA' {
         Assert-CurrentReleaseEvidence -Text $changelogCurrentRelease -Location 'CHANGELOG 0.3.0 release section'
     }
 
-    It 'preserves the immutable released manifest identity' {
+    It 'retains immutable release evidence while source declares the successor train seed' {
         $manifest = Import-PowerShellDataFile $manifestPath
-        [string] $manifest.ModuleVersion | Should -Be '0.3.0'
-        [string] $manifest.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.3\.0(?:\r?\n)'
+        [string] $manifest.ModuleVersion | Should -Be '0.4.0'
+        [string] $manifest.PrivateData.PSData.Prerelease | Should -Be 'r8'
+        [string] $manifest.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.4\.0(?:\r?\n)'
     }
 
     It 'marks the dated integration plan as executed and superseded by publication evidence' {

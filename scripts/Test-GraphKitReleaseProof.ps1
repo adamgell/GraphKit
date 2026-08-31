@@ -87,8 +87,12 @@ try {
     $proof = Get-Content -LiteralPath $ProofPath -Raw | ConvertFrom-Json -Depth 10
     $proofSchemaVersion = [int] $proof.schemaVersion
     $proofRunId = [string] $proof.runId
+    $proofSourceRevision = [string] $proof.source.revision
+    $proofSourceClean = $proof.source.clean
+    $proofSourceDiffHash = [string] $proof.source.diffSha256
     $proofModuleName = [string] $proof.module.name
     $proofModuleVersion = [string] $proof.module.version
+    $proofModuleBaseVersion = [string] $proof.module.baseVersion
     $proofModuleFiles = @($proof.module.files)
     $proofPackageName = [string] $proof.package.name
     $proofPackageHash = [string] $proof.package.sha256
@@ -106,10 +110,28 @@ catch {
 }
 
 $parsedRunId = [guid]::Empty
-if ($proofSchemaVersion -ne 1 -or
+if ($proofSchemaVersion -ne 2 -or
     -not [guid]::TryParse($proofRunId, [ref] $parsedRunId) -or
     $parsedRunId -eq [guid]::Empty) {
     throw "The tested release proof '$ProofPath' has an unsupported schema version or invalid run id."
+}
+if ($proofSourceRevision -notmatch '^[0-9a-f]{40}$' -or $proofSourceClean -isnot [bool]) {
+    throw "The tested release proof '$ProofPath' has invalid source provenance."
+}
+if ($proofSourceClean) {
+    if (-not [string]::IsNullOrEmpty($proofSourceDiffHash)) {
+        throw "The tested release proof '$ProofPath' records a diff hash for a clean source state."
+    }
+}
+elseif ($proofSourceDiffHash -notmatch '^[0-9a-f]{64}$') {
+    throw "The tested release proof '$ProofPath' has no valid dirty-source diff hash."
+}
+$expectedProofVersion = "$proofModuleBaseVersion-r8.g$($proofSourceRevision.Substring(0, 12))"
+if (-not $proofSourceClean) {
+    $expectedProofVersion += ".d$($proofSourceDiffHash.Substring(0, 12))"
+}
+if ($proofModuleBaseVersion -notmatch '^\d+\.\d+\.\d+$' -or $proofModuleVersion -cne $expectedProofVersion) {
+    throw "The tested release proof '$ProofPath' does not bind its module version to source provenance."
 }
 if ($proofModuleName -cne $moduleName -or $proofModuleVersion -cne $moduleVersion) {
     throw "The tested release proof names '$proofModuleName' $proofModuleVersion, not '$moduleName' $moduleVersion."
@@ -152,7 +174,7 @@ if ($proofFileMap.Count -eq 0) {
     throw 'The tested release proof records zero shipped module files.'
 }
 
-$builtModuleDirectory = Join-Path $RepositoryRoot "output/module/GraphKit/$moduleVersion"
+$builtModuleDirectory = Join-Path $RepositoryRoot "output/module/GraphKit/$proofModuleBaseVersion"
 if (-not (Test-Path -LiteralPath $builtModuleDirectory -PathType Container)) {
     throw "The built module directory '$builtModuleDirectory' is missing."
 }
@@ -201,8 +223,12 @@ if (-not (Test-Path -LiteralPath $builtManifestPath -PathType Leaf)) {
     throw "The built module file set differs from the tested release proof (missing:GraphKit.psd1)."
 }
 $builtManifest = Import-PowerShellDataFile -LiteralPath $builtManifestPath
-if ([string] $builtManifest.ModuleVersion -cne $moduleVersion) {
-    throw "The built GraphKit.psd1 declares version '$($builtManifest.ModuleVersion)', not proof version '$moduleVersion'."
+if ([string] $builtManifest.ModuleVersion -cne $proofModuleBaseVersion) {
+    throw "The built GraphKit.psd1 declares version '$($builtManifest.ModuleVersion)', not proof base version '$proofModuleBaseVersion'."
+}
+$expectedPrerelease = $moduleVersion.Substring($proofModuleBaseVersion.Length + 1)
+if ([string] $builtManifest.PrivateData.PSData.Prerelease -cne $expectedPrerelease) {
+    throw "The built GraphKit.psd1 prerelease '$($builtManifest.PrivateData.PSData.Prerelease)' does not match proof version '$moduleVersion'."
 }
 
 $currentPackageHash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -217,8 +243,7 @@ try {
     foreach ($wrapperPath in @(
         "$moduleName.nuspec",
         '[Content_Types].xml',
-        '_rels/.rels',
-        'package/services/metadata/core-properties/nuget.psmdcp'
+        '_rels/.rels'
     )) {
         $null = $wrapperPaths.Add($wrapperPath)
     }
@@ -251,6 +276,16 @@ try {
             throw "Package '$($package.Name)' wrapper file set differs from the canonical NuGet shape (missing or case-changed '$wrapperPath')."
         }
     }
+
+    $coreProperties = @(
+        $archivePathMap.Keys | Where-Object {
+            $_ -match '^package/services/metadata/core-properties/(?:nuget|[0-9a-f]{32})\.psmdcp$'
+        }
+    )
+    if ($coreProperties.Count -ne 1) {
+        throw "Package '$($package.Name)' wrapper file set differs from the canonical NuGet shape (expected exactly one core-properties .psmdcp entry)."
+    }
+    $null = $wrapperPaths.Add($coreProperties[0])
 
     $archiveModulePaths = @($archivePathMap.Keys | Where-Object { -not $wrapperPaths.Contains($_) })
     $archiveMissing = @($proofFileMap.Keys | Where-Object { -not $archivePathMap.ContainsKey([string] $_) })
@@ -365,11 +400,22 @@ try {
         copyright = [string] $builtManifest.Copyright
         tags = $expectedTags -join ' '
     }
+
+    # Publish-Module writes PowerShellGet's export-discovery tags.  The R8
+    # package task deliberately uses PSResourceGet's SemVer-capable archive
+    # writer instead, which retains only the manifest-declared tags.  Both
+    # forms are deterministic projections of the same proven manifest; accept
+    # only either exact projection so metadata tampering remains detectable.
+    $expectedPsResourceTags = (@('PSModule') + @($psData.Tags) -join ' ')
     foreach ($fieldName in $expectedMetadata.Keys) {
         $actualValue = Get-NuspecMetadataValue -Name $fieldName
         $expectedValue = [string] $expectedMetadata[$fieldName]
         if ($fieldName -eq 'tags') {
             $actualValue = (@($actualValue -split '\s+' | Where-Object { $_ }) -join ' ')
+            if ($actualValue -cnotin @($expectedValue, $expectedPsResourceTags)) {
+                throw "Package metadata field '$fieldName' does not match the proven built manifest."
+            }
+            continue
         }
         else {
             $actualValue = ConvertTo-CanonicalLineEndings -Value $actualValue
@@ -741,6 +787,7 @@ Write-Host "VERIFIED TESTED RELEASE: $moduleName $moduleVersion; $($proofFileMap
 [pscustomobject] [ordered] @{
     ModuleName = $moduleName
     Version = $moduleVersion
+    BaseVersion = $proofModuleBaseVersion
     PackageName = $package.Name
     PackageSha256 = $proofPackageHash
     ProofSha256 = $initialProofHash

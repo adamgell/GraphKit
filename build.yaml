@@ -59,7 +59,7 @@ BuildWorkflow:
   pack:
     - build
 
-    - package_module_nupkg
+    - package_graphkit_r8_nupkg
 
 
 
@@ -183,6 +183,5 @@ GitConfig:
 #   FilesToAdd:
 #     - 'CHANGELOG.md'
 #   UpdateChangelogOnPrerelease: false  # Set to true to update changelog on pre-releases too
-
 
 

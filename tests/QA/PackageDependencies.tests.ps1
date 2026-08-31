@@ -3,7 +3,8 @@ BeforeAll {
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
     $script:sourceManifest = Import-PowerShellDataFile -Path (Join-Path $script:repoRoot 'source/GraphKit.psd1')
-    $script:version = [string] $script:sourceManifest.ModuleVersion
+    $script:baseVersion = [string] $script:sourceManifest.ModuleVersion
+    $script:version = (& (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') -RepositoryRoot $script:repoRoot).Trim()
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:version.nupkg"
     $script:graphAuthPath = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
 
@@ -33,7 +34,7 @@ BeforeAll {
         param([Parameter(Mandatory)] [string] $Root)
 
         $modulePath = Join-Path $Root 'Modules'
-        $graphKitDestination = Join-Path $modulePath "GraphKit/$script:version"
+        $graphKitDestination = Join-Path $modulePath "GraphKit/$script:baseVersion"
         $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
         $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
         [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $graphKitDestination)
@@ -44,7 +45,7 @@ BeforeAll {
     function Invoke-IsolatedGraphKitProbe {
         param([Parameter(Mandatory)] [string] $ModulePath)
 
-        $isolatedManifest = Join-Path $ModulePath "GraphKit/$script:version/GraphKit.psd1"
+        $isolatedManifest = Join-Path $ModulePath "GraphKit/$script:baseVersion/GraphKit.psd1"
         $probe = @"
 `$ErrorActionPreference = 'Stop'
 `$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
@@ -102,7 +103,7 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
 
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Data.Imported | Should -BeTrue
-        $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:version")
+        $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:baseVersion")
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
         $result.Data.SecretManagementLoaded | Should -BeFalse -Because 'catalog inspection does not use a vault'
         $result.Data.SecretManagementAvailable | Should -BeFalse -Because 'the isolated package probe must not be able to discover the lazy vault dependency anywhere'
