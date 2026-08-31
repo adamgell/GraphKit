@@ -4,8 +4,9 @@ namespace GraphKit.Auth;
 
 public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
 {
-    private static readonly ConditionalWeakTable<object, ConsumedMaterialMarker>
+    private static readonly ConditionalWeakTable<object, object>
         ConsumedOwnedMaterials = new();
+    private static readonly object ConsumedMaterialMarker = new();
     private readonly Func<GraphTokenRequest, Func<DateTimeOffset>, ITokenClient> _clientFactory;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly Action<IDisposable> _disposeMaterial;
@@ -40,7 +41,7 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
             {
                 ConsumedOwnedMaterials.Add(
                     requestedTransfer,
-                    ConsumedMaterialMarker.Instance);
+                    ConsumedMaterialMarker);
             }
             catch (ArgumentException)
             {
@@ -140,10 +141,5 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
             ClientSecretCredential { OwnsMaterial: true } secret => secret.Secret,
             _ => null
         };
-    }
-
-    private sealed class ConsumedMaterialMarker
-    {
-        internal static ConsumedMaterialMarker Instance { get; } = new();
     }
 }

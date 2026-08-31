@@ -1739,6 +1739,190 @@ switch ($Scenario) {
         }
     }
 
+    function New-ActualGraphKitAuthPayload {
+        param([Parameter(Mandatory)] [string] $Root)
+
+        $providerOutput = Join-Path $repoRoot 'src/GraphKit.Auth/GraphKit.Auth/bin/Release/net8.0'
+        $testOutput = Join-Path $repoRoot 'src/GraphKit.Auth/GraphKit.Auth.Tests/bin/Release/net8.0'
+        $null = New-Item -ItemType Directory -Path $Root -Force
+        foreach ($fileName in @(
+            'GraphKit.Auth.dll',
+            'GraphKit.Auth.deps.json'
+        )) {
+            $sourcePath = Join-Path $providerOutput $fileName
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                throw "The actual provider output is missing '$sourcePath'. Build GraphKit.Auth before running this boundary test."
+            }
+
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $Root $fileName)
+        }
+        foreach ($fileName in @(
+            'Microsoft.Identity.Client.dll',
+            'Microsoft.IdentityModel.Abstractions.dll'
+        )) {
+            $sourcePath = Join-Path $testOutput $fileName
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                throw "The restored provider dependency is missing '$sourcePath'. Build GraphKit.Auth.Tests before running this boundary test."
+            }
+
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $Root $fileName)
+        }
+
+        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $Root 'GraphKit.Auth.Contracts.dll')
+        return $Root
+    }
+
+    function Invoke-ActualGraphKitAuthRetentionProbe {
+        param(
+            [Parameter(Mandatory)] [string] $ContractsPath,
+            [Parameter(Mandatory)] [string] $PayloadRoot,
+            [Parameter(Mandatory)] [ValidateSet('Certificate', 'ClientSecret', 'FixedBearer')] [string] $Mode
+        )
+
+        $probePath = Join-Path $TestDrive ('Probe-ActualProviderRetention-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Set-Content -LiteralPath $probePath -NoNewline -Encoding utf8NoBOM -Value @'
+param(
+    [Parameter(Mandatory)] [string] $ContractsPath,
+    [Parameter(Mandatory)] [string] $PayloadRoot,
+    [Parameter(Mandatory)] [ValidateSet('Certificate', 'ClientSecret', 'FixedBearer')] [string] $Mode
+)
+$ErrorActionPreference = 'Stop'
+$null = [System.Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath(
+    (Resolve-Path -LiteralPath $ContractsPath).ProviderPath
+)
+
+$authHost = $null
+$source = $null
+$request = $null
+$credential = $null
+$material = $null
+$ownershipTransferAttempted = $false
+$rsa = $null
+try {
+    switch ($Mode) {
+        'Certificate' {
+            $rsa = [Security.Cryptography.RSA]::Create(2048)
+            $certificateRequest = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                'CN=GraphKit Auth retention fixture',
+                $rsa,
+                [Security.Cryptography.HashAlgorithmName]::SHA256,
+                [Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+            $material = $certificateRequest.CreateSelfSigned(
+                [DateTimeOffset]::UtcNow.AddMinutes(-1),
+                [DateTimeOffset]::UtcNow.AddMinutes(5)
+            )
+            $credential = [GraphKit.Auth.CertificateCredential]::new($material, $true)
+            $authMode = [GraphKit.Auth.GraphAuthMode]::Certificate
+            $clientId = [Nullable[guid]] [guid] '00000000-0000-0000-0000-000000000002'
+        }
+        'ClientSecret' {
+            $material = [Security.SecureString]::new()
+            foreach ($character in 'actual-provider-retention-fixture'.ToCharArray()) {
+                $material.AppendChar($character)
+            }
+            $material.MakeReadOnly()
+            $credential = [GraphKit.Auth.ClientSecretCredential]::new($material, $true)
+            $authMode = [GraphKit.Auth.GraphAuthMode]::ClientSecret
+            $clientId = [Nullable[guid]] [guid] '00000000-0000-0000-0000-000000000002'
+        }
+        'FixedBearer' {
+            $credential = [GraphKit.Auth.FixedBearerCredential]::new('retention-fixture-bearer')
+            $authMode = [GraphKit.Auth.GraphAuthMode]::BearerToken
+            $clientId = $null
+        }
+    }
+
+    $request = [GraphKit.Auth.GraphTokenRequest]::new(
+        'Global',
+        [guid] '00000000-0000-0000-0000-000000000001',
+        [uri] 'https://login.microsoftonline.com',
+        [uri] 'https://graph.microsoft.com',
+        $clientId,
+        $authMode,
+        $credential,
+        'retention-generation'
+    )
+    $authHost = [GraphKit.Auth.GraphAuthHost]::new(
+        $PayloadRoot,
+        [version] '1.0.0.0',
+        [timespan]::FromSeconds(2)
+    )
+    $weakReference = $authHost.LoadContextWeakReference
+    $ownershipTransferAttempted = $true
+    $source = $authHost.CreateSource($request)
+
+    $providerAssemblyField = [GraphKit.Auth.GraphAuthHost].GetField(
+        '_providerAssembly',
+        [Reflection.BindingFlags] 'Instance,NonPublic'
+    )
+    $providerAssembly = $providerAssemblyField.GetValue($authHost)
+    $providerContext = [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($providerAssembly)
+    $providerIdentity = $providerAssembly.FullName
+    $providerLocation = $providerAssembly.Location
+    $providerWasCollectible = $providerContext.IsCollectible
+
+    $source.Dispose()
+    $source = $null
+    $authHost.Dispose()
+    $authHost = $null
+    $providerAssembly = $null
+    $providerContext = $null
+    for ($i = 0; $i -lt 30 -and $weakReference.IsAlive; $i++) {
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        [GC]::Collect()
+    }
+
+    [pscustomobject]@{
+        Mode = $Mode
+        ProviderIdentity = $providerIdentity
+        ProviderLocation = $providerLocation
+        ProviderWasCollectible = $providerWasCollectible
+        RequestRetained = $null -ne $request
+        CredentialRetained = $null -ne $credential
+        MaterialRetained = $null -ne $material
+        RequestLoadContext = [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($request.GetType().Assembly).Name
+        CredentialLoadContext = [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($credential.GetType().Assembly).Name
+        MaterialLoadContext = if ($null -ne $material) {
+            [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($material.GetType().Assembly).Name
+        }
+        else {
+            $null
+        }
+        LoadContextAliveWhileRequestCredentialAndMaterialRetained = $weakReference.IsAlive
+    } | ConvertTo-Json -Compress
+}
+finally {
+    if ($null -ne $source) {
+        try { $source.Dispose() } catch {}
+    }
+    if ($null -ne $authHost) {
+        try { $authHost.Dispose() } catch {}
+    }
+    if (-not $ownershipTransferAttempted -and $material -is [IDisposable]) {
+        try { $material.Dispose() } catch {}
+    }
+    if ($null -ne $rsa) {
+        $rsa.Dispose()
+    }
+    $request = $null
+    $credential = $null
+    $material = $null
+}
+'@
+
+        $raw = & pwsh -NoLogo -NoProfile -File $probePath `
+            -ContractsPath $ContractsPath -PayloadRoot $PayloadRoot -Mode $Mode 2>&1
+        $exitCode = $LASTEXITCODE
+        $json = @($raw | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+        [pscustomobject]@{
+            ExitCode = $exitCode
+            Data = if ($json) { $json | ConvertFrom-Json } else { $null }
+            Output = ($raw | Out-String).Trim()
+        }
+    }
+
     $script:contractsInspection = if (Test-Path -LiteralPath $script:contractsPath -PathType Leaf) {
         Invoke-GraphKitAuthContractsCandidateProbe -CandidatePath $script:contractsPath
     }
@@ -2055,6 +2239,37 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.Data.CreateRejectionType | Should -BeExactly 'System.ObjectDisposedException'
         $result.Data.DisposeCount | Should -Be 2 -Because 'one explicitly disposed and one host-owned source must each dispose exactly once'
         $result.Data.LoadContextAlive | Should -BeFalse
+    }
+
+    It 'unloads the actual provider while retaining default-context <Mode> request state' -ForEach @(
+        @{ Mode = 'Certificate'; MaterialExpected = $true }
+        @{ Mode = 'ClientSecret'; MaterialExpected = $true }
+        @{ Mode = 'FixedBearer'; MaterialExpected = $false }
+    ) {
+        $payloadRoot = New-ActualGraphKitAuthPayload -Root (
+            Join-Path $TestDrive ('actual-provider-retention-' + $Mode.ToLowerInvariant()))
+        $contractsPath = Join-Path $payloadRoot 'GraphKit.Auth.Contracts.dll'
+
+        $result = Invoke-ActualGraphKitAuthRetentionProbe -ContractsPath $contractsPath `
+            -PayloadRoot $payloadRoot -Mode $Mode
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Data.ProviderIdentity | Should -Match '^GraphKit\.Auth, Version=1\.0\.0\.0,'
+        $result.Data.ProviderLocation | Should -BeExactly (Join-Path $payloadRoot 'GraphKit.Auth.dll')
+        $result.Data.ProviderWasCollectible | Should -BeTrue
+        $result.Data.RequestRetained | Should -BeTrue
+        $result.Data.CredentialRetained | Should -BeTrue
+        $result.Data.MaterialRetained | Should -Be $MaterialExpected
+        $result.Data.RequestLoadContext | Should -BeExactly 'Default'
+        $result.Data.CredentialLoadContext | Should -BeExactly 'Default'
+        if ($MaterialExpected) {
+            $result.Data.MaterialLoadContext | Should -BeExactly 'Default'
+        }
+        else {
+            $result.Data.MaterialLoadContext | Should -BeNullOrEmpty
+        }
+        $result.Data.LoadContextAliveWhileRequestCredentialAndMaterialRetained | Should -BeFalse `
+            -Because 'caller-retained default/framework request state must not root the actual collectible provider'
     }
 
     It 'keeps one shutdown owner under concurrent Dispose callers and releases every collectible reference' {
