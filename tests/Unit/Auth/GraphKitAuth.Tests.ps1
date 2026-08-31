@@ -235,6 +235,8 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
 
 internal sealed class FixtureTokenSource : IGraphTokenSource
 {
+    private static readonly ManualResetEventSlim BlockedAcquireEntered = new(false);
+    private static readonly ManualResetEventSlim BlockedAcquireRelease = new(false);
     private readonly GraphTokenRequest _request;
     private readonly string? _disposeMarker = Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_MARKER");
     private int _disposed;
@@ -253,6 +255,18 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         cancellation.ThrowIfCancellationRequested();
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_BLOCK_ACQUIRE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            BlockedAcquireEntered.Set();
+            if (!BlockedAcquireRelease.Wait(TimeSpan.FromSeconds(10)))
+            {
+                throw new TimeoutException("The blocked provider acquisition was not released.");
+            }
+        }
+
         if (forceRefresh)
         {
             throw new GraphAuthException("fixture", "Fixture", "provider failure", TimeSpan.FromSeconds(7), "fixture-correlation");
@@ -290,6 +304,11 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
             File.AppendAllText(_disposeMarker, "disposed" + Environment.NewLine);
         }
     }
+
+    internal static bool WaitForBlockedAcquire(TimeSpan timeout) =>
+        BlockedAcquireEntered.Wait(timeout);
+
+    internal static void ReleaseBlockedAcquire() => BlockedAcquireRelease.Set();
 }
 '@
         if (-not [string]::IsNullOrWhiteSpace($PublicSurfaceDeclaration)) {
@@ -387,6 +406,7 @@ public sealed class Counterfeit
         $escapedContractsPath = [System.Security.SecurityElement]::Escape($script:contractsPath)
         Set-Content -LiteralPath $sourcePath -NoNewline -Encoding utf8NoBOM -Value @'
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
@@ -470,6 +490,143 @@ public static class GraphKitAuthRuntimeHarness
             ProxyOwnerCleared = ownerField.GetValue(source) is null
         });
     }
+
+    public static string BlockedCancellationCallback(
+        GraphAuthHost host,
+        IGraphTokenSource source,
+        string disposeMarker)
+    {
+        BindingFlags privateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        var shutdown = (CancellationTokenSource)(typeof(GraphAuthHost)
+            .GetField("_shutdown", privateInstance)?.GetValue(host)
+            ?? throw new InvalidOperationException("Host shutdown source was not found."));
+        var stateField = typeof(GraphAuthHost).GetField("_state", privateInstance)
+            ?? throw new InvalidOperationException("Host state field was not found.");
+        Type proxyType = source.GetType();
+        var innerField = proxyType.GetField("_inner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy inner field was not found.");
+        var ownerField = proxyType.GetField("_owner", privateInstance)
+            ?? throw new InvalidOperationException("Proxy owner field was not found.");
+        object inner = innerField.GetValue(source)
+            ?? throw new InvalidOperationException("Proxy inner source was not found.");
+        BindingFlags providerControlFlags = BindingFlags.Static | BindingFlags.NonPublic;
+        MethodInfo waitForAcquire = inner.GetType().GetMethod(
+            "WaitForBlockedAcquire",
+            providerControlFlags)
+            ?? throw new InvalidOperationException("Provider acquire wait control was not found.");
+        MethodInfo releaseAcquire = inner.GetType().GetMethod(
+            "ReleaseBlockedAcquire",
+            providerControlFlags)
+            ?? throw new InvalidOperationException("Provider acquire release control was not found.");
+
+        Task acquire = Task.Factory.StartNew(
+            () => source.Acquire(false, CancellationToken.None),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        if (waitForAcquire.Invoke(null, new object[] { TimeSpan.FromSeconds(5) }) is not true)
+        {
+            releaseAcquire.Invoke(null, null);
+            throw new TimeoutException("The provider acquisition did not enter its blocked section.");
+        }
+
+        using var callbackEntered = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+        using CancellationTokenRegistration registration = shutdown.Token.Register(() =>
+        {
+            callbackEntered.Set();
+            if (!releaseCallback.Wait(TimeSpan.FromSeconds(10)))
+            {
+                throw new TimeoutException("The blocked cancellation callback was not released.");
+            }
+        });
+
+        Task? owner = null;
+        Task? nonOwner = null;
+        bool ownerCompletedBeforeCallbackRelease;
+        bool nonOwnerCompletedBeforeCallbackRelease;
+        long ownerElapsedMilliseconds;
+        int stateWhileCallbackBlocked;
+        int disposeCountWhileCallbackBlocked;
+        bool proxyInnerPresentWhileCallbackBlocked;
+        bool proxyOwnerPresentWhileCallbackBlocked;
+        bool loadContextAliveWhileCallbackBlocked;
+        try
+        {
+            var ownerTimer = Stopwatch.StartNew();
+            owner = Task.Factory.StartNew(
+                host.Dispose,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            if (!callbackEntered.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The cancellation callback did not begin.");
+            }
+
+            ownerCompletedBeforeCallbackRelease = owner.Wait(TimeSpan.FromSeconds(2));
+            ownerElapsedMilliseconds = ownerTimer.ElapsedMilliseconds;
+            stateWhileCallbackBlocked = (int)(stateField.GetValue(host)
+                ?? throw new InvalidOperationException("Host state was null."));
+            disposeCountWhileCallbackBlocked = File.Exists(disposeMarker)
+                ? File.ReadAllLines(disposeMarker).Length
+                : 0;
+            proxyInnerPresentWhileCallbackBlocked = innerField.GetValue(source) is not null;
+            proxyOwnerPresentWhileCallbackBlocked = ownerField.GetValue(source) is not null;
+            loadContextAliveWhileCallbackBlocked = host.LoadContextWeakReference.IsAlive;
+
+            nonOwner = Task.Factory.StartNew(
+                host.Dispose,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            nonOwnerCompletedBeforeCallbackRelease = nonOwner.Wait(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            releaseCallback.Set();
+        }
+
+        bool proxyClearedBeforeAcquireRelease = SpinWait.SpinUntil(
+            () => innerField.GetValue(source) is null && ownerField.GetValue(source) is null,
+            TimeSpan.FromSeconds(5));
+        int disposeCountWhileAcquireBlocked = File.Exists(disposeMarker)
+            ? File.ReadAllLines(disposeMarker).Length
+            : 0;
+        releaseAcquire.Invoke(null, null);
+
+        Task[] tasks = new[]
+        {
+            owner ?? throw new InvalidOperationException("Owner task was not created."),
+            nonOwner ?? throw new InvalidOperationException("Non-owner task was not created."),
+            acquire
+        };
+        if (!Task.WaitAll(tasks, TimeSpan.FromSeconds(5)))
+        {
+            throw new TimeoutException("Blocked-callback shutdown did not finish after both releases.");
+        }
+
+        host.Dispose();
+        int finalDisposeCount = File.Exists(disposeMarker)
+            ? File.ReadAllLines(disposeMarker).Length
+            : 0;
+        return JsonSerializer.Serialize(new
+        {
+            OwnerCompletedBeforeCallbackRelease = ownerCompletedBeforeCallbackRelease,
+            NonOwnerCompletedBeforeCallbackRelease = nonOwnerCompletedBeforeCallbackRelease,
+            OwnerElapsedMilliseconds = ownerElapsedMilliseconds,
+            StateWhileCallbackBlocked = stateWhileCallbackBlocked,
+            DisposeCountWhileCallbackBlocked = disposeCountWhileCallbackBlocked,
+            ProxyInnerPresentWhileCallbackBlocked = proxyInnerPresentWhileCallbackBlocked,
+            ProxyOwnerPresentWhileCallbackBlocked = proxyOwnerPresentWhileCallbackBlocked,
+            LoadContextAliveWhileCallbackBlocked = loadContextAliveWhileCallbackBlocked,
+            ProxyClearedBeforeAcquireRelease = proxyClearedBeforeAcquireRelease,
+            DisposeCountWhileAcquireBlocked = disposeCountWhileAcquireBlocked,
+            FinalDisposeCount = finalDisposeCount,
+            ProxyInnerCleared = innerField.GetValue(source) is null,
+            ProxyOwnerCleared = ownerField.GetValue(source) is null
+        });
+    }
 }
 '@
         Set-Content -LiteralPath $projectPath -NoNewline -Encoding utf8NoBOM -Value @"
@@ -495,6 +652,60 @@ public static class GraphKitAuthRuntimeHarness
         $assemblyPath = Join-Path $outputPath 'GraphKit.Auth.RuntimeHarness.dll'
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
             throw "The GraphKit.Auth runtime harness did not compile: $($compilerOutput | Out-String)"
+        }
+        return $assemblyPath
+    }
+
+    function New-GraphKitAuthAbiMutationAssembly {
+        param(
+            [Parameter(Mandatory)] [string] $Root,
+            [Parameter(Mandatory)] [ValidateSet('EnumUnderlyingByte', 'CorrelationIdNonNullable')] [string] $Mutation
+        )
+
+        $null = New-Item -ItemType Directory -Path $Root -Force
+        $sourceRoot = Join-Path $script:repoRoot 'src/GraphKit.Auth/GraphKit.Auth.Contracts'
+        foreach ($sourceName in @('Contracts.cs', 'GraphAuthHost.cs', 'GraphAuthLoadContext.cs', 'GraphTokenSourceProxy.cs')) {
+            Copy-Item -LiteralPath (Join-Path $sourceRoot $sourceName) -Destination (Join-Path $Root $sourceName)
+        }
+
+        $contractsSourcePath = Join-Path $Root 'Contracts.cs'
+        $contractsSource = Get-Content -LiteralPath $contractsSourcePath -Raw
+        $mutatedSource = switch ($Mutation) {
+            'EnumUnderlyingByte' {
+                $contractsSource.Replace(
+                    'public enum GraphAuthMode',
+                    'public enum GraphAuthMode : byte')
+            }
+            'CorrelationIdNonNullable' {
+                $contractsSource.Replace(
+                    'string? correlationId)',
+                    'string correlationId)')
+            }
+        }
+        $mutatedSource | Should -Not -BeExactly $contractsSource -Because "the '$Mutation' fixture must alter the ABI source"
+        Set-Content -LiteralPath $contractsSourcePath -NoNewline -Encoding utf8NoBOM -Value $mutatedSource
+
+        $projectPath = Join-Path $Root 'GraphKit.Auth.Contracts.csproj'
+        $outputPath = Join-Path $Root 'out'
+        $assemblyPath = Join-Path $outputPath 'GraphKit.Auth.Contracts.dll'
+        Set-Content -LiteralPath $projectPath -NoNewline -Encoding utf8NoBOM -Value @'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>GraphKit.Auth.Contracts</AssemblyName>
+    <RootNamespace>GraphKit.Auth</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+</Project>
+'@
+
+        $compilerOutput = & dotnet build $projectPath -c Release -o $outputPath --nologo --verbosity quiet 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
+            throw "The GraphKit.Auth ABI mutation fixture did not compile: $($compilerOutput | Out-String)"
         }
         return $assemblyPath
     }
@@ -529,13 +740,109 @@ function Get-ParameterDisplay {
     "$(Get-TypeDisplayName -Type $Parameter.ParameterType) $($Parameter.Name)"
 }
 
+function Get-NullabilityDisplay {
+    param([System.Reflection.NullabilityInfo] $Info)
+    if ($null -eq $Info) { return '<none>' }
+
+    $display = "$($Info.ReadState)/$($Info.WriteState)"
+    if ($null -ne $Info.ElementType) {
+        $display += ";element=$(Get-NullabilityDisplay -Info $Info.ElementType)"
+    }
+    if ($Info.GenericTypeArguments.Count -ne 0) {
+        $arguments = @($Info.GenericTypeArguments | ForEach-Object { Get-NullabilityDisplay -Info $_ }) -join ','
+        $display += ";arguments=[$arguments]"
+    }
+    return $display
+}
+
+function Get-ModifierDisplay {
+    param([AllowEmptyCollection()] [Type[]] $Modifiers)
+    return '[' + (@($Modifiers | ForEach-Object FullName | Sort-Object) -join ',') + ']'
+}
+
+function Get-CallableId {
+    param([Parameter(Mandatory)] [System.Reflection.MethodBase] $Callable)
+    $parameters = @($Callable.GetParameters() | ForEach-Object { Get-TypeDisplayName -Type $_.ParameterType }) -join ','
+    $name = if ($Callable -is [System.Reflection.ConstructorInfo]) { '.ctor' } else { $Callable.Name }
+    return "$($Callable.DeclaringType.FullName)::$name($parameters)"
+}
+
+function Get-DefaultDisplay {
+    param([Parameter(Mandatory)] [System.Reflection.ParameterInfo] $Parameter)
+    if (-not $Parameter.HasDefaultValue) { return '<none>' }
+    if ($null -eq $Parameter.DefaultValue) { return '<null>' }
+    if ($Parameter.DefaultValue -is [string]) {
+        return '"' + ([string] $Parameter.DefaultValue).Replace('"', '\"') + '"'
+    }
+    if ($Parameter.DefaultValue -is [char]) {
+        return "'$($Parameter.DefaultValue)'"
+    }
+    if ($Parameter.DefaultValue -is [bool]) {
+        return ([string] $Parameter.DefaultValue).ToLowerInvariant()
+    }
+    return [Convert]::ToString($Parameter.DefaultValue, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Add-ParameterMetadata {
+    param(
+        [Parameter(Mandatory)] [string] $OwnerKind,
+        [Parameter(Mandatory)] [string] $OwnerId,
+        [Parameter(Mandatory)] [System.Reflection.ParameterInfo] $Parameter
+    )
+
+    $direction = if ($Parameter.IsOut) {
+        'out'
+    }
+    elseif ($Parameter.ParameterType.IsByRef -and $Parameter.IsIn) {
+        'in'
+    }
+    elseif ($Parameter.ParameterType.IsByRef) {
+        'ref'
+    }
+    else {
+        'value'
+    }
+    $isParams = $Parameter.IsDefined([ParamArrayAttribute], $false).ToString().ToLowerInvariant()
+    $isOptional = $Parameter.IsOptional.ToString().ToLowerInvariant()
+    $hasDefault = $Parameter.HasDefaultValue.ToString().ToLowerInvariant()
+    $requiredModifiers = Get-ModifierDisplay -Modifiers $Parameter.GetRequiredCustomModifiers()
+    $optionalModifiers = Get-ModifierDisplay -Modifiers $Parameter.GetOptionalCustomModifiers()
+    $nullability = Get-NullabilityDisplay -Info $nullabilityContext.Create($Parameter)
+    $lines.Add(
+        "PARAMETER-META|$OwnerKind|$OwnerId|$($Parameter.Position)|$($Parameter.Name)|" +
+        "$(Get-TypeDisplayName -Type $Parameter.ParameterType)|direction=$direction|params=$isParams|" +
+        "optional=$isOptional|hasDefault=$hasDefault|default=$(Get-DefaultDisplay -Parameter $Parameter)|" +
+        "requiredMods=$requiredModifiers|optionalMods=$optionalModifiers|nullable=$nullability")
+}
+
+function Add-GenericParameterMetadata {
+    param(
+        [Parameter(Mandatory)] [string] $OwnerKind,
+        [Parameter(Mandatory)] [string] $OwnerId,
+        [AllowEmptyCollection()] [Type[]] $GenericParameters
+    )
+
+    foreach ($parameter in @($GenericParameters | Where-Object IsGenericParameter | Sort-Object GenericParameterPosition)) {
+        $constraints = '[' + (@($parameter.GetGenericParameterConstraints() | ForEach-Object { Get-TypeDisplayName -Type $_ } | Sort-Object) -join ',') + ']'
+        $lines.Add(
+            "GENERIC-PARAMETER|$OwnerKind|$OwnerId|$($parameter.GenericParameterPosition)|" +
+            "$($parameter.Name)|attributes=$($parameter.GenericParameterAttributes)|constraints=$constraints")
+    }
+}
+
 $lines = [Collections.Generic.List[string]]::new()
 $flags = [Reflection.BindingFlags]'Public,Instance,Static,DeclaredOnly'
+$nullabilityContext = [System.Reflection.NullabilityInfoContext]::new()
 foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
     $kind = if ($type.IsEnum) { 'enum' } elseif ($type.IsInterface) { 'interface' } elseif ($type.IsAbstract) { 'abstract-class' } elseif ($type.IsSealed) { 'sealed-class' } else { 'class' }
     $baseType = if ($null -eq $type.BaseType) { '' } else { Get-TypeDisplayName -Type $type.BaseType }
     $interfaces = @($type.GetInterfaces() | ForEach-Object { Get-TypeDisplayName -Type $_ } | Sort-Object) -join ','
     $lines.Add("TYPE|$($type.FullName)|$kind|$baseType|$interfaces")
+    $isStaticType = ($type.IsAbstract -and $type.IsSealed -and -not $type.IsEnum).ToString().ToLowerInvariant()
+    $enumUnderlying = if ($type.IsEnum) { Get-TypeDisplayName -Type ([Enum]::GetUnderlyingType($type)) } else { '<none>' }
+    $genericParameters = @($type.GetGenericArguments() | Where-Object IsGenericParameter)
+    $lines.Add("TYPE-META|$($type.FullName)|staticType=$isStaticType|enumUnderlying=$enumUnderlying|genericArity=$($genericParameters.Count)")
+    Add-GenericParameterMetadata -OwnerKind TYPE -OwnerId $type.FullName -GenericParameters $genericParameters
 
     if ($type.IsEnum) {
         foreach ($name in [Enum]::GetNames($type)) {
@@ -547,6 +854,11 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
     foreach ($constructor in @($type.GetConstructors($flags) | Sort-Object { $_.ToString() })) {
         $parameters = @($constructor.GetParameters() | ForEach-Object { Get-ParameterDisplay -Parameter $_ }) -join ','
         $lines.Add("CTOR|$($type.FullName)|($parameters)")
+        $ownerId = Get-CallableId -Callable $constructor
+        $lines.Add("MEMBER-META|CTOR|$ownerId|static=false|genericArity=0")
+        foreach ($parameter in $constructor.GetParameters()) {
+            Add-ParameterMetadata -OwnerKind CTOR -OwnerId $ownerId -Parameter $parameter
+        }
     }
 
     foreach ($property in @($type.GetProperties($flags) | Sort-Object Name)) {
@@ -559,11 +871,38 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         $isRequired = @($property.GetCustomAttributesData() | Where-Object AttributeType -EQ ([System.Runtime.CompilerServices.RequiredMemberAttribute])).Count -ne 0
         if ($isRequired) { $accessors.Add('required') }
         $lines.Add("PROPERTY|$($type.FullName)|$($property.Name)|$(Get-TypeDisplayName -Type $property.PropertyType)|$($accessors -join ',')")
+        $propertyAccessor = if ($null -ne $property.GetGetMethod($true)) { $property.GetGetMethod($true) } else { $property.GetSetMethod($true) }
+        $propertyIsStatic = $propertyAccessor.IsStatic.ToString().ToLowerInvariant()
+        $propertyNullability = Get-NullabilityDisplay -Info $nullabilityContext.Create($property)
+        $indexParameters = @($property.GetIndexParameters())
+        $setter = $property.GetSetMethod($true)
+        $setterRequiredModifiers = if ($null -eq $setter) { '<none>' } else { Get-ModifierDisplay -Modifiers $setter.ReturnParameter.GetRequiredCustomModifiers() }
+        $setterOptionalModifiers = if ($null -eq $setter) { '<none>' } else { Get-ModifierDisplay -Modifiers $setter.ReturnParameter.GetOptionalCustomModifiers() }
+        $propertyOwnerId = "$($type.FullName)::$($property.Name)"
+        $lines.Add(
+            "PROPERTY-META|$propertyOwnerId|static=$propertyIsStatic|nullable=$propertyNullability|" +
+            "indexCount=$($indexParameters.Count)|setterRequiredMods=$setterRequiredModifiers|setterOptionalMods=$setterOptionalModifiers")
+        foreach ($parameter in $indexParameters) {
+            Add-ParameterMetadata -OwnerKind INDEX -OwnerId $propertyOwnerId -Parameter $parameter
+        }
     }
 
     foreach ($method in @($type.GetMethods($flags) | Where-Object { -not $_.IsSpecialName -or $_.Name.StartsWith('op_') } | Sort-Object Name, { $_.ToString() })) {
         $parameters = @($method.GetParameters() | ForEach-Object { Get-ParameterDisplay -Parameter $_ }) -join ','
         $lines.Add("METHOD|$($type.FullName)|$($method.Name)|($parameters)->$(Get-TypeDisplayName -Type $method.ReturnType)")
+        $ownerId = Get-CallableId -Callable $method
+        $methodGenericParameters = @($method.GetGenericArguments() | Where-Object IsGenericParameter)
+        $lines.Add("MEMBER-META|METHOD|$ownerId|static=$($method.IsStatic.ToString().ToLowerInvariant())|genericArity=$($methodGenericParameters.Count)")
+        Add-GenericParameterMetadata -OwnerKind METHOD -OwnerId $ownerId -GenericParameters $methodGenericParameters
+        foreach ($parameter in $method.GetParameters()) {
+            Add-ParameterMetadata -OwnerKind METHOD -OwnerId $ownerId -Parameter $parameter
+        }
+        $returnParameter = $method.ReturnParameter
+        $lines.Add(
+            "RETURN-META|METHOD|$ownerId|$(Get-TypeDisplayName -Type $method.ReturnType)|" +
+            "requiredMods=$(Get-ModifierDisplay -Modifiers $returnParameter.GetRequiredCustomModifiers())|" +
+            "optionalMods=$(Get-ModifierDisplay -Modifiers $returnParameter.GetOptionalCustomModifiers())|" +
+            "nullable=$(Get-NullabilityDisplay -Info $nullabilityContext.Create($returnParameter))")
     }
 
     foreach ($event in @($type.GetEvents($flags) | Sort-Object Name)) {
@@ -571,11 +910,18 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         if ($null -ne $event.AddMethod -and $event.AddMethod.IsPublic) { $accessors.Add('add') }
         if ($null -ne $event.RemoveMethod -and $event.RemoveMethod.IsPublic) { $accessors.Add('remove') }
         $lines.Add("EVENT|$($type.FullName)|$($event.Name)|$(Get-TypeDisplayName -Type $event.EventHandlerType)|$($accessors -join ',')")
+        $eventAccessor = if ($null -ne $event.AddMethod) { $event.AddMethod } else { $event.RemoveMethod }
+        $lines.Add(
+            "EVENT-META|$($type.FullName)::$($event.Name)|static=$($eventAccessor.IsStatic.ToString().ToLowerInvariant())|" +
+            "nullable=$(Get-NullabilityDisplay -Info $nullabilityContext.Create($event))")
     }
 
     foreach ($field in @($type.GetFields($flags) | Where-Object { -not $type.IsEnum } | Sort-Object Name)) {
         $literal = if ($field.IsLiteral) { [string] $field.GetRawConstantValue() } else { '' }
         $lines.Add("FIELD|$($type.FullName)|$($field.Name)|$(Get-TypeDisplayName -Type $field.FieldType)|$literal")
+        $lines.Add(
+            "FIELD-META|$($type.FullName)::$($field.Name)|static=$($field.IsStatic.ToString().ToLowerInvariant())|" +
+            "nullable=$(Get-NullabilityDisplay -Info $nullabilityContext.Create($field))")
     }
 }
 @($lines | Sort-Object) | ConvertTo-Json -Compress
@@ -594,7 +940,7 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         param(
             [Parameter(Mandatory)] [string] $ContractsPath,
             [string] $PayloadRoot,
-            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'SamePathReplacement')] [string] $Scenario,
+            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'SamePathReplacement')] [string] $Scenario,
             [string] $DisposeMarker,
             [string] $ReplacementContractsPath,
             [string] $PreloadPath,
@@ -756,6 +1102,27 @@ switch ($Scenario) {
         $data | Add-Member -NotePropertyName LoadContextAlive -NotePropertyValue $weakReference.IsAlive
         $data | ConvertTo-Json -Compress
     }
+    'BlockedCancellationCallback' {
+        $env:GRAPHKIT_AUTH_TEST_DISPOSE_MARKER = $DisposeMarker
+        $env:GRAPHKIT_AUTH_TEST_BLOCK_ACQUIRE = '1'
+        $authHost = [GraphKit.Auth.GraphAuthHost]::new(
+            $PayloadRoot,
+            [version]'1.0.0.0',
+            [timespan]::FromMilliseconds(125))
+        $source = $authHost.CreateSource((New-ValidRequest))
+        $weakReference = $authHost.LoadContextWeakReference
+        $data = [GraphKitAuthRuntimeHarness]::BlockedCancellationCallback(
+            $authHost,
+            $source,
+            $DisposeMarker) | ConvertFrom-Json
+        for ($i = 0; $i -lt 30 -and $weakReference.IsAlive; $i++) {
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect()
+        }
+        $data | Add-Member -NotePropertyName LoadContextAlive -NotePropertyValue $weakReference.IsAlive
+        $data | ConvertTo-Json -Compress
+    }
     'SamePathReplacement' {
         $residentMvid = [GraphKit.Auth.GraphAuthHost].Assembly.ManifestModule.ModuleVersionId.ToString('D')
         [IO.File]::Copy(
@@ -857,6 +1224,30 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
         @($script:contractsInspection.Data.Leaks) | Should -BeNullOrEmpty -Because 'no MSAL type may cross the GraphKit-owned ABI boundary'
     }
 
+    It 'detects an enum underlying-type mutation in the ABI snapshot metadata' {
+        $mutatedPath = New-GraphKitAuthAbiMutationAssembly `
+            -Root (Join-Path $TestDrive 'abi-enum-byte') -Mutation EnumUnderlyingByte
+
+        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $mutatedPath
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        @($result.Data) | Should -Contain `
+            'TYPE-META|GraphKit.Auth.GraphAuthMode|staticType=false|enumUnderlying=System.Byte|genericArity=0' `
+            -Because 'the ABI gate must distinguish the frozen Int32 enum from an otherwise identical byte enum'
+    }
+
+    It 'detects a nullable-reference mutation in constructor parameter metadata' {
+        $mutatedPath = New-GraphKitAuthAbiMutationAssembly `
+            -Root (Join-Path $TestDrive 'abi-correlation-nonnullable') -Mutation CorrelationIdNonNullable
+
+        $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $mutatedPath
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        @($result.Data) | Should -Contain `
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|4|correlationId|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull' `
+            -Because 'the ABI gate must distinguish a non-null correlationId parameter from the frozen nullable parameter'
+    }
+
     It 'matches the literal ABI-v1 public surface without extra exported types or members' {
         $expectedSurface = @(
             'CTOR|GraphKit.Auth.CertificateCredential|(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,System.Boolean ownsMaterial)'
@@ -924,6 +1315,102 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
             'TYPE|GraphKit.Auth.IGraphTokenSource|interface||System.IDisposable'
             'TYPE|GraphKit.Auth.IGraphTokenSourceFactory|interface||'
             'TYPE|GraphKit.Auth.ManagedIdentityCredential|sealed-class|GraphKit.Auth.GraphCredential|'
+            'FIELD-META|GraphKit.Auth.GraphAuthHost::ContractMarker|static=true|nullable=NotNull/NotNull'
+            'MEMBER-META|CTOR|GraphKit.Auth.CertificateCredential::.ctor(System.Security.Cryptography.X509Certificates.X509Certificate2,System.Boolean)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.ClientSecretCredential::.ctor(System.Security.SecureString,System.Boolean)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.FixedBearerCredential::.ctor(System.String)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version,System.TimeSpan)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.GraphTokenResult::.ctor()|static=false|genericArity=0'
+            'MEMBER-META|CTOR|GraphKit.Auth.ManagedIdentityCredential::.ctor(System.String)|static=false|genericArity=0'
+            'MEMBER-META|METHOD|GraphKit.Auth.GraphAuthHost::CreateSource(GraphKit.Auth.GraphTokenRequest)|static=false|genericArity=0'
+            'MEMBER-META|METHOD|GraphKit.Auth.GraphAuthHost::Dispose()|static=false|genericArity=0'
+            'MEMBER-META|METHOD|GraphKit.Auth.IGraphTokenSource::Acquire(System.Boolean,System.Threading.CancellationToken)|static=false|genericArity=0'
+            'MEMBER-META|METHOD|GraphKit.Auth.IGraphTokenSource::AdoptSharedResult(GraphKit.Auth.GraphTokenResult,System.Boolean)|static=false|genericArity=0'
+            'MEMBER-META|METHOD|GraphKit.Auth.IGraphTokenSourceFactory::Create(GraphKit.Auth.GraphTokenRequest)|static=false|genericArity=0'
+            'PARAMETER-META|CTOR|GraphKit.Auth.CertificateCredential::.ctor(System.Security.Cryptography.X509Certificates.X509Certificate2,System.Boolean)|0|certificate|System.Security.Cryptography.X509Certificates.X509Certificate2|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.CertificateCredential::.ctor(System.Security.Cryptography.X509Certificates.X509Certificate2,System.Boolean)|1|ownsMaterial|System.Boolean|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.ClientSecretCredential::.ctor(System.Security.SecureString,System.Boolean)|0|secret|System.Security.SecureString|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.ClientSecretCredential::.ctor(System.Security.SecureString,System.Boolean)|1|ownsMaterial|System.Boolean|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.FixedBearerCredential::.ctor(System.String)|0|accessToken|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|0|code|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|1|category|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|2|message|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|3|retryAfter|System.Nullable<System.TimeSpan>|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=Nullable/Nullable'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthException::.ctor(System.String,System.String,System.String,System.Nullable<System.TimeSpan>,System.String)|4|correlationId|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=Nullable/Nullable'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version,System.TimeSpan)|0|payloadRoot|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version,System.TimeSpan)|1|expectedProviderVersion|System.Version|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version,System.TimeSpan)|2|shutdownTimeout|System.TimeSpan|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version)|0|payloadRoot|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphAuthHost::.ctor(System.String,System.Version)|1|expectedProviderVersion|System.Version|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|0|environment|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|1|tenantId|System.Guid|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|2|authority|System.Uri|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|3|resource|System.Uri|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|4|clientId|System.Nullable<System.Guid>|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=Nullable/Nullable'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|5|authMode|GraphKit.Auth.GraphAuthMode|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|6|credential|GraphKit.Auth.GraphCredential|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.GraphTokenRequest::.ctor(System.String,System.Guid,System.Uri,System.Uri,System.Nullable<System.Guid>,GraphKit.Auth.GraphAuthMode,GraphKit.Auth.GraphCredential,System.String)|7|credentialGeneration|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|CTOR|GraphKit.Auth.ManagedIdentityCredential::.ctor(System.String)|0|userAssignedClientId|System.String|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=Nullable/Nullable'
+            'PARAMETER-META|METHOD|GraphKit.Auth.GraphAuthHost::CreateSource(GraphKit.Auth.GraphTokenRequest)|0|request|GraphKit.Auth.GraphTokenRequest|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|METHOD|GraphKit.Auth.IGraphTokenSource::Acquire(System.Boolean,System.Threading.CancellationToken)|0|forceRefresh|System.Boolean|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|METHOD|GraphKit.Auth.IGraphTokenSource::Acquire(System.Boolean,System.Threading.CancellationToken)|1|cancellation|System.Threading.CancellationToken|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|METHOD|GraphKit.Auth.IGraphTokenSource::AdoptSharedResult(GraphKit.Auth.GraphTokenResult,System.Boolean)|0|result|GraphKit.Auth.GraphTokenResult|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|METHOD|GraphKit.Auth.IGraphTokenSource::AdoptSharedResult(GraphKit.Auth.GraphTokenResult,System.Boolean)|1|forceRefresh|System.Boolean|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PARAMETER-META|METHOD|GraphKit.Auth.IGraphTokenSourceFactory::Create(GraphKit.Auth.GraphTokenRequest)|0|request|GraphKit.Auth.GraphTokenRequest|direction=value|params=false|optional=false|hasDefault=false|default=<none>|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'PROPERTY-META|GraphKit.Auth.CertificateCredential::Certificate|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.CertificateCredential::OwnsMaterial|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.ClientSecretCredential::OwnsMaterial|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.ClientSecretCredential::Secret|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.FixedBearerCredential::AccessToken|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphAuthException::Category|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphAuthException::Code|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphAuthException::CorrelationId|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphAuthException::RetryAfter|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphAuthHost::LoadContextWeakReference|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::AuthMode|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::Authority|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::ClientId|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::Credential|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::CredentialGeneration|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::Environment|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::Resource|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenRequest::TenantId|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::AccessToken|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::CredentialGeneration|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::ExpiresOnUtc|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::ReceivedOnUtc|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::Scopes|static=false|nullable=NotNull/NotNull;element=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::TokenFingerprint|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::TokenType|static=false|nullable=NotNull/NotNull|indexCount=0|setterRequiredMods=[System.Runtime.CompilerServices.IsExternalInit]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.GraphTokenResult::VerifiedTenantId|static=false|nullable=Nullable/Nullable|indexCount=0|setterRequiredMods=[]|setterOptionalMods=[]'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::Audience|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::AuthMode|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::CanRefresh|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::ClientId|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::CredentialGeneration|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::ExpiresOn|static=false|nullable=NotNull/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.IGraphTokenSource::VerifiedTenantId|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'PROPERTY-META|GraphKit.Auth.ManagedIdentityCredential::UserAssignedClientId|static=false|nullable=Nullable/Unknown|indexCount=0|setterRequiredMods=<none>|setterOptionalMods=<none>'
+            'RETURN-META|METHOD|GraphKit.Auth.GraphAuthHost::CreateSource(GraphKit.Auth.GraphTokenRequest)|GraphKit.Auth.IGraphTokenSource|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'RETURN-META|METHOD|GraphKit.Auth.GraphAuthHost::Dispose()|System.Void|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'RETURN-META|METHOD|GraphKit.Auth.IGraphTokenSource::Acquire(System.Boolean,System.Threading.CancellationToken)|GraphKit.Auth.GraphTokenResult|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'RETURN-META|METHOD|GraphKit.Auth.IGraphTokenSource::AdoptSharedResult(GraphKit.Auth.GraphTokenResult,System.Boolean)|System.Void|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'RETURN-META|METHOD|GraphKit.Auth.IGraphTokenSourceFactory::Create(GraphKit.Auth.GraphTokenRequest)|GraphKit.Auth.IGraphTokenSource|requiredMods=[]|optionalMods=[]|nullable=NotNull/NotNull'
+            'TYPE-META|GraphKit.Auth.CertificateCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.ClientSecretCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.FixedBearerCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphAuthException|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphAuthHost|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphAuthMode|staticType=false|enumUnderlying=System.Int32|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphTokenRequest|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.GraphTokenResult|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.IGraphTokenSource|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.IGraphTokenSourceFactory|staticType=false|enumUnderlying=<none>|genericArity=0'
+            'TYPE-META|GraphKit.Auth.ManagedIdentityCredential|staticType=false|enumUnderlying=<none>|genericArity=0'
         ) | Sort-Object
 
         $result = Invoke-GraphKitAuthAbiSurfaceProbe -ContractsPath $script:contractsPath
@@ -979,6 +1466,34 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.Data.NonOwnerCompletedBeforeRelease | Should -BeFalse -Because 'only the shutdown owner may progress finalization while it is disposing sources'
         $result.Data.StateBeforeRelease | Should -Be 1 -Because 'a non-owner must not move the host beyond the owner-disposal phase'
         $result.Data.DisposeCount | Should -Be 1 -Because 'the single host-owned source must be disposed exactly once'
+        $result.Data.ProxyInnerCleared | Should -BeTrue
+        $result.Data.ProxyOwnerCleared | Should -BeTrue
+        $result.Data.LoadContextAlive | Should -BeFalse
+    }
+
+    It 'returns within the shutdown deadline while a cancellation callback is blocked and finishes safely after release' {
+        $payloadRoot = Join-Path $TestDrive 'blocked-callback-provider'
+        $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
+        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
+        $harnessPath = New-GraphKitAuthRuntimeHarnessAssembly -Root (Join-Path $TestDrive 'blocked-callback-harness')
+        $disposeMarker = Join-Path $TestDrive 'blocked-callback-dispose-marker.txt'
+
+        $result = Invoke-GraphKitAuthRuntimeProbe -ContractsPath (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll') `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario BlockedCancellationCallback `
+            -DisposeMarker $disposeMarker -HarnessPath $harnessPath
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Data.OwnerCompletedBeforeCallbackRelease | Should -BeTrue -Because 'a synchronous cancellation callback must not defeat the configured host timeout'
+        $result.Data.NonOwnerCompletedBeforeCallbackRelease | Should -BeTrue -Because 'concurrent Dispose callers share the same bounded shutdown deadline'
+        $result.Data.OwnerElapsedMilliseconds | Should -BeLessThan 2000
+        $result.Data.StateWhileCallbackBlocked | Should -Be 1
+        $result.Data.DisposeCountWhileCallbackBlocked | Should -Be 0
+        $result.Data.ProxyInnerPresentWhileCallbackBlocked | Should -BeTrue
+        $result.Data.ProxyOwnerPresentWhileCallbackBlocked | Should -BeTrue
+        $result.Data.LoadContextAliveWhileCallbackBlocked | Should -BeTrue
+        $result.Data.ProxyClearedBeforeAcquireRelease | Should -BeTrue
+        $result.Data.DisposeCountWhileAcquireBlocked | Should -Be 0 -Because 'an active proxy operation must retain its provider source until it leaves'
+        $result.Data.FinalDisposeCount | Should -Be 1
         $result.Data.ProxyInnerCleared | Should -BeTrue
         $result.Data.ProxyOwnerCleared | Should -BeTrue
         $result.Data.LoadContextAlive | Should -BeFalse

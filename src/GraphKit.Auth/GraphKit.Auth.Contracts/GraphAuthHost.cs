@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -28,6 +29,7 @@ public sealed class GraphAuthHost : IDisposable
     private GraphAuthLoadContext? _loadContext;
     private Assembly? _providerAssembly;
     private Type? _factoryType;
+    private Task? _shutdownTask;
     private int _activeOperations;
     private int _state;
 
@@ -116,58 +118,100 @@ public sealed class GraphAuthHost : IDisposable
 
     public void Dispose()
     {
-        bool ownsShutdown = Interlocked.CompareExchange(
-            ref _state,
-            ShutdownOwnerDisposingSources,
-            Running) == Running;
-        if (!ownsShutdown)
+        Stopwatch deadline = Stopwatch.StartNew();
+        Task shutdownTask = GetOrStartShutdown();
+        bool shutdownStageCompleted;
+        try
         {
-            _shutdownCompleted.Wait(_shutdownTimeout);
+            shutdownStageCompleted = shutdownTask.Wait(_shutdownTimeout);
+        }
+        catch (AggregateException)
+        {
+            shutdownStageCompleted = true;
+        }
+
+        if (!shutdownStageCompleted)
+        {
             return;
         }
 
+        TimeSpan remaining = _shutdownTimeout - deadline.Elapsed;
+        if (remaining > TimeSpan.Zero)
+        {
+            _shutdownCompleted.Wait(remaining);
+        }
+
+        shutdownTask.GetAwaiter().GetResult();
+    }
+
+    private Task GetOrStartShutdown()
+    {
+        lock (_gate)
+        {
+            if (_shutdownTask is not null)
+            {
+                return _shutdownTask;
+            }
+
+            Volatile.Write(ref _state, ShutdownOwnerDisposingSources);
+            Task shutdownTask = CancelAndDisposeSourcesAsync();
+            _shutdownTask = shutdownTask;
+            _ = shutdownTask.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted |
+                    TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            return shutdownTask;
+        }
+    }
+
+    private async Task CancelAndDisposeSourcesAsync()
+    {
         List<Exception>? failures = null;
         try
         {
+            await _shutdown.CancelAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failures = [exception];
+        }
+
+        GraphTokenSourceProxy[] sources;
+        lock (_gate)
+        {
+            sources = [.. _sources];
+        }
+
+        foreach (GraphTokenSourceProxy source in sources)
+        {
             try
             {
-                _shutdown.Cancel();
+                source.Dispose();
             }
             catch (Exception exception)
             {
-                failures = [exception];
-            }
-
-            GraphTokenSourceProxy[] sources;
-            lock (_gate)
-            {
-                sources = [.. _sources];
-            }
-
-            foreach (GraphTokenSourceProxy source in sources)
-            {
-                try
-                {
-                    source.Dispose();
-                }
-                catch (Exception exception)
-                {
-                    failures ??= [];
-                    failures.Add(exception);
-                }
+                failures ??= [];
+                failures.Add(exception);
             }
         }
-        finally
+
+        Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
+        try
         {
-            Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
-            _drained.Wait(_shutdownTimeout);
             TryFinalizeUnload();
+        }
+        catch (Exception exception)
+        {
+            failures ??= [];
+            failures.Add(exception);
         }
 
         if (failures is not null)
         {
             throw new AggregateException(
-                "One or more GraphKit.Auth provider sources failed while the host was shutting down.",
+                "One or more GraphKit.Auth cancellation callbacks or provider sources failed while the host was shutting down.",
                 failures);
         }
     }
