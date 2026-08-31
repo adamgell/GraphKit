@@ -102,13 +102,17 @@ BeforeAll {
             [int] $Passed = -1,
             [bool] $Executed = $true,
             [switch] $ForGenerator,
+            [string] $BaseVersion = '0.4.0',
+            [switch] $DirtySource,
             [int] $Total = 896
         )
 
         $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('graphkit-release-proof-' + [guid]::NewGuid().ToString('N'))
-        $baseVersion = '0.4.0'
+        $baseVersion = $BaseVersion
         $revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         $version = "$baseVersion-r8.g$($revision.Substring(0, 12))"
+        $sourceStateHash = if ($DirtySource) { ('b' * 64) -join '' } else { $null }
+        if ($DirtySource) { $version += ".d$($sourceStateHash.Substring(0, 12))" }
         $moduleDir = Join-Path $fixtureRoot "output/module/GraphKit/$baseVersion"
         $resultsDir = Join-Path $fixtureRoot 'output/testResults'
         $gateDir = Join-Path $fixtureRoot 'tests/QA'
@@ -129,9 +133,9 @@ BeforeAll {
         if ($ForGenerator) {
             Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') `
                 -Destination (Join-Path $scriptsDir 'Get-GraphKitTrainVersion.ps1')
-            Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') -Value "output/`n" -NoNewline -Encoding utf8NoBOM
+            Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') -Value "output/`nLICENSE`n" -NoNewline -Encoding utf8NoBOM
             & git -C $fixtureRoot init --quiet
-            & git -C $fixtureRoot add .gitignore scripts
+            & git -C $fixtureRoot add .gitignore scripts tests
             & git -C $fixtureRoot -c user.name='GraphKit Fixture' -c user.email='fixture@example.invalid' commit --quiet -m 'fixture source'
             $revision = (& git -C $fixtureRoot rev-parse HEAD).Trim().ToLowerInvariant()
             $version = (& (Join-Path $scriptsDir 'Get-GraphKitTrainVersion.ps1') -RepositoryRoot $fixtureRoot).Trim()
@@ -254,12 +258,12 @@ BeforeAll {
         )
         $proofPath = Join-Path $resultsDir 'tested-release-proof.json'
         [pscustomobject] [ordered] @{
-            schemaVersion = 2
+            schemaVersion = 3
             runId = [guid]::NewGuid().ToString('D')
             source = [pscustomobject] [ordered] @{
                 revision = $revision
-                clean = $true
-                diffSha256 = $null
+                clean = -not $DirtySource
+                stateSha256 = if ($DirtySource) { $sourceStateHash } else { ('c' * 64) -join '' }
             }
             module = [pscustomobject] [ordered] @{
                 name = 'GraphKit'
@@ -316,17 +320,29 @@ BeforeAll {
     }
 
     function Invoke-GraphKitReleaseProofVerifier {
-        param([Parameter(Mandatory)] [pscustomobject] $Fixture)
+        param(
+            [Parameter(Mandatory)] [pscustomobject] $Fixture,
+            [switch] $RequestSnapshots
+        )
+
+        $snapshotPackagePath = Join-Path $Fixture.Root 'verified/GraphKit.nupkg'
+        $snapshotProofPath = Join-Path $Fixture.Root 'verified/tested-release-proof.json'
+        $snapshotArguments = if ($RequestSnapshots) {
+            @('-VerifiedPackageCopyPath', $snapshotPackagePath, '-VerifiedProofCopyPath', $snapshotProofPath)
+        }
+        else { @() }
 
         $output = & pwsh -NoLogo -NoProfile -File $script:verifierPath `
             -PackagePath $Fixture.PackagePath `
             -ProofPath $Fixture.ProofPath `
-            -RepositoryRoot $Fixture.Root 2>&1 | Out-String
+            -RepositoryRoot $Fixture.Root @snapshotArguments 2>&1 | Out-String
         $output = $output -replace '\r?\n\s*\|\s*', ' '
         $output = ($output -replace '\s+', ' ').Trim()
         [pscustomobject] @{
             ExitCode = $LASTEXITCODE
             Output = $output
+            SnapshotPackagePath = $snapshotPackagePath
+            SnapshotProofPath = $snapshotProofPath
         }
     }
 
@@ -505,6 +521,27 @@ Describe 'Canonical tested release proof' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $proof.source.revision | Should -Match '^[0-9a-f]{40}$'
         $proof.module.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
+    }
+
+    It 'rejects a proof whose base version is not the R8 0.4.0 successor base' {
+        $script:fixture = New-GraphKitReleaseProofFixture -BaseVersion '0.4.1'
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match '0\.4\.0.*r8'
+    }
+
+    It 'rejects dirty provenance before it can emit authority or snapshots' {
+        $script:fixture = New-GraphKitReleaseProofFixture -DirtySource
+
+        $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture -RequestSnapshots
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'non-authoritative'
+        $result.Output | Should -Not -Match '^VERIFIED TESTED RELEASE:'
+        Test-Path -LiteralPath $result.SnapshotPackagePath | Should -BeFalse
+        Test-Path -LiteralPath $result.SnapshotProofPath | Should -BeFalse
     }
 
     It 'accepts package-serializer trimming of terminal release-note line endings' {
@@ -827,7 +864,7 @@ Describe 'Test workflow release-proof generation' {
 
         $result = Invoke-GraphKitReleaseProofGenerator -Fixture $script:fixture -Stage Capture
 
-        $result.ExitCode | Should -Be 0
+        $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Output | Should -Match 'CAPTURED RELEASE CANDIDATE'
         Test-Path -LiteralPath $script:fixture.ProofPath | Should -BeFalse
         Test-Path -LiteralPath $script:fixture.NUnitPath | Should -BeFalse
@@ -842,6 +879,7 @@ Describe 'Test workflow release-proof generation' {
         (Invoke-GraphKitReleaseProofGenerator -Fixture $script:fixture -Stage Capture).ExitCode | Should -Be 0
         [System.IO.File]::WriteAllBytes($script:fixture.NUnitPath, $nunitBytes)
         [System.IO.File]::WriteAllBytes($script:fixture.PesterObjectPath, $pesterObjectBytes)
+        @(& git -C $script:fixture.Root status --porcelain=v1 --untracked-files=all) | Should -BeNullOrEmpty
 
         $result = Invoke-GraphKitReleaseProofGenerator -Fixture $script:fixture -Stage Finalize
 
@@ -932,6 +970,18 @@ Describe 'Both publisher paths consume the canonical proof verifier' {
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'Data/Operations/Probe\.List\.psd1'
         $result.Output | Should -Match 'does not match the tested release proof'
+    }
+
+    It '<Publisher> rejects a dirty proof before publication authority is established' -ForEach @(
+        @{ Publisher = 'PrivateChannel' }
+        @{ Publisher = 'PSGallery' }
+    ) {
+        $script:fixture = New-GraphKitReleaseProofFixture -DirtySource
+
+        $result = Invoke-GraphKitFixturePublisher -Fixture $script:fixture -Publisher $Publisher
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'non-authoritative'
     }
 
     It 'private publication uses verifier-owned snapshots and preserves durable proof evidence' {

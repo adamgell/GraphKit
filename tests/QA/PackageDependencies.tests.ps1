@@ -7,6 +7,7 @@ BeforeAll {
     $script:version = (& (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') -RepositoryRoot $script:repoRoot).Trim()
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:version.nupkg"
     $script:graphAuthPath = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
+    $script:secretManagementPath = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.PowerShell.SecretManagement/1.1.2'
 
     function Get-PackageDependencies {
         param([Parameter(Mandatory)] [string] $PackagePath)
@@ -36,9 +37,11 @@ BeforeAll {
         $modulePath = Join-Path $Root 'Modules'
         $graphKitDestination = Join-Path $modulePath "GraphKit/$script:baseVersion"
         $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
-        $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
+        $secretManagementDestination = Join-Path $modulePath 'Microsoft.PowerShell.SecretManagement/1.1.2'
+        $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination, $secretManagementDestination -Force
         [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $graphKitDestination)
         Copy-Item -Path (Join-Path $script:graphAuthPath '*') -Destination $graphAuthDestination -Recurse -Force
+        Copy-Item -Path (Join-Path $script:secretManagementPath '*') -Destination $secretManagementDestination -Recurse -Force
         return $modulePath
     }
 
@@ -88,16 +91,18 @@ Import-Module '$($isolatedManifest.Replace("'", "''"))' -Force -ErrorAction Stop
 }
 
 Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
-    It 'records Microsoft.Graph.Authentication 2.38.1 as its only NuGet dependency' {
+    It 'records Graph Authentication and SecretManagement as exact NuGet dependencies' {
         Test-Path -LiteralPath $script:packagePath -PathType Leaf | Should -BeTrue
         $dependencies = @(Get-PackageDependencies -PackagePath $script:packagePath)
 
-        $dependencies.Count | Should -Be 1
-        [string] $dependencies[0].id | Should -Be 'Microsoft.Graph.Authentication'
-        [string] $dependencies[0].version | Should -Be '2.38.1'
+        $dependencies.Count | Should -Be 2
+        $dependencyMap = @{}
+        foreach ($dependency in $dependencies) { $dependencyMap[[string] $dependency.id] = [string] $dependency.version }
+        $dependencyMap['Microsoft.Graph.Authentication'] | Should -Be '2.38.1'
+        $dependencyMap['Microsoft.PowerShell.SecretManagement'] | Should -Be '1.1.2'
     }
 
-    It 'imports the isolated artifact and inspects the catalog without loading SecretManagement' {
+    It 'imports the isolated artifact with its required SecretManagement runtime dependency' {
         $modulePath = New-IsolatedGraphKitModulePath -Root (Join-Path $TestDrive 'non-vault')
         $result = Invoke-IsolatedGraphKitProbe -ModulePath $modulePath
 
@@ -105,8 +110,8 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
         $result.Data.Imported | Should -BeTrue
         $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:baseVersion")
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
-        $result.Data.SecretManagementLoaded | Should -BeFalse -Because 'catalog inspection does not use a vault'
-        $result.Data.SecretManagementAvailable | Should -BeFalse -Because 'the isolated package probe must not be able to discover the lazy vault dependency anywhere'
+        $result.Data.SecretManagementLoaded | Should -BeTrue -Because 'SecretManagement is restored as a runtime RequiredModule'
+        $result.Data.SecretManagementAvailable | Should -BeTrue -Because 'SecretManagement is a required runtime package dependency'
     }
 
 }

@@ -6,19 +6,9 @@ BeforeAll {
     $script:train = 'r8'
     $script:sourceManifestPath = Join-Path $script:repoRoot 'source/GraphKit.psd1'
 
-    $script:revision = (& git -C $script:repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
-    $script:diff = (& git -C $script:repoRoot diff --binary HEAD)
-    $script:dirtySuffix = if ([string]::IsNullOrEmpty($script:diff)) {
-        ''
-    }
-    else {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($script:diff)
-        $hash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
-        ".d$($hash.Substring(0, 12))"
-    }
-    $script:expectedVersion = "$($script:baseVersion)-$($script:train).g$($script:revision.Substring(0, 12))$($script:dirtySuffix)"
-    $script:expectedPrerelease = $script:expectedVersion.Substring($script:baseVersion.Length + 1)
     $script:versionScriptPath = Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1'
+    $script:expectedVersion = (& $script:versionScriptPath -RepositoryRoot $script:repoRoot).Trim()
+    $script:expectedPrerelease = $script:expectedVersion.Substring($script:baseVersion.Length + 1)
     $script:builtManifestPath = Join-Path $script:repoRoot "output/module/GraphKit/$script:baseVersion/GraphKit.psd1"
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:expectedVersion.nupkg"
 

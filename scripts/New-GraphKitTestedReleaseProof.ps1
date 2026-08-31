@@ -41,26 +41,19 @@ function Get-GraphKitReleaseCandidateState {
     if (-not (Test-Path -LiteralPath $versionScript -PathType Leaf)) {
         throw "Release proof requires '$versionScript'."
     }
-    $fullVersion = (& $versionScript -RepositoryRoot $Root).Trim()
-    if ($LASTEXITCODE -ne 0 -or $fullVersion -notmatch '^(?<base>\d+\.\d+\.\d+)-r8\.g(?<revision>[0-9a-f]{12})(?:\.d(?<diff>[0-9a-f]{12}))?$') {
+    $sourceState = & $versionScript -RepositoryRoot $Root -AsObject
+    $fullVersion = [string] $sourceState.version
+    if ($fullVersion -notmatch '^0\.4\.0-r8\.g(?<revision>[0-9a-f]{12})(?:\.d(?<diff>[0-9a-f]{12}))?$' -or
+        [string] $sourceState.baseVersion -cne '0.4.0' -or
+        [string] $sourceState.train -cne 'r8') {
         throw "Release proof received an invalid GraphKit train version '$fullVersion'."
     }
-    $baseVersion = $Matches['base']
-    $sourceRevision = (& git -C $Root rev-parse HEAD).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-f]{40}$') {
-        throw "Release proof cannot resolve a 40-character source revision for '$Root'."
-    }
-    $sourceDiff = (& git -C $Root diff --binary HEAD)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Release proof cannot determine the source state for '$Root'."
-    }
-    $sourceClean = [string]::IsNullOrEmpty($sourceDiff)
-    $sourceDiffHash = if ($sourceClean) {
-        $null
-    }
-    else {
-        $bytes = [Text.Encoding]::UTF8.GetBytes($sourceDiff)
-        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    $baseVersion = '0.4.0'
+    $sourceRevision = [string] $sourceState.revision
+    $sourceClean = [bool] $sourceState.clean
+    $sourceStateHash = [string] $sourceState.sourceStateSha256
+    if ($sourceRevision -notmatch '^[0-9a-f]{40}$' -or $sourceStateHash -notmatch '^[0-9a-f]{64}$') {
+        throw "Release proof received incomplete source provenance for '$fullVersion'."
     }
 
     $moduleRoot = Join-Path $Root 'output/module/GraphKit'
@@ -119,7 +112,7 @@ function Get-GraphKitReleaseCandidateState {
         source = [pscustomobject] [ordered] @{
             revision = $sourceRevision
             clean = $sourceClean
-            diffSha256 = $sourceDiffHash
+            stateSha256 = $sourceStateHash
         }
         package = [pscustomobject] [ordered] @{
             name = Split-Path -Leaf $packagePath
@@ -155,7 +148,7 @@ function Assert-GraphKitReleaseCandidateUnchanged {
     }
     if ([string] $Captured.source.revision -cne [string] $Current.source.revision -or
         [bool] $Captured.source.clean -ne [bool] $Current.source.clean -or
-        [string] $Captured.source.diffSha256 -cne [string] $Current.source.diffSha256) {
+        [string] $Captured.source.stateSha256 -cne [string] $Current.source.stateSha256) {
         throw 'The source candidate changed after capture; no tested release proof was emitted.'
     }
     if ([string] $Captured.package.name -cne [string] $Current.package.name -or
@@ -306,7 +299,7 @@ if ($Stage -eq 'Capture') {
 
     $candidate = Get-GraphKitReleaseCandidateState -Root $RepositoryRoot
     $capture = [pscustomobject] [ordered] @{
-        schemaVersion = 2
+        schemaVersion = 3
         runId = [guid]::NewGuid().ToString('D')
         module = $candidate.module
         source = $candidate.source
@@ -338,7 +331,7 @@ catch {
     throw "The pre-test candidate capture is unreadable: $($_.Exception.Message)"
 }
 $parsedRunId = [guid]::Empty
-if ([int] $captured.schemaVersion -ne 2 -or
+if ([int] $captured.schemaVersion -ne 3 -or
     -not [guid]::TryParse([string] $captured.runId, [ref] $parsedRunId) -or
     $parsedRunId -eq [guid]::Empty) {
     throw 'The pre-test candidate capture has an invalid schema version or run id.'
@@ -378,7 +371,7 @@ $postGateCandidate = Get-GraphKitReleaseCandidateState -Root $RepositoryRoot
 Assert-GraphKitReleaseCandidateUnchanged -Captured $captured -Current $postGateCandidate
 
 $releaseProof = [pscustomobject] [ordered] @{
-    schemaVersion = 2
+    schemaVersion = 3
     runId = [string] $captured.runId
     source = $captured.source
     module = $captured.module

@@ -89,7 +89,7 @@ try {
     $proofRunId = [string] $proof.runId
     $proofSourceRevision = [string] $proof.source.revision
     $proofSourceClean = $proof.source.clean
-    $proofSourceDiffHash = [string] $proof.source.diffSha256
+    $proofSourceStateHash = [string] $proof.source.stateSha256
     $proofModuleName = [string] $proof.module.name
     $proofModuleVersion = [string] $proof.module.version
     $proofModuleBaseVersion = [string] $proof.module.baseVersion
@@ -110,7 +110,7 @@ catch {
 }
 
 $parsedRunId = [guid]::Empty
-if ($proofSchemaVersion -ne 2 -or
+if ($proofSchemaVersion -ne 3 -or
     -not [guid]::TryParse($proofRunId, [ref] $parsedRunId) -or
     $parsedRunId -eq [guid]::Empty) {
     throw "The tested release proof '$ProofPath' has an unsupported schema version or invalid run id."
@@ -118,20 +118,21 @@ if ($proofSchemaVersion -ne 2 -or
 if ($proofSourceRevision -notmatch '^[0-9a-f]{40}$' -or $proofSourceClean -isnot [bool]) {
     throw "The tested release proof '$ProofPath' has invalid source provenance."
 }
-if ($proofSourceClean) {
-    if (-not [string]::IsNullOrEmpty($proofSourceDiffHash)) {
-        throw "The tested release proof '$ProofPath' records a diff hash for a clean source state."
-    }
+if ($proofSourceStateHash -notmatch '^[0-9a-f]{64}$') {
+    throw "The tested release proof '$ProofPath' has no valid canonical source-state hash."
 }
-elseif ($proofSourceDiffHash -notmatch '^[0-9a-f]{64}$') {
-    throw "The tested release proof '$ProofPath' has no valid dirty-source diff hash."
-}
-$expectedProofVersion = "$proofModuleBaseVersion-r8.g$($proofSourceRevision.Substring(0, 12))"
+$expectedProofVersion = "0.4.0-r8.g$($proofSourceRevision.Substring(0, 12))"
 if (-not $proofSourceClean) {
-    $expectedProofVersion += ".d$($proofSourceDiffHash.Substring(0, 12))"
+    $expectedProofVersion += ".d$($proofSourceStateHash.Substring(0, 12))"
 }
-if ($proofModuleBaseVersion -notmatch '^\d+\.\d+\.\d+$' -or $proofModuleVersion -cne $expectedProofVersion) {
+if ($proofModuleBaseVersion -cne '0.4.0') {
+    throw "The tested release proof '$ProofPath' requires the R8 base '0.4.0' and train 'r8'."
+}
+if ($proofModuleVersion -cne $expectedProofVersion) {
     throw "The tested release proof '$ProofPath' does not bind its module version to source provenance."
+}
+if (-not $proofSourceClean) {
+    throw "The tested release proof '$ProofPath' represents dirty source state and is non-authoritative: it cannot produce VERIFIED TESTED RELEASE authority, snapshots, or publication input."
 }
 if ($proofModuleName -cne $moduleName -or $proofModuleVersion -cne $moduleVersion) {
     throw "The tested release proof names '$proofModuleName' $proofModuleVersion, not '$moduleName' $moduleVersion."

@@ -37,11 +37,11 @@ Describe 'Built module' -Skip:($null -eq $script:BuiltBase) {
             Test-Path (Join-Path $script:BuiltBase.FullName $Path) | Should -BeTrue -Because 'missing CopyPaths entries vanish silently from the package'
         }
 
-        It 'declares only the always-required runtime dependency' {
+        It 'declares both always-required runtime dependencies' {
             $d = Import-PowerShellDataFile $script:Manifest
             $names = @($d.RequiredModules | ForEach-Object { if ($_ -is [hashtable]) { $_.ModuleName } else { $_ } })
             $names | Should -Contain 'Microsoft.Graph.Authentication'
-            $names | Should -Not -Contain 'Microsoft.PowerShell.SecretManagement' -Because 'vault support is loaded only when a vault-backed credential is used'
+            $names | Should -Contain 'Microsoft.PowerShell.SecretManagement'
         }
 
         It 'registers the format file via FormatsToProcess' {
