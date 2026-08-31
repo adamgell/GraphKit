@@ -1,0 +1,618 @@
+# GraphKit R8 Authentication Boundary Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Ship a digest-bound GraphKit `0.4.0-r8` prerelease whose four built-in authentication modes use a runspace-neutral compiled adapter with exact MSAL 4.82.1 isolated from the process default load context.
+
+**Architecture:** A dependency-free `GraphKit.Auth.Contracts.dll` loads in the default `AssemblyLoadContext` and owns the GraphKit ABI, strict loader, proxies, and lifetime. `GraphKit.Auth.dll` and its locked MSAL runtime closure load in one named collectible context per module import; only contract types cross. PowerShell resolves persisted credential material before a context leaves its creation runspace, then transfers owned framework types into the compiled source.
+
+**Tech Stack:** PowerShell 7.4/7.6, Sampler 0.120.1, ModuleBuilder 3.1.8, Pester 6.1.0, .NET SDK 10.0.400 targeting `net8.0`, Microsoft.Identity.Client 4.82.1, collectible `AssemblyLoadContext`, locked NuGet restore.
+
+---
+
+## File map
+
+New compiled source:
+
+- `global.json` — exact .NET SDK selection.
+- `src/GraphKit.Auth/Directory.Build.props` — deterministic, warning-clean, `net8.0` defaults.
+- `src/GraphKit.Auth/GraphKit.Auth.sln` — the two production projects and unit-test project.
+- `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.csproj` — dependency-free shared ABI.
+- `src/GraphKit.Auth/GraphKit.Auth.Contracts/Contracts.cs` — credentials, descriptors, requests, results, and interfaces.
+- `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthLoadContext.cs` — strict shared-contract resolver.
+- `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs` — provider load, validation, proxy ownership, unload.
+- `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphTokenSourceProxy.cs` — default-context proxy and disposal state.
+- `src/GraphKit.Auth/GraphKit.Auth/GraphKit.Auth.csproj` — isolated provider with MSAL 4.82.1.
+- `src/GraphKit.Auth/GraphKit.Auth/GraphTokenSourceFactory.cs` — descriptor validation and source construction.
+- `src/GraphKit.Auth/GraphKit.Auth/GraphTokenSource.cs` — cache, refresh, adoption, cancellation, disposal.
+- `src/GraphKit.Auth/GraphKit.Auth/MsalTokenClient.cs` — confidential-client and managed-identity acquisition.
+- `src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj` — deterministic provider tests.
+- `src/GraphKit.Auth/GraphKit.Auth.Tests/*.cs` — factory, cache, force-refresh, cancellation, and ownership tests.
+- `src/GraphKit.Auth/**/packages.lock.json` — exact restored dependency graphs.
+
+New build and PowerShell integration:
+
+- `.build/GraphKitAuth.tasks.ps1` — locked build and allowlisted package staging.
+- `scripts/Get-GraphKitTrainVersion.ps1` — deterministic full prerelease identity.
+- `source/Private/TokenSources/New-GraphAuthTokenSource.ps1` — CLR descriptor bridge and ownership transfer.
+- `tests/QA/GraphKitAuthPackage.tests.ps1` — binary/runtime-closure/ALC/no-leak package gates.
+- `tests/Unit/Auth/GraphKitAuth.Tests.ps1` — public ABI and fixed-bearer behavior.
+- `tests/Concurrency/GraphKitAuthRunspace.Tests.ps1` — exact source/context cross-runspace proof.
+- `tests/Unit/Auth/GraphKitAuthParity.Tests.ps1` — legacy and compiled deterministic contract parity.
+
+Existing files to modify:
+
+- `build.ps1`, `build.yaml`, `.github/workflows/ci.yml` — generated version, compiled build task, SDK setup, and .NET tests.
+- `source/GraphKit.psd1` — `0.4.0-r8` and eventual dependency removal; generated assemblies are
+  referenced only in the built manifest.
+- `source/Private/Initialize-GraphModuleLifecycle.ps1` — host-first/source-later LIFO registration.
+- `source/Private/TokenSources/GraphTokenSource.ps1` — compiled production selection; retained compatibility classes.
+- `source/Private/TokenSources/New-GraphMsalApplication.ps1` — legacy parity/test-only scope.
+- `source/Private/Transport/Send-GraphHttpRequest.ps1` — CLR-source cache adoption and scoped legacy guard.
+- `source/Public/Get-GraphContext.ps1` — compiled built-ins, same-runspace provider/factory compatibility.
+- `source/Private/Assert-GraphMsalEnvironment.ps1` — remove default-ALC guard after cutover.
+- `scripts/New-GraphKitTestedReleaseProof.ps1`, `scripts/Test-GraphKitReleaseProof.ps1` — full prerelease/source-revision proof.
+- `scripts/Install-GraphKitPinned.ps1`, `scripts/Publish-GraphKitPackage.ps1`, `scripts/Publish-GraphKitToGallery.ps1` — prerelease-aware exact artifact handling.
+- `tests/QA/PackageIdentity.tests.ps1`, `tests/QA/PackageDependencies.tests.ps1`, `tests/QA/ImportOrderMatrix.tests.ps1`, `tests/QA/ReleaseProof.tests.ps1`, `tests/QA/ReleaseTruth.tests.ps1` — successor identity and isolated dependency assertions.
+- `README.md`, `AGENTS.md`, `CHANGELOG.md`, both governing specs — exact completed/evidence status.
+
+### Task 1: Freeze and test successor package identity
+
+**Files:**
+
+- Create: `scripts/Get-GraphKitTrainVersion.ps1`
+- Modify: `build.ps1`
+- Modify: `source/GraphKit.psd1`
+- Modify: `scripts/New-GraphKitTestedReleaseProof.ps1`
+- Modify: `scripts/Test-GraphKitReleaseProof.ps1`
+- Test: `tests/QA/PackageIdentity.tests.ps1`
+- Test: `tests/QA/ReleaseProof.tests.ps1`
+
+- [ ] **Step 1: Write failing successor-version tests**
+
+Add assertions that source declares base `0.4.0`, the train is `r8`, the built/package version is
+`0.4.0-r8.g<12 hex>` for a clean tree, and the proof records the exact full version and 40-hex
+source revision. Add a fixture proving that a prerelease package is found under a base-version
+module directory.
+
+```powershell
+$metadata.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
+$proof.source.revision | Should -Match '^[0-9a-f]{40}$'
+$proof.module.version | Should -Be ([string] $metadata.version)
+```
+
+- [ ] **Step 2: Run the focused tests and verify red**
+
+Run:
+
+```powershell
+./build.ps1 -Tasks pack
+Invoke-Pester ./tests/QA/PackageIdentity.tests.ps1,./tests/QA/ReleaseProof.tests.ps1 -Output Detailed
+```
+
+Expected: failures naming stable `0.3.0`, missing source revision, and prerelease package discovery.
+
+- [ ] **Step 3: Implement deterministic version generation**
+
+`Get-GraphKitTrainVersion.ps1` returns one string and nothing else:
+
+```powershell
+$base = '0.4.0'
+$train = 'r8'
+$revision = (& git -C $RepositoryRoot rev-parse HEAD).Trim().ToLowerInvariant()
+$diff = (& git -C $RepositoryRoot diff --binary HEAD)
+$suffix = if ([string]::IsNullOrEmpty($diff)) {
+    ''
+} else {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($diff)
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    ".d$($hash.Substring(0, 12))"
+}
+"$base-$train.g$($revision.Substring(0, 12))$suffix"
+```
+
+Set `$env:ModuleVersion` in `build.ps1` before Sampler resolves build metadata. Record the complete
+semantic version and source state in proof schema v2. Resolve the built directory from base
+`ModuleVersion` while resolving the package from full PSData prerelease/version metadata.
+
+- [ ] **Step 4: Run identity/proof tests and verify green**
+
+Expected: every new identity fixture passes; no package named `GraphKit.0.3.0.nupkg` is produced.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add build.ps1 source/GraphKit.psd1 scripts/Get-GraphKitTrainVersion.ps1 scripts/New-GraphKitTestedReleaseProof.ps1 scripts/Test-GraphKitReleaseProof.ps1 tests/QA/PackageIdentity.tests.ps1 tests/QA/ReleaseProof.tests.ps1
+git commit -m "build: establish the GraphKit R8 prerelease identity"
+```
+
+### Task 2: Add red ABI and package-boundary tests
+
+**Files:**
+
+- Create: `tests/Unit/Auth/GraphKitAuth.Tests.ps1`
+- Create: `tests/QA/GraphKitAuthPackage.tests.ps1`
+- Modify: `tests/QA/PackageDependencies.tests.ps1`
+
+- [ ] **Step 1: Write the missing-artifact and ABI tests**
+
+The tests require these exact package paths:
+
+```text
+Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll
+Assemblies/GraphKit.Auth/GraphKit.Auth.dll
+Assemblies/GraphKit.Auth/GraphKit.Auth.deps.json
+Assemblies/GraphKit.Auth/Microsoft.Identity.Client.dll
+Assemblies/GraphKit.Auth/Microsoft.IdentityModel.Abstractions.dll
+```
+
+Load the contracts assembly and assert:
+
+```powershell
+[GraphKit.Auth.GraphAuthHost]::ContractMarker | Should -Be 'GraphKit.Auth.Abi/1'
+[GraphKit.Auth.IGraphTokenSource].GetMethod('Acquire').ReturnType.FullName |
+    Should -Be 'GraphKit.Auth.GraphTokenResult'
+```
+
+Reflect over every public type/member signature and fail when the declaring assembly or full type
+name contains `Microsoft.Identity.Client`.
+
+- [ ] **Step 2: Run the two files and verify red**
+
+Expected: missing assembly/package path failures only.
+
+- [ ] **Step 3: Commit tests only**
+
+```bash
+git add tests/Unit/Auth/GraphKitAuth.Tests.ps1 tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/PackageDependencies.tests.ps1
+git commit -m "test: define the GraphKit Auth package boundary"
+```
+
+### Task 3: Implement the dependency-free contract assembly
+
+**Files:**
+
+- Create: `global.json`
+- Create: `src/GraphKit.Auth/Directory.Build.props`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.csproj`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/Contracts.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphTokenSourceProxy.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthLoadContext.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs`
+
+- [ ] **Step 1: Pin the SDK and deterministic defaults**
+
+`global.json`:
+
+```json
+{
+  "sdk": {
+    "version": "10.0.400",
+    "rollForward": "disable",
+    "allowPrerelease": false
+  }
+}
+```
+
+`Directory.Build.props` sets `TargetFramework=net8.0`, `Nullable=enable`,
+`ImplicitUsings=enable`, `TreatWarningsAsErrors=true`, `Deterministic=true`,
+`ContinuousIntegrationBuild=true`, `DebugType=None`, and
+`RestorePackagesWithLockFile=true`.
+
+- [ ] **Step 2: Implement ABI-v1 DTOs and interfaces**
+
+Use sealed mutable-result/plain-constructor types, not records and not PowerShell types. Validate
+null/empty strings, absolute HTTPS authorities/resources, GUID presence by auth mode, credential
+discriminator agreement, private-key presence, and non-empty generation before a provider loads.
+
+The result must retain a settable `VerifiedTenantId`:
+
+```csharp
+public sealed class GraphTokenResult
+{
+    public required string AccessToken { get; init; }
+    public DateTimeOffset ExpiresOnUtc { get; init; }
+    public DateTimeOffset ReceivedOnUtc { get; init; }
+    public required string TokenType { get; init; }
+    public required string[] Scopes { get; init; }
+    public string? VerifiedTenantId { get; set; }
+    public required string TokenFingerprint { get; init; }
+    public required string CredentialGeneration { get; init; }
+}
+```
+
+- [ ] **Step 3: Implement strict loader and proxy lifetime**
+
+`GraphAuthLoadContext.Load` returns the default contracts assembly for the exact matching contract
+name and uses `AssemblyDependencyResolver` for every isolated dependency. It rejects a second
+contracts copy, an unexpected provider name/version, and a provider path outside the declared
+payload root. Host import validates `GraphKit.Auth.Abi/1`; an incompatible contracts assembly
+already loaded in the default context fails with an instruction to start a fresh PowerShell
+process.
+
+`GraphTokenSourceProxy` uses `Interlocked` state, forwards contract members, clears the inner source
+on dispose, and tells the host exactly once. It never catches and relabels provider exceptions.
+
+- [ ] **Step 4: Build the contracts project**
+
+Run:
+
+```bash
+dotnet build src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.csproj -c Release
+```
+
+Expected: zero warnings and errors; no `Microsoft.Identity.Client` in `project.assets.json`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add global.json src/GraphKit.Auth
+git commit -m "feat: define the GraphKit Auth ABI"
+```
+
+### Task 4: Implement the isolated provider and deterministic .NET tests
+
+**Files:**
+
+- Create: `src/GraphKit.Auth/GraphKit.Auth/GraphKit.Auth.csproj`
+- Create: `src/GraphKit.Auth/GraphKit.Auth/GraphTokenSourceFactory.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth/GraphTokenSource.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth/MsalTokenClient.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Tests/GraphTokenSourceTests.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Tests/OwnershipTests.cs`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.sln`
+
+- [ ] **Step 1: Write failing .NET source-contract tests**
+
+Use an internal fake acquisition client to prove cache reuse, adaptive refresh, forced-refresh
+replacement, cancellation, failed-acquisition fanout, generation rejection, fixed-bearer refusal,
+and exactly-once material disposal. A representative test is:
+
+```csharp
+[Fact]
+public void ForcedRefreshReplacesAnOlderCachedResult()
+{
+    using var source = SourceFixture.Refreshable("first", "second");
+    Assert.Equal("first", source.Acquire(false, CancellationToken.None).AccessToken);
+    Assert.Equal("second", source.Acquire(true, CancellationToken.None).AccessToken);
+    Assert.Equal("second", source.Acquire(false, CancellationToken.None).AccessToken);
+}
+```
+
+- [ ] **Step 2: Run .NET tests and verify red**
+
+Run:
+
+```bash
+dotnet test src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj -c Release
+```
+
+Expected: missing provider/source types.
+
+- [ ] **Step 3: Implement the minimal complete provider**
+
+`GraphKit.Auth.csproj` pins:
+
+```xml
+<PackageReference Include="Microsoft.Identity.Client" Version="4.82.1" />
+<ProjectReference Include="../GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.csproj">
+  <Private>false</Private>
+  <ExcludeAssets>runtime</ExcludeAssets>
+</ProjectReference>
+```
+
+The factory accepts one immutable `GraphTokenRequest` containing the source-constant identity and
+credential fields and creates one confidential-client or managed-identity MSAL application per
+source. Per-call force refresh and cancellation remain arguments to `IGraphTokenSource.Acquire`;
+there is no duplicate descriptor DTO. The source computes SHA-256 token fingerprints, uses
+`AuthenticationResult.ExpiresOn`, records `ReceivedOnUtc` at successful acquisition, validates
+generation on every result/adoption, and never parses a JWT. Fixed bearer returns
+`DateTimeOffset.MinValue` expiry and throws on force. Every MSAL exception is caught inside the
+isolated provider and converted to a GraphKit-owned `GraphAuthException` without preserving an
+MSAL `InnerException` or `Data` value.
+
+- [ ] **Step 4: Lock restore and run tests green**
+
+Run:
+
+```bash
+dotnet restore src/GraphKit.Auth/GraphKit.Auth.sln --use-lock-file
+dotnet restore src/GraphKit.Auth/GraphKit.Auth.sln --locked-mode
+dotnet test src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj -c Release --no-restore
+```
+
+Expected: all tests pass, zero warnings, committed lock files name exact MSAL 4.82.1.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/GraphKit.Auth
+git commit -m "feat: add the isolated GraphKit Auth provider"
+```
+
+### Task 5: Integrate compiled build, package, and CI
+
+**Files:**
+
+- Create: `.build/GraphKitAuth.tasks.ps1`
+- Modify: `build.yaml`
+- Modify: `source/GraphKit.psd1`
+- Modify: `.github/workflows/ci.yml`
+- Test: `tests/QA/GraphKitAuthPackage.tests.ps1`
+- Test: `tests/QA/BuiltModule.tests.ps1`
+
+- [ ] **Step 1: Add the locked build and allowlisted copy tasks**
+
+`Build_GraphKitAuth` runs locked restore, .NET tests, and Release publish into
+`output/GraphKit.Auth/stage`. `Copy_GraphKitAuth_Into_BuiltModule` accepts only:
+
+```powershell
+$allowed = @(
+    'GraphKit.Auth.Contracts.dll',
+    'GraphKit.Auth.dll',
+    'GraphKit.Auth.deps.json',
+    'Microsoft.Identity.Client.dll',
+    'Microsoft.IdentityModel.Abstractions.dll'
+)
+```
+
+If MSAL 4.82.1's locked runtime closure adds another managed dependency, add that exact filename to
+the allowlist and package test in the same commit; never use `Copy-Item *`.
+
+- [ ] **Step 2: Wire the workflow and built manifest**
+
+Insert the two build tasks in the order fixed by the R8 design. Set
+`RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')` only in the built
+manifest after the allowlisted contracts DLL exists, then run `Test-ModuleManifest` against that
+built path. Keep source `RequiredAssemblies` empty so source validation never points at a generated
+file absent from `source/`. Add `actions/setup-dotnet@v4` with `10.0.400` before dependency restore
+in each existing matrix row.
+
+- [ ] **Step 3: Pack and run package tests**
+
+Run:
+
+```powershell
+./build.ps1 -ResolveDependency -Tasks noop
+./build.ps1 -Tasks pack
+Invoke-Pester ./tests/QA/GraphKitAuthPackage.tests.ps1,./tests/QA/BuiltModule.tests.ps1 -Output Detailed
+```
+
+Expected: contracts load in Default ALC; provider and exact MSAL load in the named non-default ALC;
+every packaged runtime file is allowlisted; no PDB/ref/native file exists.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .build/GraphKitAuth.tasks.ps1 build.yaml source/GraphKit.psd1 .github/workflows/ci.yml tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/BuiltModule.tests.ps1
+git commit -m "build: package the isolated GraphKit Auth runtime"
+```
+
+### Task 6: Cut built-in context construction over to compiled sources
+
+**Files:**
+
+- Create: `source/Private/TokenSources/New-GraphAuthTokenSource.ps1`
+- Modify: `source/Private/Initialize-GraphModuleLifecycle.ps1`
+- Modify: `source/Private/TokenSources/GraphTokenSource.ps1`
+- Modify: `source/Private/Transport/Send-GraphHttpRequest.ps1`
+- Modify: `source/Public/Get-GraphContext.ps1`
+- Test: `tests/Unit/Auth/GraphKitAuth.Tests.ps1`
+- Test: `tests/Unit/Profiles/Get-GraphContext.Tests.ps1`
+- Test: `tests/Adapter/Send-GraphHttpRequest.Tests.ps1`
+
+- [ ] **Step 1: Write failing bridge/ownership tests**
+
+Assert that production certificate, client-secret, managed-identity, and bearer contexts return an
+object implementing `GraphKit.Auth.IGraphTokenSource`; `-TokenProvider` and `-MsalFactory` return the
+legacy same-runspace source. Assert that persisted PFX bytes are read once, unsupported vault
+version metadata fails before vault access, and failed host creation disposes owned material.
+
+- [ ] **Step 2: Verify red**
+
+Run the three focused Pester files. Expected: built-in contexts still return PowerShell classes.
+
+- [ ] **Step 3: Implement the bridge**
+
+`New-GraphAuthTokenSource` constructs a `GraphTokenRequest` and transfers material only
+after generation verification. Production `New-GraphTokenSource` selects it when `-MsalFactory` is
+absent. Register the host before any source and register each compiled source as GraphKit-owned.
+
+In the sender, adopt shared results for either legacy `GraphTokenSourceBase` or compiled
+`IGraphTokenSource`. Apply the creation-runspace preflight only to the legacy base class.
+
+- [ ] **Step 4: Run focused tests green and commit**
+
+```bash
+git add source/Private/TokenSources/New-GraphAuthTokenSource.ps1 source/Private/Initialize-GraphModuleLifecycle.ps1 source/Private/TokenSources/GraphTokenSource.ps1 source/Private/Transport/Send-GraphHttpRequest.ps1 source/Public/Get-GraphContext.ps1 tests/Unit/Auth/GraphKitAuth.Tests.ps1 tests/Unit/Profiles/Get-GraphContext.Tests.ps1 tests/Adapter/Send-GraphHttpRequest.Tests.ps1
+git commit -m "feat: use compiled token sources for built-in auth"
+```
+
+### Task 7: Prove deterministic parity and genuine cross-runspace use
+
+**Files:**
+
+- Create: `tests/Unit/Auth/GraphKitAuthParity.Tests.ps1`
+- Create: `tests/Concurrency/GraphKitAuthRunspace.Tests.ps1`
+- Modify: `tests/Concurrency/TokenIsolation.Tests.ps1`
+- Modify: `tests/Adapter/GraphModuleLifecycleSender.Tests.ps1`
+- Modify: `tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1`
+
+- [ ] **Step 1: Add shared legacy/compiled contract cases**
+
+Run the same case table against both implementations: ordinary cache hit, expiry refresh, forced
+refresh, acquisition failure, cancellation, fixed-bearer force refusal, fingerprint equality,
+generation mismatch, adoption, and disposal. Compare behavior and public result properties, not
+concrete implementation type.
+
+- [ ] **Step 2: Add real runspace acceptance**
+
+Create one compiled source/context in the parent. Pass that exact object reference to two thread
+runspaces, release them with event gates, and require bounded completion. Cover distinct tenants,
+same-key single-flight, force-refresh isolation, and fixed bearer. No child may recreate a context.
+
+- [ ] **Step 3: Add unload/lifecycle acceptance**
+
+Dispose sources, remove the module, clear strong references, perform bounded GC/finalizer cycles,
+and assert the host's ALC weak reference is dead. A deliberately active acquisition must cancel and
+drain before owned certificate/secret disposal.
+
+- [ ] **Step 4: Run focused concurrency files serially**
+
+Expected: all pass without Pester parallelism, sleeps, or unbounded waits.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/Unit/Auth/GraphKitAuthParity.Tests.ps1 tests/Concurrency/GraphKitAuthRunspace.Tests.ps1 tests/Concurrency/TokenIsolation.Tests.ps1 tests/Adapter/GraphModuleLifecycleSender.Tests.ps1 tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1
+git commit -m "test: prove GraphKit Auth parity and runspace isolation"
+```
+
+### Task 8: Prove protected live parity before transitive cutover
+
+**Files:**
+
+- Create: `scripts/Invoke-GraphKitAuthParity.ps1`
+- Create: `tests/QA/GraphKitAuthLiveParity.tests.ps1`
+- Modify only the R8 evidence ledger/spec after observed results.
+
+- [ ] **Step 1: Write and test a digest-bound protected runner**
+
+The runner requires the exact package path and SHA-256, installs into an isolated module path, and
+accepts one auth mode per invocation. Dry-run tests prove certificate, client-secret,
+managed-identity, and fixed-bearer routing without reading a credential, calling Graph, granting a
+permission, or creating Azure resources. Real mode emits only redacted counts, auth mode, adapter
+diagnostics, package digest, and success/failure state.
+
+- [ ] **Step 2: Pack/test and freeze the pre-cutover artifact**
+
+Run the complete local gates with the transitive dependency still present but production contexts
+already using the isolated provider. Record the exact prerelease and digest; do not rebuild between
+live modes.
+
+- [ ] **Step 3: Run approved Ivy24 parity**
+
+Using the exact tested package, prove certificate, client-secret, and fixed-bearer acquisition plus
+a safe read. Do not persist tokens, secret values, tenant IDs, client IDs, or response content in
+repository evidence.
+
+- [ ] **Step 4: Provision a fresh managed-identity host only with explicit authority**
+
+Create the minimum throwaway Azure host and permission grant, install the same package digest,
+perform the managed-identity read, record redacted evidence, and delete the host/resources. The
+earlier legacy container run is not compiled-provider parity.
+
+- [ ] **Step 5: Commit only the tested runner and redacted observed evidence**
+
+Do not proceed to dependency removal until all four applicable protected-live parity modes pass.
+
+### Task 9: Remove transitive MSAL and run the final local gate
+
+**Files:**
+
+- Modify: `source/GraphKit.psd1`
+- Delete: `source/Private/Assert-GraphMsalEnvironment.ps1`
+- Modify: `source/Private/TokenSources/New-GraphMsalApplication.ps1`
+- Modify: `tests/QA/ImportOrderMatrix.tests.ps1`
+- Modify: `tests/QA/PackageDependencies.tests.ps1`
+- Modify: `tests/Unit/Auth/MsalGuard.Tests.ps1`
+- Modify: `scripts/Install-GraphKitPinned.ps1`
+- Modify: every minimum-test ratchet location reported by `tests/QA/MinimumTestsRatchetSync.tests.ps1`
+- Modify: `README.md`
+- Modify: `AGENTS.md`
+- Modify: `CHANGELOG.md`
+- Modify: `docs/superpowers/specs/2026-08-14-graphkit-design.md`
+- Modify: `docs/superpowers/specs/2026-08-19-graphkit-tenantpulse-product-program-design.md`
+- Modify: `docs/superpowers/specs/2026-08-30-r8-graphkit-auth-design.md`
+
+- [ ] **Step 1: Write red final dependency/import-order tests**
+
+Preload each available competing module in a fresh process, record the default-context MSAL
+assembly/version/location before GraphKit import, create a compiled source, and assert:
+
+```powershell
+$afterDefault.FullName | Should -Be $beforeDefault.FullName
+$diagnostics.MsalVersion | Should -Be '4.82.1.0'
+$diagnostics.MsalLoadContext | Should -Not -Be 'Default'
+```
+
+Clean package metadata must contain no `Microsoft.Graph.Authentication` dependency.
+
+- [ ] **Step 2: Remove the transitive runtime path**
+
+Remove the manifest dependency and import-time default-ALC guard. Retain legacy factory code only as
+the documented `-MsalFactory` compatibility/test path; it may require a caller-supplied factory and
+must not make production GraphKit depend on Graph Authentication.
+
+- [ ] **Step 3: Pack before the full test run**
+
+```powershell
+./build.ps1 -Tasks pack
+./build.ps1 -Tasks test
+```
+
+Expected: zero failed, errors, skips, and NotRun across Pester; zero .NET test failures.
+
+- [ ] **Step 4: Synchronize the measured ratchet and repeat**
+
+Update all six ratchet authorities to the actual full Pester total, then pack and run the full suite
+again because ratchet files are source changes.
+
+- [ ] **Step 5: Verify exact artifact identity**
+
+Run the standalone whole-result gate and canonical proof verifier. Independently compare built
+module, package entries, and proof records byte-for-byte. Require a clean-tree full prerelease,
+source revision match, exactly one private MSAL 4.82.1, and no default-context copy.
+
+- [ ] **Step 6: Run clean-install smoke from empty module state**
+
+Install the exact local prerelease into an isolated `PSModulePath`, import in fresh PowerShell 7.4
+and 7.6 processes, create fixed-bearer and managed-identity contexts without a vault or Graph SDK,
+and assert operation data/default views.
+
+- [ ] **Step 7: Reconcile claims**
+
+Document deterministic completion separately from protected live parity. State the compatibility
+scope of `TokenProvider`/`MsalFactory`, the eager local vault read at context creation, exact SDK/MSAL
+pins, and the immutable public `0.3.0` boundary.
+
+- [ ] **Step 8: Independent reviews and final local commit**
+
+Require code, silent-failure, type-design, package, and simplification reviews. If any edit results,
+repeat pack/test/proof. Commit only the reviewed clean state.
+
+### Task 10: Exact-SHA CI and promotion boundary
+
+**Files:**
+
+- Modify only evidence ledgers/docs after observed results.
+
+- [ ] **Step 1: Push and require six exact-SHA jobs**
+
+Push the R8 branch, open/update one PR, and require Windows, Ubuntu, and macOS on PowerShell 7.4 and
+7.6 for the exact final SHA. Do not treat an older green run as evidence.
+
+- [ ] **Step 2: Decide stable publication at the explicit approval gate**
+
+If TenantPulse/CI requires a stable GraphKit dependency, request publication authority for the
+already-tested bytes. Publish no rebuilt artifact. Verify gallery hash and clean remote install
+before changing TenantPulse's `RequiredVersion`.
+
+- [ ] **Step 3: Mark R8 complete only after every applicable gate**
+
+Until protected live parity and exact-SHA CI are observed, record R8 as implemented/deterministic
+but not service-verified. If authority is withheld, retain the exact executable runbook and active
+program status; do not convert readiness into completion.
+
+## Self-review record
+
+- Spec coverage: ABI, ALC isolation, four modes, compatibility seams, package identity, deterministic
+  parity, runspaces, lifecycle, dependency removal, clean install, CI, live proof, and publication
+  boundaries each map to an explicit task.
+- Placeholder scan: no implementation step is deferred without an evidence gate; protected actions
+  name their authority boundary rather than claiming completion.
+- Type consistency: every task uses `GraphKit.Auth.Contracts`, `GraphKit.Auth`,
+  `GraphTokenRequest`, `GraphTokenResult`, `GraphAuthException`,
+  `IGraphTokenSource`, `IGraphTokenSourceFactory`, and `GraphAuthHost` with the ABI-v1 shapes frozen
+  in the R8 design.
