@@ -228,8 +228,30 @@ namespace GraphKit.Auth;
 
 public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
 {
+    public GraphTokenSourceFactory()
+    {
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_CONSTRUCTION_FAILURE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            throw new ProviderOwnedConstructionException();
+        }
+    }
+
     public Uri FrameworkUri => new("https://graph.microsoft.com");
-    public IGraphTokenSource Create(GraphTokenRequest request) => new FixtureTokenSource(request);
+    public IGraphTokenSource Create(GraphTokenRequest request)
+    {
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            throw ProviderFailure.Create("source-construction");
+        }
+
+        return new FixtureTokenSource(request);
+    }
     // TEST_PUBLIC_SURFACE
 }
 
@@ -244,8 +266,14 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
     public FixtureTokenSource(GraphTokenRequest request) => _request = request;
 
     public bool CanRefresh => true;
-    public string AuthMode => _request.AuthMode.ToString();
-    public string Audience => _request.Resource.AbsoluteUri;
+    public string AuthMode => IsFailureMode("ReadGraph")
+        ? throw ProviderFailure.Create("read")
+        : IsFailureMode("ReadUnsafeMetadata")
+            ? throw ProviderFailure.CreateUnsafeMetadata()
+        : _request.AuthMode.ToString();
+    public string Audience => IsFailureMode("ReadUnexpected")
+        ? throw new ProviderOwnedOperationalException()
+        : _request.Resource.AbsoluteUri;
     public string? ClientId => _request.ClientId?.ToString("D");
     public DateTimeOffset ExpiresOn { get; private set; }
     public string? VerifiedTenantId { get; private set; }
@@ -269,7 +297,7 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
 
         if (forceRefresh)
         {
-            throw new GraphAuthException("fixture", "Fixture", "provider failure", TimeSpan.FromSeconds(7), "fixture-correlation");
+            throw ProviderFailure.Create("acquire");
         }
 
         ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(5);
@@ -288,6 +316,11 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
     public void AdoptSharedResult(GraphTokenResult result, bool forceRefresh)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (IsFailureMode("AdoptGraph"))
+        {
+            throw ProviderFailure.Create("adopt");
+        }
+
         ExpiresOn = result.ExpiresOnUtc;
         VerifiedTenantId = result.VerifiedTenantId;
     }
@@ -317,6 +350,58 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
         BlockedAcquireEntered.Wait(timeout);
 
     internal static void ReleaseBlockedAcquire() => BlockedAcquireRelease.Set();
+
+    private static bool IsFailureMode(string expected) => string.Equals(
+        Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER"),
+        expected,
+        StringComparison.Ordinal);
+}
+
+internal static class ProviderFailure
+{
+    internal static GraphAuthException Create(string member)
+    {
+        var failure = new GraphAuthException(
+            "fixture",
+            "Fixture",
+            "isolated-provider-" + member + "-sensitive-detail",
+            TimeSpan.FromSeconds(7),
+            "fixture-correlation");
+        failure.Data["isolated-provider-data"] = new ProviderOwnedData();
+        return failure;
+    }
+
+    internal static GraphAuthException CreateUnsafeMetadata()
+    {
+        return new GraphAuthException(
+            "ProviderOwned/unsafe-code",
+            "Unsafe Category",
+            "isolated-provider-unsafe-metadata-sensitive-detail",
+            TimeSpan.FromSeconds(7),
+            "isolated-provider-correlation\nunsafe");
+    }
+}
+
+internal sealed class ProviderOwnedConstructionException : Exception
+{
+    internal ProviderOwnedConstructionException()
+        : base(
+            "isolated-provider-construction-sensitive-detail",
+            new ProviderOwnedInnerException())
+    {
+        Data["isolated-provider-data"] = new ProviderOwnedData();
+    }
+}
+
+internal sealed class ProviderOwnedOperationalException : Exception
+{
+    internal ProviderOwnedOperationalException()
+        : base(
+            "isolated-provider-operation-sensitive-detail",
+            new ProviderOwnedInnerException())
+    {
+        Data["isolated-provider-data"] = new ProviderOwnedData();
+    }
 }
 
 internal sealed class ProviderOwnedDisposeException : Exception
@@ -453,6 +538,143 @@ using GraphKit.Auth;
 
 public static class GraphKitAuthRuntimeHarness
 {
+    public static string RetainedFactoryConstructionFailure(string payloadRoot)
+    {
+        WeakReference? weakReference = null;
+        AssemblyLoadEventHandler handler = (_, args) =>
+        {
+            AssemblyLoadContext? context = AssemblyLoadContext.GetLoadContext(
+                args.LoadedAssembly);
+            if (string.Equals(
+                    args.LoadedAssembly.GetName().Name,
+                    "GraphKit.Auth",
+                    StringComparison.Ordinal) &&
+                context?.IsCollectible is true)
+            {
+                weakReference = new WeakReference(context, trackResurrection: false);
+            }
+        };
+        AppDomain.CurrentDomain.AssemblyLoad += handler;
+        Task<GraphAuthHost> construction = Task.Run(() => new GraphAuthHost(
+            payloadRoot,
+            new Version(1, 0, 0, 0),
+            TimeSpan.FromSeconds(2)));
+        Exception retainedFailure = CaptureTaskException(construction);
+        AppDomain.CurrentDomain.AssemblyLoad -= handler;
+        WeakReference collectible = weakReference ??
+            throw new InvalidOperationException(
+                "The collectible provider context was not observed during construction.");
+
+        ForceCollection(collectible);
+        return JsonSerializer.Serialize(new
+        {
+            Failure = DescribeFailure(retainedFailure),
+            TaskFailure = DescribeFailure(construction.Exception),
+            LoadContextAliveWhileExceptionAndTaskReferenced = collectible.IsAlive
+        });
+    }
+
+    public static string RetainedSourceConstructionFailure(
+        GraphAuthHost host,
+        GraphTokenRequest request)
+    {
+        WeakReference weakReference = host.LoadContextWeakReference;
+        Task<IGraphTokenSource> construction = Task.Run(() => host.CreateSource(request));
+        Exception retainedFailure = CaptureTaskException(construction);
+
+        host.Dispose();
+        ForceCollection(weakReference);
+        return JsonSerializer.Serialize(new
+        {
+            Failure = DescribeFailure(retainedFailure),
+            TaskFailure = DescribeFailure(construction.Exception),
+            HostProviderReferencesCleared = HostProviderReferencesAreCleared(
+                host,
+                BindingFlags.Instance | BindingFlags.NonPublic),
+            LoadContextAliveWhileExceptionHostAndTaskReferenced = weakReference.IsAlive
+        });
+    }
+
+    public static string RetainedProviderBoundaryFailures(
+        GraphAuthHost host,
+        IGraphTokenSource source)
+    {
+        WeakReference weakReference = host.LoadContextWeakReference;
+        var kinds = new List<string>();
+        var failures = new List<Exception>();
+        var tasks = new List<Task>();
+
+        void Run(string kind, Action action)
+        {
+            Task task = Task.Run(action);
+            kinds.Add(kind);
+            tasks.Add(task);
+            failures.Add(CaptureTaskException(task));
+        }
+
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            "ReadGraph");
+        Run("ReadGraph", () => _ = source.AuthMode);
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            "ReadUnsafeMetadata");
+        Run("ReadUnsafeMetadata", () => _ = source.AuthMode);
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            "AdoptGraph");
+        Run("AdoptGraph", () => source.AdoptSharedResult(new GraphTokenResult
+        {
+            AccessToken = "fixture-adopted-token",
+            ExpiresOnUtc = DateTimeOffset.UtcNow.AddMinutes(5),
+            ReceivedOnUtc = DateTimeOffset.UtcNow,
+            TokenType = "Bearer",
+            Scopes = new[] { "https://graph.microsoft.com/.default" },
+            TokenFingerprint = "fixture-adopted-fingerprint",
+            CredentialGeneration = "generation-1"
+        }, false));
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            "ReadUnexpected");
+        Run("ReadUnexpected", () => _ = source.Audience);
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            null);
+        Run("AcquireGraph", () => source.Acquire(true, CancellationToken.None));
+        using (var cancellation = new CancellationTokenSource())
+        {
+            cancellation.Cancel();
+            Run("Cancellation", () => source.Acquire(false, cancellation.Token));
+        }
+
+        Environment.SetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_PROVIDER_FAILURE_MEMBER",
+            null);
+        source.Dispose();
+        host.Dispose();
+        ForceCollection(weakReference);
+        return JsonSerializer.Serialize(new
+        {
+            Failures = kinds.Select((kind, index) => new
+            {
+                Kind = kind,
+                Description = DescribeFailure(failures[index])
+            }).ToArray(),
+            TaskFailures = kinds.Select((kind, index) => new
+            {
+                Kind = kind,
+                Description = DescribeFailure(tasks[index].Exception)
+            }).ToArray(),
+            CancellationTokenIsCancellationRequested =
+                ((OperationCanceledException)failures[^1]).CancellationToken
+                    .IsCancellationRequested,
+            HostProviderReferencesCleared = HostProviderReferencesAreCleared(
+                host,
+                BindingFlags.Instance | BindingFlags.NonPublic),
+            LoadContextAliveWhileExceptionsHostAndTasksReferenced = weakReference.IsAlive
+        });
+    }
+
     public static string ConcurrentDispose(
         GraphAuthHost host,
         IGraphTokenSource source,
@@ -816,6 +1038,21 @@ public static class GraphKitAuthRuntimeHarness
             LoadContextAliveWhileAcquireBlocked = loadContextAliveWhileAcquireBlocked,
             AcquireFailure = acquireFailure
         };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Exception CaptureTaskException(Task task)
+    {
+        try
+        {
+            task.GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+
+        return new InvalidOperationException("The provider operation did not fail as required by the fixture.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -1240,7 +1477,7 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         param(
             [Parameter(Mandatory)] [string] $ContractsPath,
             [string] $PayloadRoot,
-            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'ImmediateDisposalFailure', 'DeferredDisposalFailure', 'SamePathReplacement')] [string] $Scenario,
+            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'FactoryConstructionFailure', 'SourceConstructionFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'ImmediateDisposalFailure', 'DeferredDisposalFailure', 'SamePathReplacement')] [string] $Scenario,
             [string] $DisposeMarker,
             [string] $ReplacementContractsPath,
             [string] $PreloadPath,
@@ -1297,6 +1534,17 @@ function Get-Rejection {
     }
 }
 
+function Get-RejectionType {
+    param([scriptblock] $Action)
+    try {
+        $null = & $Action
+        return $null
+    }
+    catch {
+        return $_.Exception.GetBaseException().GetType().FullName
+    }
+}
+
 switch ($Scenario) {
     'Validation' {
         $emptySecret = [Security.SecureString]::new()
@@ -1332,10 +1580,13 @@ switch ($Scenario) {
         $first.Dispose()
         $first.Dispose()
         $firstRejected = $null -ne (Get-Rejection { $first.Acquire($false, [Threading.CancellationToken]::None) })
+        $firstRejectionType = Get-RejectionType { $first.Acquire($false, [Threading.CancellationToken]::None) }
         $second = $authHost.CreateSource((New-ValidRequest))
         $authHost.Dispose()
         $secondRejected = $null -ne (Get-Rejection { $second.Acquire($false, [Threading.CancellationToken]::None) })
+        $secondRejectionType = Get-RejectionType { $second.Acquire($false, [Threading.CancellationToken]::None) }
         $createRejected = $null -ne (Get-Rejection { $authHost.CreateSource((New-ValidRequest)) })
+        $createRejectionType = Get-RejectionType { $authHost.CreateSource((New-ValidRequest)) }
         $first = $null
         $second = $null
         $authHost = $null
@@ -1347,8 +1598,11 @@ switch ($Scenario) {
         [pscustomobject]@{
             AccessToken = $acquired.AccessToken
             FirstRejected = $firstRejected
+            FirstRejectionType = $firstRejectionType
             SecondRejected = $secondRejected
+            SecondRejectionType = $secondRejectionType
             CreateRejected = $createRejected
+            CreateRejectionType = $createRejectionType
             DisposeCount = @(Get-Content -LiteralPath $DisposeMarker).Count
             LoadContextAlive = $weakReference.IsAlive
         } | ConvertTo-Json -Compress
@@ -1356,25 +1610,21 @@ switch ($Scenario) {
     'ProviderFailure' {
         $authHost = [GraphKit.Auth.GraphAuthHost]::new($PayloadRoot, [version]'1.0.0.0', [timespan]::FromSeconds(2))
         $source = $authHost.CreateSource((New-ValidRequest))
-        try {
-            $null = $source.Acquire($true, [Threading.CancellationToken]::None)
-            throw 'The provider fixture did not fail.'
-        }
-        catch [GraphKit.Auth.GraphAuthException] {
-            [pscustomobject]@{
-                Type = $_.Exception.GetType().FullName
-                Code = $_.Exception.Code
-                Category = $_.Exception.Category
-                Message = $_.Exception.Message
-                RetryAfterSeconds = $_.Exception.RetryAfter.TotalSeconds
-                CorrelationId = $_.Exception.CorrelationId
-                InnerIsNull = $null -eq $_.Exception.InnerException
-            } | ConvertTo-Json -Compress
-        }
-        finally {
-            $source.Dispose()
-            $authHost.Dispose()
-        }
+        [GraphKitAuthRuntimeHarness]::RetainedProviderBoundaryFailures($authHost, $source)
+    }
+    'FactoryConstructionFailure' {
+        $env:GRAPHKIT_AUTH_TEST_FACTORY_CONSTRUCTION_FAILURE = '1'
+        [GraphKitAuthRuntimeHarness]::RetainedFactoryConstructionFailure($PayloadRoot)
+    }
+    'SourceConstructionFailure' {
+        $env:GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE = '1'
+        $authHost = [GraphKit.Auth.GraphAuthHost]::new(
+            $PayloadRoot,
+            [version]'1.0.0.0',
+            [timespan]::FromSeconds(2))
+        [GraphKitAuthRuntimeHarness]::RetainedSourceConstructionFailure(
+            $authHost,
+            (New-ValidRequest))
     }
     'VersionMismatch' {
         $message = Get-Rejection { [GraphKit.Auth.GraphAuthHost]::new($PayloadRoot, [version]'9.0.0.0', [timespan]::FromSeconds(2)) }
@@ -1798,8 +2048,11 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Data.AccessToken | Should -BeExactly 'fixture-token'
         $result.Data.FirstRejected | Should -BeTrue
+        $result.Data.FirstRejectionType | Should -BeExactly 'System.ObjectDisposedException'
         $result.Data.SecondRejected | Should -BeTrue
+        $result.Data.SecondRejectionType | Should -BeExactly 'System.ObjectDisposedException'
         $result.Data.CreateRejected | Should -BeTrue
+        $result.Data.CreateRejectionType | Should -BeExactly 'System.ObjectDisposedException'
         $result.Data.DisposeCount | Should -Be 2 -Because 'one explicitly disposed and one host-owned source must each dispose exactly once'
         $result.Data.LoadContextAlive | Should -BeFalse
     }
@@ -1984,22 +2237,72 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         }
     }
 
-    It 'preserves GraphAuthException failures without catching and relabeling them' {
+    It 'recreates every provider failure on the default side without retaining the collectible context' {
         $payloadRoot = Join-Path $TestDrive 'failing-provider'
         $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
-        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
+        $payloadContractsPath = Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll'
+        Copy-Item -LiteralPath $script:contractsPath -Destination $payloadContractsPath
+        $harnessPath = New-GraphKitAuthRuntimeHarnessAssembly -Root (Join-Path $TestDrive 'failure-runtime-harness')
 
-        $result = Invoke-GraphKitAuthRuntimeProbe -ContractsPath (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll') `
-            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario ProviderFailure
+        $factoryResult = Invoke-GraphKitAuthRuntimeProbe -ContractsPath $payloadContractsPath `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario FactoryConstructionFailure `
+            -HarnessPath $harnessPath
+        $sourceResult = Invoke-GraphKitAuthRuntimeProbe -ContractsPath $payloadContractsPath `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario SourceConstructionFailure `
+            -HarnessPath $harnessPath
+        $operationResult = Invoke-GraphKitAuthRuntimeProbe -ContractsPath $payloadContractsPath `
+            -PayloadRoot (Split-Path -Parent $providerPath) -Scenario ProviderFailure `
+            -HarnessPath $harnessPath
 
-        $result.ExitCode | Should -Be 0 -Because $result.Output
-        $result.Data.Type | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
-        $result.Data.Code | Should -BeExactly 'fixture'
-        $result.Data.Category | Should -BeExactly 'Fixture'
-        $result.Data.Message | Should -BeExactly 'provider failure'
-        $result.Data.RetryAfterSeconds | Should -Be 7
-        $result.Data.CorrelationId | Should -BeExactly 'fixture-correlation'
-        $result.Data.InnerIsNull | Should -BeTrue
+        $factoryResult.ExitCode | Should -Be 0 -Because $factoryResult.Output
+        foreach ($failure in @($factoryResult.Data.Failure, $factoryResult.Data.TaskFailure)) {
+            $failure | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+            $failure | Should -Match 'code=provider_construction_failed;category=Provider'
+            $failure | Should -Match 'dataCount=0'
+            $failure | Should -Not -Match 'ProviderOwned|FixtureTokenSource|ProviderFailure|isolated-provider|Microsoft\.Identity'
+        }
+        $factoryResult.Data.LoadContextAliveWhileExceptionAndTaskReferenced | Should -BeFalse
+
+        $sourceResult.ExitCode | Should -Be 0 -Because $sourceResult.Output
+        foreach ($failure in @($sourceResult.Data.Failure, $sourceResult.Data.TaskFailure)) {
+            $failure | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+            $failure | Should -Match 'code=fixture;category=Fixture'
+            $failure | Should -Match 'correlation=fixture-correlation;retryAfter=00:00:07'
+            $failure | Should -Match 'dataCount=0'
+            $failure | Should -Not -Match 'ProviderOwned|FixtureTokenSource|ProviderFailure|isolated-provider|Microsoft\.Identity'
+        }
+        $sourceResult.Data.HostProviderReferencesCleared | Should -BeTrue
+        $sourceResult.Data.LoadContextAliveWhileExceptionHostAndTaskReferenced | Should -BeFalse
+
+        $operationResult.ExitCode | Should -Be 0 -Because $operationResult.Output
+        @($operationResult.Data.Failures).Count | Should -Be 6
+        @($operationResult.Data.TaskFailures).Count | Should -Be 6
+        foreach ($entry in @($operationResult.Data.Failures) + @($operationResult.Data.TaskFailures)) {
+            $entry.Description | Should -Match 'dataCount=0'
+            $entry.Description | Should -Not -Match 'ProviderOwned|FixtureTokenSource|ProviderFailure|isolated-provider|Microsoft\.Identity'
+            if ($entry.Kind -in @('ReadGraph', 'AdoptGraph', 'AcquireGraph')) {
+                $entry.Description | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+                $entry.Description | Should -Match 'code=fixture;category=Fixture'
+                $entry.Description | Should -Match 'correlation=fixture-correlation;retryAfter=00:00:07'
+            }
+            elseif ($entry.Kind -eq 'ReadUnsafeMetadata') {
+                $entry.Description | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+                $entry.Description | Should -Match 'code=provider_failure;category=Provider'
+                $entry.Description | Should -Match 'correlation=;retryAfter=00:00:07'
+            }
+            elseif ($entry.Kind -eq 'ReadUnexpected') {
+                $entry.Description | Should -Match 'type=GraphKit\.Auth\.GraphAuthException'
+                $entry.Description | Should -Match 'code=provider_failure;category=Provider'
+            }
+            else {
+                $entry.Kind | Should -BeExactly 'Cancellation'
+                $entry.Description | Should -Match 'type=System\.OperationCanceledException'
+                $entry.Description | Should -Not -Match 'type=GraphKit\.Auth\.GraphAuthException'
+            }
+        }
+        $operationResult.Data.CancellationTokenIsCancellationRequested | Should -BeTrue
+        $operationResult.Data.HostProviderReferencesCleared | Should -BeTrue
+        $operationResult.Data.LoadContextAliveWhileExceptionsHostAndTasksReferenced | Should -BeFalse
     }
 
     It 'rejects a provider whose assembly version is not the declared package version' {

@@ -1,4 +1,6 @@
+using System.Net.Http.Headers;
 using System.Reflection;
+using System.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Identity.Client;
@@ -73,8 +75,23 @@ public sealed class OwnershipTests
 
         Type factory = Assert.Single(exported);
         Assert.Equal("GraphKit.Auth.GraphTokenSourceFactory", factory.FullName);
-        Assert.NotNull(factory.GetConstructor(Type.EmptyTypes));
-        Assert.Contains(typeof(IGraphTokenSourceFactory), factory.GetInterfaces());
+        ConstructorInfo constructor = Assert.Single(factory.GetConstructors(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.Empty(constructor.GetParameters());
+        MethodInfo create = Assert.Single(factory.GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.Equal(nameof(IGraphTokenSourceFactory.Create), create.Name);
+        ParameterInfo parameter = Assert.Single(create.GetParameters());
+        Assert.Equal(typeof(GraphTokenRequest), parameter.ParameterType);
+        Assert.Equal(typeof(IGraphTokenSource), create.ReturnType);
+        Assert.False(create.IsStatic);
+        Assert.Empty(factory.GetFields(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Empty(factory.GetProperties(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Empty(factory.GetEvents(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Equal(new[] { typeof(IGraphTokenSourceFactory) }, factory.GetInterfaces());
         Assert.Equal(new Version(1, 0, 0, 0), factory.Assembly.GetName().Version);
     }
 
@@ -117,6 +134,19 @@ public sealed class OwnershipTests
                 client.Dispose();
             }
         }
+
+        FieldInfo confidential = typeof(MsalTokenClient).GetField(
+            "_confidentialApplication",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        FieldInfo managed = typeof(MsalTokenClient).GetField(
+            "_managedIdentityApplication",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.All(clients, client =>
+        {
+            Assert.Null(confidential.GetValue(client));
+            Assert.Null(managed.GetValue(client));
+            Assert.Throws<ObjectDisposedException>(() => _ = client.ApplicationIdentity);
+        });
     }
 
     [Fact]
@@ -209,11 +239,142 @@ public sealed class OwnershipTests
             clock.GetUtcNow,
             _ => Interlocked.Increment(ref disposalCount));
 
-        using IGraphTokenSource source = factory.Create(request);
+        IGraphTokenSource source = factory.Create(request);
+        source.Dispose();
 
         Assert.Equal(0, disposalCount);
         Assert.True(certificate.HasPrivateKey);
         Assert.True(secret.Length > 0);
+
+        using IGraphTokenSource reused = factory.Create(request);
+        reused.Dispose();
+        Assert.Equal(0, disposalCount);
+        Assert.True(certificate.HasPrivateKey);
+        Assert.True(secret.Length > 0);
+    }
+
+    [Theory]
+    [InlineData(GraphAuthMode.Certificate)]
+    [InlineData(GraphAuthMode.ClientSecret)]
+    public void OwnedCredentialMaterialCannotBeTransferredTwiceAcrossFactories(GraphAuthMode mode)
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 certificate = CertificateFixture.Create();
+        using SecureString secret = GraphTokenSourceTests.SecureStringFixture.Create("fixture-secret");
+        GraphTokenRequest firstRequest = OwnedRequest(mode, certificate, secret);
+        GraphTokenRequest duplicateRequest = OwnedRequest(mode, certificate, secret);
+        int disposalCount = 0;
+        GraphTokenSourceFactory CreateFactory() => new(
+            (_, _) => GraphTokenSourceTests.FakeTokenClient.Sequence(
+                GraphTokenSourceTests.Result("unused", InitialNow, InitialNow.AddHours(1))),
+            clock.GetUtcNow,
+            material =>
+            {
+                Interlocked.Increment(ref disposalCount);
+                material.Dispose();
+            });
+        var firstFactory = CreateFactory();
+        var secondFactory = CreateFactory();
+        IGraphTokenSource first = firstFactory.Create(firstRequest);
+
+        GraphAuthException duplicate = Assert.Throws<GraphAuthException>(() =>
+            secondFactory.Create(duplicateRequest));
+        first.Dispose();
+        first.Dispose();
+
+        Assert.Equal("credential_material_consumed", duplicate.Code);
+        Assert.Equal("CredentialOwnership", duplicate.Category);
+        Assert.Equal(1, disposalCount);
+    }
+
+    [Theory]
+    [InlineData(GraphAuthMode.Certificate)]
+    [InlineData(GraphAuthMode.ClientSecret)]
+    public async Task ConcurrentOwnedCredentialReuseHasOneWinnerAndOneDisposal(GraphAuthMode mode)
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 certificate = CertificateFixture.Create();
+        using SecureString secret = GraphTokenSourceTests.SecureStringFixture.Create("fixture-secret");
+        GraphTokenRequest firstRequest = OwnedRequest(mode, certificate, secret);
+        GraphTokenRequest duplicateRequest = OwnedRequest(mode, certificate, secret);
+        using var entered = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        int disposalCount = 0;
+        GraphTokenSourceFactory CreateFactory() => new(
+            (_, _) =>
+            {
+                entered.Set();
+                release.Wait();
+                return GraphTokenSourceTests.FakeTokenClient.Sequence(
+                    GraphTokenSourceTests.Result("unused", InitialNow, InitialNow.AddHours(1)));
+            },
+            clock.GetUtcNow,
+            material =>
+            {
+                Interlocked.Increment(ref disposalCount);
+                material.Dispose();
+            });
+        var firstFactory = CreateFactory();
+        var secondFactory = CreateFactory();
+
+        Task<CreateOutcome> first = Task.Run(() => CaptureCreate(firstFactory, firstRequest));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        Task<CreateOutcome> second = Task.Run(() => CaptureCreate(secondFactory, duplicateRequest));
+        bool duplicateRejectedBeforeWinnerCompleted = ReferenceEquals(
+            await Task.WhenAny(second, Task.Delay(TimeSpan.FromMilliseconds(500))),
+            second);
+        release.Set();
+        CreateOutcome[] outcomes = await Task.WhenAll(first, second);
+        foreach (IGraphTokenSource source in outcomes
+            .Where(outcome => outcome.Source is not null)
+            .Select(outcome => outcome.Source!))
+        {
+            source.Dispose();
+        }
+
+        Assert.True(duplicateRejectedBeforeWinnerCompleted);
+        Assert.Single(outcomes, outcome => outcome.Source is not null);
+        GraphAuthException failure = Assert.Single(outcomes
+            .Where(outcome => outcome.Failure is not null)
+            .Select(outcome => outcome.Failure!));
+        Assert.Equal("credential_material_consumed", failure.Code);
+        Assert.Equal(1, disposalCount);
+    }
+
+    [Theory]
+    [InlineData(GraphAuthMode.Certificate)]
+    [InlineData(GraphAuthMode.ClientSecret)]
+    public void FailedOwnedTransferRemainsConsumedAndIsDisposedExactlyOnce(GraphAuthMode mode)
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 certificate = CertificateFixture.Create();
+        using SecureString secret = GraphTokenSourceTests.SecureStringFixture.Create("fixture-secret");
+        GraphTokenRequest firstRequest = OwnedRequest(mode, certificate, secret);
+        GraphTokenRequest duplicateRequest = OwnedRequest(mode, certificate, secret);
+        int disposalCount = 0;
+        Action<IDisposable> dispose = material =>
+        {
+            Interlocked.Increment(ref disposalCount);
+            material.Dispose();
+        };
+        var failingFactory = new GraphTokenSourceFactory(
+            (_, _) => throw new InvalidOperationException("construction failure"),
+            clock.GetUtcNow,
+            dispose);
+        var retryFactory = new GraphTokenSourceFactory(
+            (_, _) => GraphTokenSourceTests.FakeTokenClient.Sequence(
+                GraphTokenSourceTests.Result("unused", InitialNow, InitialNow.AddHours(1))),
+            clock.GetUtcNow,
+            dispose);
+
+        GraphAuthException construction = Assert.Throws<GraphAuthException>(() =>
+            failingFactory.Create(firstRequest));
+        GraphAuthException reused = Assert.Throws<GraphAuthException>(() =>
+            retryFactory.Create(duplicateRequest));
+
+        Assert.Equal("provider_construction_failed", construction.Code);
+        Assert.Equal("credential_material_consumed", reused.Code);
+        Assert.Equal(1, disposalCount);
     }
 
     [Fact]
@@ -328,6 +489,46 @@ public sealed class OwnershipTests
     }
 
     [Fact]
+    public void MsalFailureMapsCorrelationAndDeltaRetryAfter()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        var msal = ServiceFailure(
+            new RetryConditionHeaderValue(TimeSpan.FromSeconds(17)),
+            "safe-correlation-123");
+
+        GraphAuthException failure = AcquireFailure(msal, clock);
+
+        Assert.Equal("safe-correlation-123", failure.CorrelationId);
+        Assert.Equal(TimeSpan.FromSeconds(17), failure.RetryAfter);
+    }
+
+    [Fact]
+    public void MsalFailureMapsDateRetryAfterUsingTheInjectedClock()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        var msal = ServiceFailure(
+            new RetryConditionHeaderValue(InitialNow.AddMinutes(4)),
+            correlationId: null);
+
+        GraphAuthException failure = AcquireFailure(msal, clock);
+
+        Assert.Equal(TimeSpan.FromMinutes(4), failure.RetryAfter);
+    }
+
+    [Fact]
+    public void MsalFailureClampsPastDateRetryAfterToZero()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        var msal = ServiceFailure(
+            new RetryConditionHeaderValue(InitialNow.AddMinutes(-1)),
+            correlationId: null);
+
+        GraphAuthException failure = AcquireFailure(msal, clock);
+
+        Assert.Equal(TimeSpan.Zero, failure.RetryAfter);
+    }
+
+    [Fact]
     public void FrameworkCancellationRemainsOperationCanceledException()
     {
         var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
@@ -393,6 +594,62 @@ public sealed class OwnershipTests
             new ManagedIdentityCredential(userAssignedClientId),
             "generation-1");
     }
+
+    private static GraphTokenRequest OwnedRequest(
+        GraphAuthMode mode,
+        X509Certificate2 certificate,
+        SecureString secret)
+    {
+        return mode == GraphAuthMode.Certificate
+            ? CertificateRequest(certificate, ownsMaterial: true)
+            : GraphTokenSourceTests.SecretRequest(new ClientSecretCredential(secret, true));
+    }
+
+    private static CreateOutcome CaptureCreate(
+        GraphTokenSourceFactory factory,
+        GraphTokenRequest request)
+    {
+        try
+        {
+            return new CreateOutcome(factory.Create(request), null);
+        }
+        catch (GraphAuthException exception)
+        {
+            return new CreateOutcome(null, exception);
+        }
+    }
+
+    private static MsalServiceException ServiceFailure(
+        RetryConditionHeaderValue retryAfter,
+        string? correlationId)
+    {
+        var exception = new MsalServiceException(
+            "temporarily_unavailable",
+            "msal-sensitive-detail")
+        {
+            CorrelationId = correlationId
+        };
+        var response = new HttpResponseMessage();
+        response.Headers.RetryAfter = retryAfter;
+        exception.Headers = response.Headers;
+        return exception;
+    }
+
+    private static GraphAuthException AcquireFailure(
+        MsalServiceException exception,
+        GraphTokenSourceTests.FakeClock clock)
+    {
+        using var source = new GraphTokenSource(
+            GraphTokenSourceTests.SecretRequest(),
+            new GraphTokenSourceTests.FakeTokenClient((_, _) => throw exception),
+            clock.GetUtcNow);
+        return Assert.Throws<GraphAuthException>(() =>
+            source.Acquire(false, CancellationToken.None));
+    }
+
+    private sealed record CreateOutcome(
+        IGraphTokenSource? Source,
+        GraphAuthException? Failure);
 
     private sealed class ProviderOwnedObject
     {

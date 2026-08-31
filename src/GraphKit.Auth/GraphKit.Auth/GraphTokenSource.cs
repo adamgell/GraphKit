@@ -331,7 +331,11 @@ internal sealed class GraphTokenSource : IGraphTokenSource
             catch (Exception exception)
             {
                 flight.Completion.TrySetException(
-                    ProviderFailureSanitizer.Create(exception, "provider_failure", "Provider"));
+                    ProviderFailureSanitizer.Create(
+                        exception,
+                        "provider_failure",
+                        "Provider",
+                        _utcNow));
                 return;
             }
 

@@ -1,7 +1,11 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Xunit;
+
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace GraphKit.Auth.Tests;
 
@@ -472,6 +476,28 @@ public sealed class GraphTokenSourceTests
     }
 
     [Fact]
+    public void FixedBearerDisposalClearsTokenCredentialAndCacheReferences()
+    {
+        var clock = new FakeClock(InitialNow);
+        var source = new GraphTokenSource(
+            BearerRequest("fixed-bearer-sensitive-value"),
+            client: null,
+            clock.GetUtcNow);
+        source.Acquire(false, CancellationToken.None);
+
+        source.Dispose();
+
+        Assert.False(source.HasCachedResult);
+        Assert.False(source.HasCredentialReference);
+        Assert.Null(typeof(GraphTokenSource).GetField(
+            "_fixedBearer",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(source));
+        Assert.Null(typeof(GraphTokenSource).GetField(
+            "_credentialReference",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(source));
+    }
+
+    [Fact]
     public void ProviderWritesNoTokenOrSecretToConsoleOrTrace()
     {
         const string secretValue = "never-write-this-secret";
@@ -483,22 +509,27 @@ public sealed class GraphTokenSourceTests
             clock.GetUtcNow);
         using var consoleOutput = new StringWriter();
         using var consoleError = new StringWriter();
+        using var traceOutput = new StringWriter();
+        using var traceListener = new TextWriterTraceListener(traceOutput);
         TextWriter originalOutput = Console.Out;
         TextWriter originalError = Console.Error;
         try
         {
             Console.SetOut(consoleOutput);
             Console.SetError(consoleError);
+            Trace.Listeners.Add(traceListener);
             source.Acquire(false, CancellationToken.None);
             _ = new ClientSecretCredential(SecureStringFixture.Create(secretValue), false);
+            Trace.Flush();
         }
         finally
         {
+            Trace.Listeners.Remove(traceListener);
             Console.SetOut(originalOutput);
             Console.SetError(originalError);
         }
 
-        string emitted = consoleOutput + consoleError.ToString();
+        string emitted = consoleOutput.ToString() + consoleError + traceOutput;
         Assert.DoesNotContain(secretValue, emitted, StringComparison.Ordinal);
         Assert.DoesNotContain(tokenValue, emitted, StringComparison.Ordinal);
         Assert.Equal(string.Empty, emitted);

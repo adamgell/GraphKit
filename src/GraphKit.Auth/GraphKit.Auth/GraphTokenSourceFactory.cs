@@ -1,7 +1,11 @@
+using System.Runtime.CompilerServices;
+
 namespace GraphKit.Auth;
 
 public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
 {
+    private static readonly ConditionalWeakTable<object, ConsumedMaterialMarker>
+        ConsumedOwnedMaterials = new();
     private readonly Func<GraphTokenRequest, Func<DateTimeOffset>, ITokenClient> _clientFactory;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly Action<IDisposable> _disposeMaterial;
@@ -28,7 +32,29 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        IDisposable? transferredMaterial = GetTransferredMaterial(request.Credential);
+        IDisposable? transferredMaterial = null;
+        IDisposable? requestedTransfer = GetTransferredMaterial(request.Credential);
+        if (requestedTransfer is not null)
+        {
+            try
+            {
+                ConsumedOwnedMaterials.Add(
+                    requestedTransfer,
+                    ConsumedMaterialMarker.Instance);
+            }
+            catch (ArgumentException)
+            {
+                throw new GraphAuthException(
+                    "credential_material_consumed",
+                    "CredentialOwnership",
+                    "The owned credential material has already been transferred to an authentication source.",
+                    retryAfter: null,
+                    correlationId: null);
+            }
+
+            transferredMaterial = requestedTransfer;
+        }
+
         ITokenClient? client = null;
         try
         {
@@ -61,7 +87,11 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
         catch (Exception exception)
         {
             CleanupFailedTransfer(client, transferredMaterial);
-            throw ProviderFailureSanitizer.Create(exception, "provider_construction_failed", "Provider");
+            throw ProviderFailureSanitizer.Create(
+                exception,
+                "provider_construction_failed",
+                "Provider",
+                _utcNow);
         }
     }
 
@@ -110,5 +140,10 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
             ClientSecretCredential { OwnsMaterial: true } secret => secret.Secret,
             _ => null
         };
+    }
+
+    private sealed class ConsumedMaterialMarker
+    {
+        internal static ConsumedMaterialMarker Instance { get; } = new();
     }
 }

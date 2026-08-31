@@ -39,13 +39,35 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
         CancellationToken cancellation)
     {
         using ProxyOperation operation = BeginOperation(cancellation);
-        return operation.Inner.Acquire(forceRefresh, operation.Cancellation);
+        try
+        {
+            return operation.Inner.Acquire(forceRefresh, operation.Cancellation);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
     }
 
     public void AdoptSharedResult(GraphTokenResult result, bool forceRefresh)
     {
         using ProxyOperation operation = BeginOperation(CancellationToken.None);
-        operation.Inner.AdoptSharedResult(result, forceRefresh);
+        try
+        {
+            operation.Inner.AdoptSharedResult(result, forceRefresh);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
     }
 
     public void Dispose()
@@ -82,7 +104,18 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
     private TResult Read<TResult>(Func<IGraphTokenSource, TResult> reader)
     {
         using ProxyOperation operation = BeginOperation(CancellationToken.None);
-        return reader(operation.Inner);
+        try
+        {
+            return reader(operation.Inner);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
     }
 
     private ProxyOperation BeginOperation(CancellationToken callerCancellation)
@@ -225,5 +258,79 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
                 hostLease?.Dispose();
             }
         }
+    }
+}
+
+internal static class ProviderBoundaryFailure
+{
+    private const int MaximumSafeFieldLength = 128;
+    private const string SafeMessage =
+        "The isolated GraphKit.Auth provider could not complete the requested operation.";
+    private const string CancellationMessage =
+        "The GraphKit.Auth provider operation was canceled.";
+
+    internal static Exception Recreate(
+        Exception providerFailure,
+        CancellationToken effectiveCancellation,
+        string unexpectedCode,
+        string unexpectedCategory)
+    {
+        ArgumentNullException.ThrowIfNull(providerFailure);
+        if (providerFailure is OperationCanceledException)
+        {
+            return new OperationCanceledException(
+                CancellationMessage,
+                innerException: null,
+                effectiveCancellation);
+        }
+
+        if (providerFailure is GraphAuthException graphFailure)
+        {
+            return new GraphAuthException(
+                SafeToken(graphFailure.Code, unexpectedCode),
+                SafeToken(graphFailure.Category, unexpectedCategory),
+                SafeMessage,
+                graphFailure.RetryAfter is { } retryAfter && retryAfter >= TimeSpan.Zero
+                    ? retryAfter
+                    : null,
+                SafeCorrelation(graphFailure.CorrelationId) ?? string.Empty);
+        }
+
+        return new GraphAuthException(
+            unexpectedCode,
+            unexpectedCategory,
+            SafeMessage,
+            retryAfter: null,
+            correlationId: null);
+    }
+
+    private static string SafeToken(string value, string fallback)
+    {
+        return IsSafeValue(value, allowColon: false) ? value : fallback;
+    }
+
+    private static string? SafeCorrelation(string? value)
+    {
+        return IsSafeValue(value, allowColon: true) ? value : null;
+    }
+
+    private static bool IsSafeValue(string? value, bool allowColon)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumSafeFieldLength)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            if (!char.IsAsciiLetterOrDigit(character) &&
+                character is not '_' and not '-' and not '.' &&
+                (!allowColon || character != ':'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

@@ -70,7 +70,20 @@ public sealed class GraphAuthHost : IDisposable
         {
             Assembly providerAssembly = loadContext.LoadProviderAssembly();
             Type factoryType = ValidateProvider(providerAssembly, loadContext, contractsAssembly);
-            object? factoryObject = Activator.CreateInstance(factoryType);
+            object? factoryObject;
+            try
+            {
+                factoryObject = Activator.CreateInstance(factoryType);
+            }
+            catch (Exception exception)
+            {
+                throw ProviderBoundaryFailure.Recreate(
+                    exception,
+                    CancellationToken.None,
+                    "provider_construction_failed",
+                    "Provider");
+            }
+
             if (factoryObject is not IGraphTokenSourceFactory factory)
             {
                 throw new InvalidOperationException(
@@ -100,8 +113,25 @@ public sealed class GraphAuthHost : IDisposable
             ThrowIfStopping();
             IGraphTokenSourceFactory factory = _factory ??
                 throw new ObjectDisposedException(nameof(GraphAuthHost));
-            IGraphTokenSource source = factory.Create(request) ??
-                throw new InvalidOperationException("The GraphKit.Auth provider factory returned a null token source.");
+            IGraphTokenSource? source;
+            try
+            {
+                source = factory.Create(request);
+            }
+            catch (Exception exception)
+            {
+                throw ProviderBoundaryFailure.Recreate(
+                    exception,
+                    CancellationToken.None,
+                    "provider_construction_failed",
+                    "Provider");
+            }
+
+            if (source is null)
+            {
+                throw new InvalidOperationException(
+                    "The GraphKit.Auth provider factory returned a null token source.");
+            }
 
             try
             {

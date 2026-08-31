@@ -96,7 +96,8 @@ internal sealed class MsalTokenClient : ITokenClient
             throw ProviderFailureSanitizer.Create(
                 exception,
                 "provider_construction_failed",
-                "Provider");
+                "Provider",
+                utcNow);
         }
     }
 
@@ -153,7 +154,11 @@ internal sealed class MsalTokenClient : ITokenClient
         }
         catch (Exception exception)
         {
-            throw ProviderFailureSanitizer.Create(exception, "provider_failure", "Provider");
+            throw ProviderFailureSanitizer.Create(
+                exception,
+                "provider_failure",
+                "Provider",
+                _utcNow);
         }
     }
 
@@ -298,7 +303,8 @@ internal static class ProviderFailureSanitizer
     internal static GraphAuthException Create(
         Exception exception,
         string defaultCode,
-        string defaultCategory)
+        string defaultCategory,
+        Func<DateTimeOffset>? utcNow = null)
     {
         ArgumentNullException.ThrowIfNull(exception);
         if (exception is GraphAuthException graphAuthException)
@@ -328,7 +334,9 @@ internal static class ProviderFailureSanitizer
 
             if (msalException is MsalServiceException serviceException)
             {
-                retryAfter = GetRetryAfter(serviceException);
+                retryAfter = GetRetryAfter(
+                    serviceException,
+                    utcNow ?? (static () => DateTimeOffset.UtcNow));
             }
         }
 
@@ -340,7 +348,9 @@ internal static class ProviderFailureSanitizer
             correlationId);
     }
 
-    private static TimeSpan? GetRetryAfter(MsalServiceException exception)
+    private static TimeSpan? GetRetryAfter(
+        MsalServiceException exception,
+        Func<DateTimeOffset> utcNow)
     {
         if (exception.Headers?.RetryAfter is null)
         {
@@ -350,7 +360,7 @@ internal static class ProviderFailureSanitizer
         TimeSpan? retryAfter = exception.Headers.RetryAfter.Delta;
         if (retryAfter is null && exception.Headers.RetryAfter.Date is DateTimeOffset date)
         {
-            retryAfter = date - DateTimeOffset.UtcNow;
+            retryAfter = date - utcNow();
         }
 
         if (retryAfter < TimeSpan.Zero)
