@@ -83,6 +83,7 @@ BeforeAll {
                 'missing',
                 'invalid-path',
                 'unmerged-stage',
+                'helper-case-alias',
                 'case-collision',
                 'normalization-collision',
                 'reverse-untracked'
@@ -95,6 +96,7 @@ BeforeAll {
         $payload = @{
             Mode = $Mode
             RealGit = @((Get-Command git -CommandType Application))[0].Source
+            InvocationLog = Join-Path $shimDirectory 'invocations.log'
             Configuration = $Configuration
         } | ConvertTo-Json -Compress -Depth 5
         $encodedPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
@@ -103,6 +105,11 @@ BeforeAll {
 $ErrorActionPreference = 'Stop'
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
 $gitArguments = @($args)
+[IO.File]::AppendAllText(
+    [string] $payload.InvocationLog,
+    (($gitArguments | ConvertTo-Json -Compress) + [Environment]::NewLine),
+    [Text.UTF8Encoding]::new($false)
+)
 
 function Invoke-RealGit([string[]] $Arguments) {
     $start = [Diagnostics.ProcessStartInfo]::new()
@@ -127,6 +134,7 @@ $isStage = $gitArguments.Count -ge 2 -and $gitArguments[0] -eq 'ls-files' -and $
 $isOthers = $gitArguments.Count -ge 1 -and $gitArguments[0] -eq 'ls-files' -and $gitArguments -contains '--others'
 $isTree = $gitArguments.Count -ge 1 -and $gitArguments[0] -eq 'ls-tree'
 $isObjectFormat = $gitArguments.Count -ge 2 -and $gitArguments[0] -eq 'rev-parse' -and $gitArguments[1] -eq '--show-object-format'
+$isCheckIgnore = $gitArguments.Count -ge 1 -and $gitArguments[0] -eq 'check-ignore'
 switch ($payload.Mode) {
     'duplicate-index' {
         $result = Invoke-RealGit $gitArguments
@@ -208,6 +216,24 @@ switch ($payload.Mode) {
         }
         Write-Result $result
     }
+    'helper-case-alias' {
+        if ($isCheckIgnore) {
+            $inputBytes = [IO.MemoryStream]::new()
+            [Console]::OpenStandardInput().CopyTo($inputBytes)
+            Write-Result ([pscustomobject] @{ ExitCode=0; Output=$inputBytes.ToArray(); Error='' })
+        }
+        $result = Invoke-RealGit $gitArguments
+        if (($isTree -or $isStage) -and $result.ExitCode -eq 0) {
+            $text = [Text.Encoding]::Latin1.GetString($result.Output)
+            $result.Output = [Text.Encoding]::Latin1.GetBytes(
+                $text.Replace(
+                    [string] $payload.Configuration.CanonicalPath,
+                    [string] $payload.Configuration.AliasPath
+                )
+            )
+        }
+        Write-Result $result
+    }
     'case-collision' {
         $result = Invoke-RealGit $gitArguments
         if ($isStage -and $result.ExitCode -eq 0) {
@@ -265,13 +291,114 @@ switch ($payload.Mode) {
 '@).Replace('__PAYLOAD__', $encodedPayload)
 
         if ($IsWindows) {
-            Set-Content -LiteralPath (Join-Path $shimDirectory 'git.cmd') -NoNewline -Encoding ascii -Value '@pwsh.exe -NoLogo -NoProfile -File "%~dp0git-shim.ps1" %*'
+            $launcherTemplate = Join-Path $TestDrive 'r8-git-shim-launcher.exe'
+            if (-not (Test-Path -LiteralPath $launcherTemplate -PathType Leaf)) {
+                $compiler = @(
+                    Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+                    Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe'
+                ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+                if (-not $compiler) {
+                    throw 'The Windows test host has no executable-compatible C# compiler for the Git shim launcher.'
+                }
+                $launcherSource = Join-Path $TestDrive 'r8-git-shim-launcher.cs'
+                Set-Content -LiteralPath $launcherSource -NoNewline -Encoding utf8NoBOM -Value @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+
+internal static class GitShimLauncher
+{
+    private static string Quote(string value)
+    {
+        var builder = new StringBuilder();
+        builder.Append('"');
+        int backslashes = 0;
+        foreach (char character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+            if (character == '"')
+            {
+                builder.Append('\\', backslashes * 2 + 1);
+                builder.Append('"');
+                backslashes = 0;
+                continue;
+            }
+            builder.Append('\\', backslashes);
+            backslashes = 0;
+            builder.Append(character);
+        }
+        builder.Append('\\', backslashes * 2);
+        builder.Append('"');
+        return builder.ToString();
+    }
+
+    public static int Main(string[] arguments)
+    {
+        try
+        {
+            string shim = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "git-shim.ps1");
+            var forwarded = new List<string> { "-NoLogo", "-NoProfile", "-File", shim };
+            forwarded.AddRange(arguments);
+            var quoted = new List<string>();
+            foreach (string argument in forwarded) quoted.Add(Quote(argument));
+            var start = new ProcessStartInfo
+            {
+                FileName = "pwsh.exe",
+                Arguments = string.Join(" ", quoted.ToArray()),
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (Process process = Process.Start(start))
+            {
+                Task input = Task.Run(() =>
+                {
+                    Console.OpenStandardInput().CopyTo(process.StandardInput.BaseStream);
+                    process.StandardInput.Close();
+                });
+                Task output = Task.Run(() => process.StandardOutput.BaseStream.CopyTo(Console.OpenStandardOutput()));
+                Task error = Task.Run(() => process.StandardError.BaseStream.CopyTo(Console.OpenStandardError()));
+                process.WaitForExit();
+                Task.WaitAll(input, output, error);
+                return process.ExitCode;
+            }
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 127;
+        }
+    }
+}
+'@
+                $compilerOutput = & $compiler /nologo /target:exe "/out:$launcherTemplate" $launcherSource 2>&1
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcherTemplate -PathType Leaf)) {
+                    throw "The Windows Git shim launcher did not compile: $($compilerOutput | Out-String)"
+                }
+            }
+            Copy-Item -LiteralPath $launcherTemplate -Destination (Join-Path $shimDirectory 'git.exe')
         } else {
             $launcher = Join-Path $shimDirectory 'git'
             Set-Content -LiteralPath $launcher -NoNewline -Encoding utf8NoBOM -Value "#!/bin/sh`nexec pwsh -NoLogo -NoProfile -File '$shimScript' `"`$@`"`n"
             & /bin/chmod +x $launcher
         }
         return $shimDirectory
+    }
+
+    function Assert-R8PortableGitShimInvoked {
+        param([Parameter(Mandatory)] [string] $ShimDirectory)
+
+        $invocationLog = Join-Path $ShimDirectory 'invocations.log'
+        $invocationLog | Should -Exist -Because 'every injected case must prove the executable shim handled the Git call'
+        (Get-Content -LiteralPath $invocationLog -Raw) | Should -Not -BeNullOrEmpty
     }
 
     function Initialize-R8SourceCaptureHelper {
@@ -317,6 +444,44 @@ string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE
         [pscustomobject] @{ Root = $root; VersionScript = $versionScript }
     }
 
+    function New-R8InternalHelperFixture {
+        param([switch] $CaptureSentinel)
+
+        $root = New-R8TrainVersionFixture
+        $scripts = Join-Path $root 'scripts'
+        $private = Join-Path $scripts 'private'
+        $null = New-Item -ItemType Directory -Path $private -Force
+        $versionScript = Join-Path $scripts 'Get-GraphKitTrainVersion.ps1'
+        $helper = Join-Path $private 'GraphKit.SourceCapture.cs'
+        Copy-Item -LiteralPath $script:versionScript -Destination $versionScript
+        Copy-Item -LiteralPath $script:sourceCaptureHelper -Destination $helper
+        if ($CaptureSentinel) {
+            $source = (Get-Content -LiteralPath $helper -Raw).Replace("`r`n", "`n")
+            $needle = @'
+        public static CapturedSourceFile Capture(string repositoryRoot, string relativePath)
+        {
+'@
+            $replacement = @'
+        public static CapturedSourceFile Capture(string repositoryRoot, string relativePath)
+        {
+            string? captureSentinel = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE_SENTINEL");
+            if (!string.IsNullOrEmpty(captureSentinel))
+            {
+                File.AppendAllText(captureSentinel, relativePath + Environment.NewLine);
+            }
+'@
+            if (-not $source.Contains($needle)) { throw 'The proof-bound sentinel fixture could not locate the generated Capture entry point.' }
+            Set-Content -LiteralPath $helper -Value $source.Replace($needle, $replacement) -NoNewline -Encoding utf8NoBOM
+        }
+        & git -C $root add scripts
+        & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'proof-bound helper'
+        [pscustomobject] @{ Root = $root; VersionScript = $versionScript; Helper = $helper }
+    }
+
+    function New-R8ProofBoundCaptureSentinelFixture {
+        New-R8InternalHelperFixture -CaptureSentinel
+    }
+
     $script:ambientCaptureSource = @'
 using System;
 using System.IO;
@@ -348,6 +513,35 @@ namespace GraphKit.R8
 }
 
 Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
+    It 'provides a directly executable Git shim and records interception instead of falling through to real Git' {
+        $root = New-R8TrainVersionFixture
+        $shimDirectory = New-R8PortableGitShim -Mode reverse-untracked
+        $launcher = Join-Path $shimDirectory $(if ($IsWindows) { 'git.exe' } else { 'git' })
+        $invocationLog = Join-Path $shimDirectory 'invocations.log'
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $launcher
+        $start.WorkingDirectory = $root
+        $start.UseShellExecute = $false
+        $start.RedirectStandardInput = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $null = $start.ArgumentList.Add('rev-parse')
+        $null = $start.ArgumentList.Add('--show-object-format')
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $start
+
+        $null = $process.Start()
+        $process.StandardInput.Close()
+        $output = $process.StandardOutput.ReadToEnd()
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+
+        $process.ExitCode | Should -Be 0 -Because $errorText
+        $output.Trim() | Should -Be 'sha1'
+        $invocationLog | Should -Exist -Because 'the injected process must prove the shim, not a PATH-resolved real Git, handled the call'
+        (Get-Content -LiteralPath $invocationLog -Raw) | Should -Match 'rev-parse.*--show-object-format'
+    }
+
     It 'ignores a malicious ambient legacy helper and remains deterministic across repeated calls in one process' {
         $root = New-R8TrainVersionFixture
         $revision = (& git -C $root rev-parse HEAD).Trim().Substring(0, 12)
@@ -382,6 +576,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'case|collid|ambiguous'
     }
@@ -396,8 +591,28 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'normalization|collid|ambiguous'
+    }
+
+    It 'rejects a case-aliased inventory record for the proof-bound helper inside the repository' {
+        $fixture = New-R8InternalHelperFixture
+        $shimDirectory = New-R8PortableGitShim -Mode helper-case-alias -Configuration @{
+            CanonicalPath = 'scripts/private/GraphKit.SourceCapture.cs'
+            AliasPath = 'Scripts/private/GraphKit.SourceCapture.cs'
+        }
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $fixture.Root -VersionScript $fixture.VersionScript
+        }
+        finally { $env:PATH = $savedPath }
+
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires'
+        $result.Output | Should -Match 'exactly one exact raw inventory record'
     }
 
     It 'fails on unmerged index stage <Stage> before invoking worktree capture' -ForEach @(
@@ -405,31 +620,27 @@ $source
         @{ Stage = 2 }
         @{ Stage = 3 }
     ) {
-        $root = New-R8TrainVersionFixture
+        $fixture = New-R8ProofBoundCaptureSentinelFixture
         $sentinel = Join-Path $TestDrive ("capture-stage-$Stage-" + [guid]::NewGuid().ToString('N'))
         $shimDirectory = New-R8PortableGitShim -Mode unmerged-stage -Configuration @{ Stage = $Stage }
         $savedPath = $env:PATH
         $savedSentinel = $env:GRAPHKIT_TEST_CAPTURE_SENTINEL
-        $versionLiteral = $script:versionScript.Replace("'", "''")
-        $rootLiteral = $root.Replace("'", "''")
-        $source = $script:ambientCaptureSource
         try {
-            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
             $env:GRAPHKIT_TEST_CAPTURE_SENTINEL = $sentinel
-            $bootstrap = @"
-`$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
-$source
-'@
-& '$versionLiteral' -RepositoryRoot '$rootLiteral'
-"@
-            $result = Invoke-R8Bootstrap -Content $bootstrap
+            $control = Get-R8TrainVersion -RepositoryRoot $fixture.Root -VersionScript $fixture.VersionScript
+            $control.ExitCode | Should -Be 0 -Because $control.Output
+            $sentinel | Should -Exist -Because 'the copied proof-bound generated helper must be demonstrably active in the control run'
+            Remove-Item -LiteralPath $sentinel -Force
+
+            $env:PATH = "$shimDirectory$([IO.Path]::PathSeparator)$savedPath"
+            $result = Get-R8TrainVersion -RepositoryRoot $fixture.Root -VersionScript $fixture.VersionScript
         }
         finally {
             $env:PATH = $savedPath
             $env:GRAPHKIT_TEST_CAPTURE_SENTINEL = $savedSentinel
         }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'unmerged'
         Test-Path -LiteralPath $sentinel | Should -BeFalse
@@ -470,6 +681,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'HEAD|revision|commit.*changed'
     }
@@ -484,6 +696,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'invalid object identity|unsupported entry header'
     }
@@ -498,6 +711,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'SHA-256.*not supported|unsupported.*SHA-256'
     }
@@ -571,6 +785,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $forward.ExitCode | Should -Be 0 -Because $forward.Output
         $reverse.ExitCode | Should -Be 0 -Because $reverse.Output
         $reverse.Output | Should -Be $forward.Output
@@ -600,6 +815,7 @@ $source
             $env:PATH = $savedPath
         }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'disappeared|regular file'
     }
@@ -616,6 +832,7 @@ $source
             $env:PATH = $savedPath
         }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'UTF-8|path'
     }
@@ -711,6 +928,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'duplicate'
     }
@@ -751,6 +969,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'inventory|changed|race'
     }
@@ -771,6 +990,7 @@ $source
         }
         finally { $env:PATH = $savedPath }
 
+        Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'changed|race|metadata|content'
     }
@@ -784,8 +1004,8 @@ $source
         }
         finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state.sourceStateSha256 | Should -Be '5effd62748cd587364a3853875d70f9994031ed2aeb08c4c95f9009c0ebb4fbe'
-        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d5effd62748cd$'
+        $state.sourceStateSha256 | Should -Be '8acdbeded33e8b41799dadced367401212cdcd6cb6ed3424ea9c82a003326bd0'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d8acdbeded33e$'
     }
 }
 
@@ -834,6 +1054,7 @@ Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
             }
             finally { $env:PATH = $savedPath }
 
+            Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
             $result.ExitCode | Should -Not -Be 0
             $result.Output | Should -Match 'case|collid|ambiguous'
         }
