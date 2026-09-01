@@ -979,7 +979,173 @@ service-behavior claim.
 
 - Create: `scripts/Invoke-GraphKitAuthParity.ps1`
 - Create: `tests/QA/GraphKitAuthLiveParity.tests.ps1`
-- Modify only the R8 evidence ledger/spec after observed results.
+- Create: `source/Private/Operations/Assert-GraphOperationAuthMode.ps1`
+- Modify: `source/Data/Operations/*.psd1`
+- Modify: `source/Private/Operations/Import-GraphOperationDescriptor.ps1`
+- Modify: `source/Public/Get-GraphObject.ps1`
+- Modify: `source/Public/Invoke-GraphOperation.ps1`
+- Modify: `source/Public/Invoke-GraphBatch.ps1`
+- Modify: `source/Private/Confirm-GraphTenantBinding.ps1`
+- Modify: `source/Private/Invoke-GraphPaging.ps1`
+- Modify: `source/Private/Invoke-GraphRetry.ps1`
+- Modify: `source/Private/Transport/Send-GraphHttpRequest.ps1`
+- Modify: `source/Private/Wait-GraphThrottleGate.ps1`
+- Modify: `tests/Adapter/TokenIdentityPipeline.Tests.ps1`
+- Modify: `tests/Unit/Auth/Confirm-GraphTenantBinding.Tests.ps1`
+- Modify: `tests/Unit/Operations/DescriptorInvariants.Tests.ps1`
+- Modify: `tests/Unit/Operations/Get-GraphObject.Tests.ps1`
+- Modify: `tests/Unit/Operations/Import-GraphOperationDescriptor.Tests.ps1`
+- Modify: `tests/Unit/Pipeline/Invoke-GraphBatch.Tests.ps1`
+- Modify: `tests/Unit/Pipeline/Invoke-GraphOperation.Tests.ps1`
+- Modify: `tests/Unit/Pipeline/Invoke-GraphPaging.Tests.ps1`
+- Modify: `tests/Unit/Throttle/ThrottleGate.Tests.ps1`
+- Modify: `tests/Unit/Transport/Invoke-GraphRetry.Tests.ps1`
+- Modify: `docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md`
+- Modify after separately authorized observed results:
+  `docs/superpowers/specs/2026-08-30-r8-graphkit-auth-design.md`
+
+Current Task 8 authority is deterministic only. Do not run live mode, access or change a
+credential/profile/vault, contact Graph or a tenant, change a permission, create/delete Azure
+resources, use external network access, or push, open/merge a PR, merge, or publish without
+separate explicit authority. The ignored controller record
+`.superpowers/sdd/2026-08-30-r8-graphkit-auth/progress.md` remains outside every commit.
+
+- [ ] **Step 0: Close deterministic prerequisites exposed by the parity red phase**
+
+The protected BearerToken read is not a valid parity proof unless the descriptor catalog and every
+descriptor-backed public entry point actually allow that mode. Normalize `SupportedAuthModes` to
+the four implemented public modes, reject empty, unknown, non-string, or case-insensitive duplicate
+values at descriptor import, and fail closed before URI construction or transport in
+`Get-GraphObject`, descriptor-mode `Invoke-GraphOperation`, and descriptor-backed
+`Invoke-GraphBatch`. Preserve the explicit `Provider`-context exemption and raw-mode compatibility.
+
+A successful safe read is not protected-live evidence unless its tenant proof is the proof returned
+by the transport for that same token. Require tenant proof for descriptors whose
+`IdentityRequirement` is `Verified`; reject blank or ambiguous token identity before caching;
+preserve cloud, client, fingerprint, generation, actual tenant, and proof provenance through every
+page; and enforce the caller's one inherited deadline across admission, acquisition, nested proof,
+retry delay, paging, and the final target send. Cancellation wins when caller cancellation and
+deadline expiry coincide. No row may be retained and no target request may be sent after proof,
+identity, cancellation, or deadline certainty is lost.
+
+Write focused red tests for the catalog and every public execution path, Provider/raw exemptions,
+cache-key collisions, proof scope, verified paged provenance, cached-proof deadline expiry,
+acquisition/proof boundary expiry, admission and retry-delay clamping, and cancellation forwarding.
+Require independent static review of both prerequisite tranches before the first coherent pack.
+Land the reviewed prerequisite repair as its own commit before the runner commit so the artifact
+lineage records why previously inert descriptor metadata and unpropagated read proof changed.
+
+Stage that prerequisite commit only from this reviewed literal set:
+
+```text
+docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md
+source/Data/Operations/AndroidEnrollmentProfile.List.psd1
+source/Data/Operations/AndroidManagedStoreAccountEnterpriseSettings.Get.psd1
+source/Data/Operations/AppConfigurationPolicy.List.psd1
+source/Data/Operations/AppInstallSummaryReport.Get.psd1
+source/Data/Operations/AppProtectionPolicy.List.psd1
+source/Data/Operations/AppleEnrollmentProgramToken.List.psd1
+source/Data/Operations/ApplePushNotificationCertificate.Get.psd1
+source/Data/Operations/AppleVppToken.List.psd1
+source/Data/Operations/AuthenticationMethodsPolicy.Get.psd1
+source/Data/Operations/AuthorizationPolicy.Get.psd1
+source/Data/Operations/AutopilotDevice.List.psd1
+source/Data/Operations/CertificateConnector.List.psd1
+source/Data/Operations/ConditionalAccessPolicy.List.psd1
+source/Data/Operations/ConfigurationConflict.List.psd1
+source/Data/Operations/ConfigurationPolicy.AssignBeta.psd1
+source/Data/Operations/ConfigurationPolicy.ListBeta.psd1
+source/Data/Operations/ConfigurationPolicyAssignment.ListBeta.psd1
+source/Data/Operations/ConfigurationPolicySetting.ListBeta.psd1
+source/Data/Operations/ConfigurationSettingDefinition.ListBeta.psd1
+source/Data/Operations/CrossTenantAccessPolicy.GetDefault.psd1
+source/Data/Operations/DeviceCategory.List.psd1
+source/Data/Operations/DeviceCategory.ListBeta.psd1
+source/Data/Operations/DeviceCompliancePolicy.Assign.psd1
+source/Data/Operations/DeviceCompliancePolicy.List.psd1
+source/Data/Operations/DeviceCompliancePolicy.ListBeta.psd1
+source/Data/Operations/DeviceCompliancePolicyAssignment.List.psd1
+source/Data/Operations/DeviceConfiguration.Assign.psd1
+source/Data/Operations/DeviceConfiguration.List.psd1
+source/Data/Operations/DeviceConfiguration.ListBeta.psd1
+source/Data/Operations/DeviceConfigurationAssignment.List.psd1
+source/Data/Operations/DeviceEnrollmentConfiguration.List.psd1
+source/Data/Operations/DeviceEnrollmentConfiguration.ListBeta.psd1
+source/Data/Operations/DeviceManagementConfigurationPolicyTemplate.ListBeta.psd1
+source/Data/Operations/DeviceManagementIntent.ListBeta.psd1
+source/Data/Operations/DeviceManagementRoleAssignment.List.psd1
+source/Data/Operations/DeviceManagementRoleDefinition.List.psd1
+source/Data/Operations/DeviceManagementScript.List.psd1
+source/Data/Operations/DeviceManagementTemplate.ListBeta.psd1
+source/Data/Operations/DeviceManagementUnifiedRoleAssignment.ListBeta.psd1
+source/Data/Operations/DeviceReport.Export.psd1
+source/Data/Operations/DirectoryRoleAssignment.List.psd1
+source/Data/Operations/DirectoryRoleDefinition.List.psd1
+source/Data/Operations/DirectoryRoleDefinition.ListBeta.psd1
+source/Data/Operations/DirectorySetting.List.psd1
+source/Data/Operations/DirectorySettingTemplate.List.psd1
+source/Data/Operations/Domain.List.psd1
+source/Data/Operations/DomainConnector.List.psd1
+source/Data/Operations/EntraDevice.List.psd1
+source/Data/Operations/EntraDevice.ListBeta.psd1
+source/Data/Operations/Group.Get.psd1
+source/Data/Operations/Group.List.psd1
+source/Data/Operations/Group.ListBeta.psd1
+source/Data/Operations/GroupMember.List.psd1
+source/Data/Operations/GroupPolicyConfiguration.ListBeta.psd1
+source/Data/Operations/GroupPolicyDefinitionValue.ListBeta.psd1
+source/Data/Operations/GroupPolicyPresentationValue.ListBeta.psd1
+source/Data/Operations/IntuneBrandingProfile.List.psd1
+source/Data/Operations/ManagedDevice.Delete.psd1
+source/Data/Operations/ManagedDevice.Get.psd1
+source/Data/Operations/ManagedDevice.List.psd1
+source/Data/Operations/ManagedDevice.ListBeta.psd1
+source/Data/Operations/ManagedDevice.Retire.psd1
+source/Data/Operations/ManagedDevice.SyncDevice.psd1
+source/Data/Operations/ManagedDevice.Wipe.psd1
+source/Data/Operations/ManagedDeviceCleanupRule.ListBeta.psd1
+source/Data/Operations/ManagedDeviceSetting.Get.psd1
+source/Data/Operations/MobileApp.Assign.psd1
+source/Data/Operations/MobileApp.List.psd1
+source/Data/Operations/MobileApp.ListBeta.psd1
+source/Data/Operations/MobileAppAssignment.List.psd1
+source/Data/Operations/MobileAppCategory.List.psd1
+source/Data/Operations/MobileThreatDefenseConnector.List.psd1
+source/Data/Operations/NamedLocation.List.psd1
+source/Data/Operations/OperationApprovalPolicy.List.psd1
+source/Data/Operations/Organization.GetMdmAuthority.psd1
+source/Data/Operations/Organization.List.psd1
+source/Data/Operations/Organization.ListBeta.psd1
+source/Data/Operations/RoleAssignmentScheduleInstance.List.psd1
+source/Data/Operations/RoleEligibilityScheduleInstance.List.psd1
+source/Data/Operations/SecurityDefaultsPolicy.Get.psd1
+source/Data/Operations/ServicePrincipal.List.psd1
+source/Data/Operations/SubscribedSku.List.psd1
+source/Data/Operations/User.List.psd1
+source/Data/Operations/WindowsAutopilotDeploymentProfile.List.psd1
+source/Data/Operations/WindowsFeatureUpdateProfile.List.psd1
+source/Data/Operations/WindowsUpdateCatalogItem.List.psd1
+source/Private/Confirm-GraphTenantBinding.ps1
+source/Private/Invoke-GraphPaging.ps1
+source/Private/Invoke-GraphRetry.ps1
+source/Private/Operations/Assert-GraphOperationAuthMode.ps1
+source/Private/Operations/Import-GraphOperationDescriptor.ps1
+source/Private/Transport/Send-GraphHttpRequest.ps1
+source/Private/Wait-GraphThrottleGate.ps1
+source/Public/Get-GraphObject.ps1
+source/Public/Invoke-GraphBatch.ps1
+source/Public/Invoke-GraphOperation.ps1
+tests/Adapter/TokenIdentityPipeline.Tests.ps1
+tests/Unit/Auth/Confirm-GraphTenantBinding.Tests.ps1
+tests/Unit/Operations/DescriptorInvariants.Tests.ps1
+tests/Unit/Operations/Get-GraphObject.Tests.ps1
+tests/Unit/Operations/Import-GraphOperationDescriptor.Tests.ps1
+tests/Unit/Pipeline/Invoke-GraphBatch.Tests.ps1
+tests/Unit/Pipeline/Invoke-GraphOperation.Tests.ps1
+tests/Unit/Pipeline/Invoke-GraphPaging.Tests.ps1
+tests/Unit/Throttle/ThrottleGate.Tests.ps1
+tests/Unit/Transport/Invoke-GraphRetry.Tests.ps1
+```
 
 - [ ] **Step 1: Write and test a digest-bound protected runner**
 
@@ -989,27 +1155,39 @@ managed-identity, and fixed-bearer routing without reading a credential, calling
 permission, or creating Azure resources. Real mode emits only redacted counts, auth mode, adapter
 diagnostics, package digest, and success/failure state.
 
-- [ ] **Step 2: Pack/test and freeze the pre-cutover artifact**
+- [ ] **Step 2: Commit deterministic prerequisites and runner in sequence**
+
+First commit the reviewed prerequisite set above and repeat its focused and complete local gates on
+that exact clean SHA. Then commit only `scripts/Invoke-GraphKitAuthParity.ps1` and
+`tests/QA/GraphKitAuthLiveParity.tests.ps1`. No observed-evidence file belongs in either commit.
+
+- [ ] **Step 3: Pack/test and freeze the exact clean runner commit**
 
 Run the complete local gates with the transitive dependency still present but production contexts
-already using the isolated provider. Record the exact prerelease and digest; do not rebuild between
-live modes.
+already using the isolated provider. Pack, test, run canonical proof and the standalone no-rebuild
+verifier on the exact clean runner commit; freeze that verified package outside every Clean/pack
+root; record its source revision, full prerelease, package digest, and proof digest. All four DryRun
+modes must pass against that one frozen copy. Do not rebuild after the freeze or between live modes.
 
-- [ ] **Step 3: Run approved Ivy24 parity**
+- [ ] **Step 4: Run Ivy24 parity only after separate explicit authority**
 
 Using the exact tested package, prove certificate, client-secret, and fixed-bearer acquisition plus
 a safe read. Do not persist tokens, secret values, tenant IDs, client IDs, or response content in
 repository evidence.
 
-- [ ] **Step 4: Provision a fresh managed-identity host only with explicit authority**
+- [ ] **Step 5: Provision a fresh managed-identity host only after separate explicit authority**
 
 Create the minimum throwaway Azure host and permission grant, install the same package digest,
 perform the managed-identity read, record redacted evidence, and delete the host/resources. The
 earlier legacy container run is not compiled-provider parity.
 
-- [ ] **Step 5: Commit only the tested runner and redacted observed evidence**
+- [ ] **Step 6: Commit only redacted observed evidence without rebuilding**
 
-Do not proceed to dependency removal until all four applicable protected-live parity modes pass.
+After all four modes pass against one frozen artifact under separately authorized live execution,
+commit only `docs/superpowers/specs/2026-08-30-r8-graphkit-auth-design.md`. That docs-only evidence
+commit is not the packaged source revision and must not trigger a rebuild or change the frozen
+artifact. Do not proceed to dependency removal until all four applicable protected-live parity
+modes pass.
 
 ### Task 9: Remove transitive MSAL and run the final local gate
 

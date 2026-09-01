@@ -169,6 +169,11 @@ function Send-GraphHttpRequest {
 
         [scriptblock] $TenantBindingProver,
 
+        # Private outer-operation state for the nested /organization proof.
+        # Invoke-GraphRetry supplies the caller's canonical scope and exact
+        # remaining deadline; direct private tests may omit it.
+        [object] $TenantBindingContext,
+
         # Private deterministic seams. Production callers use the current
         # module lifecycle and the GraphKit-owned client factory.
         [object] $LifecycleState = $script:GraphKitModuleLifecycle,
@@ -179,8 +184,19 @@ function Send-GraphHttpRequest {
     $leaseAcquired = $false
     $lifetimeCts = $null
     $phaseCts = $null
+    $tenantBindingDeadlineCts = $null
     $request = $null
     $response = $null
+    $proofCloud = 'TenantProof'
+    $proofClientId = $null
+    $tenantBindingCancellationToken = [System.Threading.CancellationToken]::None
+    $getTenantBindingRemaining = $null
+    $tenantBindingStopwatch = if ($VerifyTenantBinding) {
+        [System.Diagnostics.Stopwatch]::StartNew()
+    }
+    else {
+        $null
+    }
 
     $moduleCancellationToken = Enter-GraphModuleOperation -State $LifecycleState
     $leaseAcquired = $true
@@ -190,6 +206,66 @@ function Send-GraphHttpRequest {
             $moduleCancellationToken
         )
         $effectiveCancellationToken = $lifetimeCts.Token
+
+        if ($VerifyTenantBinding) {
+            $initialRemainingDeadline = [TimeSpan]::FromSeconds(300)
+            $deadlineUtc = $null
+            $utcNow = $null
+            $elapsed = { $tenantBindingStopwatch.Elapsed }.GetNewClosure()
+
+            if ($null -ne $TenantBindingContext) {
+                if ($null -ne $TenantBindingContext.PSObject.Properties['Cloud']) {
+                    $proofCloud = [string] $TenantBindingContext.Cloud
+                }
+                if ($null -ne $TenantBindingContext.PSObject.Properties['ClientId']) {
+                    $proofClientId = $TenantBindingContext.ClientId
+                }
+                if ($null -ne $TenantBindingContext.PSObject.Properties['RemainingDeadline']) {
+                    $initialRemainingDeadline = [TimeSpan] $TenantBindingContext.RemainingDeadline
+                }
+                if ($null -ne $TenantBindingContext.PSObject.Properties['Elapsed'] -and
+                    $TenantBindingContext.Elapsed -is [scriptblock]) {
+                    $elapsed = [scriptblock] $TenantBindingContext.Elapsed
+                }
+                if ($null -ne $TenantBindingContext.PSObject.Properties['DeadlineUtc']) {
+                    $deadlineUtc = [datetime] $TenantBindingContext.DeadlineUtc
+                }
+                if ($null -ne $TenantBindingContext.PSObject.Properties['UtcNow'] -and
+                    $TenantBindingContext.UtcNow -is [scriptblock]) {
+                    $utcNow = [scriptblock] $TenantBindingContext.UtcNow
+                }
+            }
+
+            # One monotonic budget covers acquisition, cache lookup, proof and the
+            # target send. The injected elapsed-time seam lets tests advance that
+            # budget without sleeping; production uses the sender-local stopwatch.
+            $getTenantBindingRemaining = {
+                $remaining = $initialRemainingDeadline - [TimeSpan] (& $elapsed)
+                if ($null -ne $deadlineUtc -and $null -ne $utcNow) {
+                    $remainingByCallerClock = $deadlineUtc - (& $utcNow)
+                    if ($remainingByCallerClock -lt $remaining) {
+                        $remaining = $remainingByCallerClock
+                    }
+                }
+                return $remaining
+            }.GetNewClosure()
+
+            # Caller/module cancellation wins at the exact zero-budget boundary.
+            $effectiveCancellationToken.ThrowIfCancellationRequested()
+            $remainingAtEntry = [TimeSpan] (& $getTenantBindingRemaining)
+            if ($remainingAtEntry -le [TimeSpan]::Zero) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+
+            $tenantBindingDeadlineCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource(
+                $effectiveCancellationToken
+            )
+            $tenantBindingDeadlineCts.CancelAfter($remainingAtEntry)
+            $tenantBindingCancellationToken = $tenantBindingDeadlineCts.Token
+        }
+        else {
+            $tenantBindingCancellationToken = $effectiveCancellationToken
+        }
 
     $result = [GraphTransportResult]::new()
     $result.StatusCode = 0
@@ -304,24 +380,35 @@ function Send-GraphHttpRequest {
         # attempt. Keeping acquisition beside the credential boundary makes the
         # value acquired, tenant-proved and attached to Authorization one exact
         # result rather than three independently rotating provider values.
-        if ([string]::IsNullOrEmpty($TokenAcquisitionKey)) {
-            # Direct private callers and injected tests may not carry a context.
-            # Production Invoke-GraphRetry always supplies the canonical tuple.
-            $tokenResult = $TokenSource.Acquire($ForceRefresh, $effectiveCancellationToken)
+        try {
+            if ([string]::IsNullOrEmpty($TokenAcquisitionKey)) {
+                # Direct private callers and injected tests may not carry a context.
+                # Production Invoke-GraphRetry always supplies the canonical tuple.
+                $tokenResult = $TokenSource.Acquire($ForceRefresh, $tenantBindingCancellationToken)
+            }
+            else {
+                $sourceForAcquire = $TokenSource
+                $forceForAcquire = $ForceRefresh
+                $cancellationForAcquire = $tenantBindingCancellationToken
+                $flightKey = Get-GraphTokenFlightKey `
+                    -AcquisitionKey $TokenAcquisitionKey `
+                    -ForceRefresh:$ForceRefresh
+                $tokenResult = Invoke-GraphTokenSingleFlight `
+                    -Key $flightKey `
+                    -CancellationToken $tenantBindingCancellationToken `
+                    -AcquireScript {
+                        $sourceForAcquire.Acquire($forceForAcquire, $cancellationForAcquire)
+                    }.GetNewClosure()
+            }
         }
-        else {
-            $sourceForAcquire = $TokenSource
-            $forceForAcquire = $ForceRefresh
-            $cancellationForAcquire = $effectiveCancellationToken
-            $flightKey = Get-GraphTokenFlightKey `
-                -AcquisitionKey $TokenAcquisitionKey `
-                -ForceRefresh:$ForceRefresh
-            $tokenResult = Invoke-GraphTokenSingleFlight `
-                -Key $flightKey `
-                -CancellationToken $effectiveCancellationToken `
-                -AcquireScript {
-                    $sourceForAcquire.Acquire($forceForAcquire, $cancellationForAcquire)
-                }.GetNewClosure()
+        catch {
+            if ($VerifyTenantBinding -and
+                $null -ne $tenantBindingDeadlineCts -and
+                $tenantBindingDeadlineCts.IsCancellationRequested -and
+                -not $effectiveCancellationToken.IsCancellationRequested) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+            throw
         }
         if ($null -eq $tokenResult) {
             throw 'GraphBearer credential policy: token source returned no token.'
@@ -349,6 +436,18 @@ function Send-GraphHttpRequest {
             )
         }
         if ($VerifyTenantBinding) {
+            # A provider may ignore cancellation and still return a token. Reject a
+            # deadline consumed during acquisition before consulting even a valid
+            # cached binding. Caller cancellation is intentionally allowed through
+            # to an uncached prover so it observes the same cancelled token as the
+            # established contract; the final pre-send check still forbids bytes.
+            $remainingAfterAcquire = [TimeSpan] (& $getTenantBindingRemaining)
+            if (-not $effectiveCancellationToken.IsCancellationRequested -and
+                (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+                    $remainingAfterAcquire -le [TimeSpan]::Zero)) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+
             # Mutating sends require tenant proof BEFORE the request is issued.
             # A result that carries no VerifiedTenantId, or whose binding is not
             # recorded for the current fingerprint + generation + tenant, is
@@ -367,26 +466,60 @@ function Send-GraphHttpRequest {
             }
 
             if (-not $claimMatches -or -not $bindingCached) {
-                # The sender is deliberately context-free (it receives the
-                # expected authority, target tenant and token source rather than
-                # the full context), so reconstruct the minimal shape the prover
-                # needs to build its proof read and binding key.
+                $remainingDeadline = [TimeSpan] (& $getTenantBindingRemaining)
+
+                # Reconstruct the private proof context without losing the caller's
+                # cloud/client throttle identity.
                 $proofContext = [pscustomobject] @{
                     TenantId     = $TargetTenantId
                     GraphBaseUri = $ExpectedAuthority
                     TokenSource  = $TokenSource
+                    Cloud        = $proofCloud
+                    ClientId     = $proofClientId
                 }
 
                 $prover = $TenantBindingProver
                 if ($null -eq $prover) {
                     $prover = {
-                        param($Context, $TokenResult, $CancellationToken)
+                        param($Context, $TokenResult, $CancellationToken, $RemainingDeadline)
                         Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult `
-                            -CancellationToken $CancellationToken
+                            -CancellationToken $CancellationToken -RemainingDeadline $RemainingDeadline
                     }
                 }
 
-                & $prover -Context $proofContext -TokenResult $tokenResult -CancellationToken $effectiveCancellationToken
+                try {
+                    & $prover -Context $proofContext -TokenResult $tokenResult `
+                        -CancellationToken $tenantBindingCancellationToken -RemainingDeadline $remainingDeadline
+                }
+                catch {
+                    $proofFailure = $_.Exception
+                    $candidate = $proofFailure
+                    $isCancellationFailure = $false
+                    while ($null -ne $candidate) {
+                        if ($candidate -is [System.OperationCanceledException]) {
+                            $isCancellationFailure = $true
+                            break
+                        }
+                        $candidate = $candidate.InnerException
+                    }
+
+                    if ($isCancellationFailure -and
+                        $tenantBindingDeadlineCts.IsCancellationRequested -and
+                        -not $effectiveCancellationToken.IsCancellationRequested) {
+                        throw (New-GraphTenantBindingDeadlineException)
+                    }
+                    throw
+                }
+            }
+
+            # Proof/cache success is not send authority after the outer budget has
+            # elapsed. Recheck the same monotonic budget and caller cancellation
+            # before accepting the tenant claim or creating a target client.
+            $effectiveCancellationToken.ThrowIfCancellationRequested()
+            $remainingAfterProof = [TimeSpan] (& $getTenantBindingRemaining)
+            if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+                $remainingAfterProof -le [TimeSpan]::Zero) {
+                throw (New-GraphTenantBindingDeadlineException)
             }
 
             if ($null -eq $tokenResult -or
@@ -417,6 +550,18 @@ function Send-GraphHttpRequest {
         $result.CredentialGeneration = [string] $tokenResult.CredentialGeneration
     }
 
+    if ($VerifyTenantBinding) {
+        # Cache/provenance work is still part of the inherited operation budget.
+        # Check once more before client creation, then again immediately before
+        # the one physical send to close both no-send boundary races.
+        $effectiveCancellationToken.ThrowIfCancellationRequested()
+        $remainingBeforeClient = [TimeSpan] (& $getTenantBindingRemaining)
+        if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+            $remainingBeforeClient -le [TimeSpan]::Zero) {
+            throw (New-GraphTenantBindingDeadlineException)
+        }
+    }
+
     # ---- Send (one attempt = exactly one physical send) ----
     $client = Get-GraphHttpClient -State $LifecycleState `
         -ConnectTimeoutSeconds $TimeoutConnectionSeconds `
@@ -424,10 +569,19 @@ function Send-GraphHttpRequest {
 
     # The connection phase is bounded by the handler ConnectTimeout (set once);
     # header and body phases are bounded via a linked CancellationTokenSource.
-    $phaseCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource($effectiveCancellationToken)
+    $phaseCts = [System.Threading.CancellationTokenSource]::CreateLinkedTokenSource($tenantBindingCancellationToken)
 
     try {
         $phaseCts.CancelAfter([TimeSpan]::FromSeconds($TimeoutHeadersSeconds))
+
+        if ($VerifyTenantBinding) {
+            $effectiveCancellationToken.ThrowIfCancellationRequested()
+            $remainingBeforeSend = [TimeSpan] (& $getTenantBindingRemaining)
+            if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+                $remainingBeforeSend -le [TimeSpan]::Zero) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+        }
 
         $response = $client.SendAsync(
             $request,
@@ -462,8 +616,57 @@ function Send-GraphHttpRequest {
         $bodyBytes = $response.Content.ReadAsByteArrayAsync($phaseCts.Token).GetAwaiter().GetResult()
 
         $result.Body = ConvertFrom-GraphResponseBody -Bytes $bodyBytes -Headers $result.Headers
+
+        # A handler is not trusted to honour cancellation, and completion can race
+        # the deadline signal. Success is authoritative only while the inherited
+        # operation budget still remains after the entire response body is read.
+        if ($VerifyTenantBinding) {
+            $effectiveCancellationToken.ThrowIfCancellationRequested()
+            $remainingAfterBody = [TimeSpan] (& $getTenantBindingRemaining)
+            if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+                $remainingAfterBody -le [TimeSpan]::Zero) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+        }
     }
     catch {
+        $failure = $_.Exception
+        $candidate = $failure
+        $isCancellationFailure = $false
+        $isTenantBindingDeadline = $false
+        while ($null -ne $candidate) {
+            if ($candidate -is [System.OperationCanceledException]) {
+                $isCancellationFailure = $true
+            }
+            if ($candidate -is [System.TimeoutException] -and
+                $candidate.Data['GraphKit.TenantBindingDeadlineExpired'] -eq $true) {
+                $isTenantBindingDeadline = $true
+            }
+            $candidate = $candidate.InnerException
+        }
+
+        # Cancellation observed at either final boundary is operation control, not
+        # a transport result. Let Invoke-GraphRetry preserve its Cancelled envelope
+        # and release admission; normalizing this OCE could turn a completed 2xx
+        # response into a false success.
+        if ($isCancellationFailure -and $effectiveCancellationToken.IsCancellationRequested) {
+            throw
+        }
+        if ($isTenantBindingDeadline) {
+            throw
+        }
+
+        # The sender-wide proof budget also bounds an in-flight target request.
+        # Preserve caller/module cancellation when both signals arrive together;
+        # otherwise surface the dedicated marker consumed by Invoke-GraphRetry.
+        if ($VerifyTenantBinding -and -not $effectiveCancellationToken.IsCancellationRequested) {
+            $remainingAfterTransport = [TimeSpan] (& $getTenantBindingRemaining)
+            if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
+                $remainingAfterTransport -le [TimeSpan]::Zero) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+        }
+
         # Unwrap PowerShell's MethodInvocationException to the underlying
         # transport exception (HttpRequestException, TaskCanceledException, ...).
         $ex = $_.Exception
@@ -503,13 +706,20 @@ function Send-GraphHttpRequest {
                 }
                 finally {
                     try {
-                        if ($null -ne $lifetimeCts) {
-                            $lifetimeCts.Dispose()
+                        if ($null -ne $tenantBindingDeadlineCts) {
+                            $tenantBindingDeadlineCts.Dispose()
                         }
                     }
                     finally {
-                        if ($leaseAcquired) {
-                            Exit-GraphModuleOperation -State $LifecycleState
+                        try {
+                            if ($null -ne $lifetimeCts) {
+                                $lifetimeCts.Dispose()
+                            }
+                        }
+                        finally {
+                            if ($leaseAcquired) {
+                                Exit-GraphModuleOperation -State $LifecycleState
+                            }
                         }
                     }
                 }

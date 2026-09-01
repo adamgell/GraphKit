@@ -42,6 +42,12 @@ $script:GraphOperationArrayFields = @(
     'RequiredPermissions', 'RequiredLicense', 'SupportedClouds'
 )
 
+# Persisted profile authentication methods. Provider is intentionally absent: it is an
+# injected, non-persistable context source rather than a profile AuthMethod.
+$script:GraphOperationPersistedAuthModes = @(
+    'Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity'
+)
+
 # Closed enums: field name -> allowed values.
 $script:GraphOperationEnumFields = @(
     'OperationKind', 'ApiVersion', 'Stability', 'PagingStrategy', 'ReplayPolicy',
@@ -151,6 +157,31 @@ function Import-GraphOperationDescriptor {
             $value = $descriptor[$field]
             if ($null -eq $value -or $value -isnot [System.Array]) {
                 $violations.Add("Field '$field' must be an array.")
+            }
+        }
+    }
+
+    if ($descriptor.ContainsKey('SupportedAuthModes') -and
+        $descriptor['SupportedAuthModes'] -is [System.Array]) {
+        $supportedAuthModes = @($descriptor['SupportedAuthModes'])
+        if ($supportedAuthModes.Count -eq 0) {
+            $violations.Add("Field 'SupportedAuthModes' must be a non-empty array.")
+        }
+        else {
+            $seenAuthModes = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($authMode in $supportedAuthModes) {
+                if ($authMode -isnot [string] -or [string]::IsNullOrWhiteSpace($authMode)) {
+                    $violations.Add("Field 'SupportedAuthModes' must contain only non-empty auth-mode names.")
+                    continue
+                }
+                if ($authMode -notin $script:GraphOperationPersistedAuthModes) {
+                    $violations.Add("Field 'SupportedAuthModes' contains unknown auth mode '$authMode'.")
+                    continue
+                }
+                if (-not $seenAuthModes.Add($authMode)) {
+                    $violations.Add("Field 'SupportedAuthModes' contains duplicate auth mode '$authMode'.")
+                }
             }
         }
     }

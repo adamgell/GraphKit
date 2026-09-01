@@ -14,6 +14,9 @@ BeforeAll {
         return $script:scopeToReturn
     }
     Mock Wait-GraphThrottleGate -ModuleName GraphKit {
+        param($Scope, $CancellationToken, $UtcNow, $UtcNowScript, $DeadlineUtc, $RemainingDeadline)
+        $script:lastGateDeadlineUtc = $DeadlineUtc
+        $script:lastGateRemainingDeadline = $RemainingDeadline
         if ($null -ne $script:throttleWaitScript) { & $script:throttleWaitScript }
         return $script:admissionToReturn
     }
@@ -74,7 +77,8 @@ BeforeAll {
             [string] $CredentialPolicy = 'None',
             [string] $ApiVersion = 'v1.0',
             [string] $ResourceFamily = 'Test.Family',
-            [hashtable] $Condition = $null
+            [hashtable] $Condition = $null,
+            [string] $IdentityRequirement = 'AllowUnverifiedRead'
         )
 
         return @{
@@ -84,6 +88,7 @@ BeforeAll {
             ResourceFamily   = $ResourceFamily
             Condition        = $Condition
             Reconciliation   = $null
+            IdentityRequirement = $IdentityRequirement
         }
     }
 
@@ -119,12 +124,18 @@ BeforeAll {
     }
 
     function New-TestTokenSource {
-        param([bool] $CanRefresh = $true, [guid] $VerifiedTenantId = [guid] '00000000-0000-0000-0000-000000000001')
+        param(
+            [bool] $CanRefresh = $true,
+            [guid] $VerifiedTenantId = [guid] '00000000-0000-0000-0000-000000000001',
+            [AllowNull()] [string] $TokenFingerprint = 'test-token-fingerprint',
+            [AllowNull()] [string] $CredentialGeneration = 'test-generation'
+        )
 
         $source = [pscustomobject] @{
             CanRefresh           = $CanRefresh
             VerifiedTenantId     = $VerifiedTenantId
-            CredentialGeneration = 'test-generation'
+            TokenFingerprint     = $TokenFingerprint
+            CredentialGeneration = $CredentialGeneration
         }
 
         # Duck-typed GraphTokenSource: Acquire is a ScriptMethod so the module can
@@ -136,7 +147,7 @@ BeforeAll {
                 AccessToken          = 'test-token'
                 ExpiresOnUtc         = [System.DateTimeOffset]::UtcNow.AddHours(1)
                 VerifiedTenantId     = $this.VerifiedTenantId
-                TokenFingerprint     = 'test-token-fingerprint'
+                TokenFingerprint     = $this.TokenFingerprint
                 CredentialGeneration = $this.CredentialGeneration
             }
         } -PassThru
@@ -158,6 +169,8 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
             $script:acquireCalls = [System.Collections.Generic.List[bool]]::new()
             $script:lastSendHeaders = $null
             $script:lastTokenAcquisitionKey = $null
+            $script:lastGateDeadlineUtc = $null
+            $script:lastGateRemainingDeadline = $null
             $script:scopeToReturn = @{
                 CoarseKey      = 'Global|tenant|client|Read'
                 LeafKey        = 'Global|tenant|client|Test.Family|Read'
@@ -272,6 +285,162 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $r.Outcome | Should -Be 'DeadlineExpired'
                 $r.Certainty | Should -Be 'Indeterminate'
                 $script:sendCount | Should -Be 0
+            }
+
+            It 'turns a marked throttle-gate deadline into a no-send DeadlineExpired envelope' {
+                $script:throttleWaitScript = {
+                    $script:clock = $script:clock.AddSeconds(5)
+                    $failure = [System.TimeoutException]::new('operation deadline expired in throttle gate')
+                    $failure.Data['GraphKit.OperationDeadlineExpired'] = $true
+                    throw $failure
+                }
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) `
+                        -Injections $Injections -DeadlineSeconds 5
+                }
+
+                $r.Outcome | Should -BeExactly 'DeadlineExpired'
+                $r.Certainty | Should -BeExactly 'Indeterminate'
+                $script:sendCount | Should -Be 0
+                $script:completeCalls | Should -Be 0
+                $script:lastGateRemainingDeadline | Should -BeGreaterThan ([TimeSpan]::Zero)
+                $script:lastGateRemainingDeadline | Should -BeLessOrEqual ([TimeSpan]::FromSeconds(5))
+                $script:lastGateDeadlineUtc | Should -Be ([datetime] '2026-01-01T00:00:05Z')
+            }
+
+            It 'gives caller cancellation precedence over a simultaneous marked throttle deadline' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $script:throttleWaitScript = {
+                    $cts.Cancel()
+                    $failure = [System.TimeoutException]::new('simultaneous throttle deadline')
+                    $failure.Data['GraphKit.OperationDeadlineExpired'] = $true
+                    throw $failure
+                }.GetNewClosure()
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), (New-TestInjections), $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections -DeadlineSeconds 5
+                    }
+
+                    $r.Outcome | Should -BeExactly 'Cancelled'
+                    $r.Certainty | Should -BeExactly 'Indeterminate'
+                    $script:sendCount | Should -Be 0
+                    $script:completeCalls | Should -Be 0
+                }
+                finally {
+                    $cts.Dispose()
+                }
+            }
+
+            It 'returns Cancelled without sending when cancellation is raised inside throttle admission' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $script:throttleWaitScript = {
+                    $cts.Cancel()
+                    throw [System.OperationCanceledException]::new('cancelled inside throttle admission')
+                }.GetNewClosure()
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), (New-TestInjections), $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections
+                    }
+
+                    $r.Outcome | Should -BeExactly 'Cancelled'
+                    $r.Certainty | Should -BeExactly 'Indeterminate'
+                    $script:sendCount | Should -Be 0
+                    $script:completeCalls | Should -Be 0
+                }
+                finally {
+                    $cts.Dispose()
+                }
+            }
+
+            It 'clamps retry backoff to the remaining deadline and does not start another attempt' {
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 429 -Headers @{ 'Retry-After' = '30' }))
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) `
+                        -Injections $Injections -DeadlineSeconds 5
+                }
+
+                $r.Outcome | Should -BeExactly 'DeadlineExpired'
+                $r.Certainty | Should -BeExactly 'Indeterminate'
+                $script:sendCount | Should -Be 1
+                $script:completeCalls | Should -Be 1
+                $script:requestedDelays | Should -HaveCount 1
+                $script:requestedDelays[0] | Should -BeGreaterThan 0
+                $script:requestedDelays[0] | Should -BeLessOrEqual 5
+            }
+
+            It 'passes caller cancellation into retry backoff and preserves Cancelled' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 429 -Headers @{ 'Retry-After' = '30' }))
+                $backoffCapture = [pscustomobject] @{ SawCancelableToken = $false }
+                $injections = New-TestInjections
+                $injections.Delay = {
+                    param([double] $Seconds, [System.Threading.CancellationToken] $CancellationToken)
+                    $backoffCapture.SawCancelableToken = $CancellationToken.CanBeCanceled
+                    $cts.Cancel()
+                    $CancellationToken.ThrowIfCancellationRequested()
+                }.GetNewClosure()
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), $injections, $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections
+                    }
+
+                    $r.Outcome | Should -BeExactly 'Cancelled'
+                    $r.Certainty | Should -BeExactly 'Indeterminate'
+                    $backoffCapture.SawCancelableToken | Should -BeTrue
+                    $script:sendCount | Should -Be 1
+                    $script:completeCalls | Should -Be 1
+                }
+                finally {
+                    $cts.Dispose()
+                }
+            }
+
+            It 'gives caller cancellation precedence over a simultaneous marked proof deadline' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $injections = New-TestInjections
+                $injections.Send = {
+                    param($Uri, $Method, $Headers, $Body, $CancellationToken)
+                    $cts.Cancel()
+                    $failure = [System.TimeoutException]::new('simultaneous proof deadline')
+                    $failure.Data['GraphKit.TenantBindingDeadlineExpired'] = $true
+                    throw $failure
+                }.GetNewClosure()
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), $injections, $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections
+                    }
+
+                    $r.Outcome | Should -BeExactly 'Cancelled'
+                    $r.Certainty | Should -BeExactly 'Indeterminate'
+                    $script:completeCalls | Should -Be 1
+                }
+                finally {
+                    $cts.Dispose()
+                }
             }
 
             It 'returns Cancelled for a pre-cancelled token' {
@@ -425,6 +594,52 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 }
 
                 $script:lastTokenAcquisitionKey | Should -Be 'test-acquisition-cache-key'
+            }
+
+            It 'pins exact token and cloud identity into verified provenance' {
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @() }))
+                $tokenSource = New-TestTokenSource
+
+                $r = InModuleScope GraphKit -ArgumentList `
+                    (New-TestContext -TokenSource $tokenSource -IdentityState NotAcquired), `
+                    (New-TestDescriptor -CredentialPolicy GraphBearer -IdentityRequirement Verified), `
+                    (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Succeeded'
+                $r.Provenance.IdentityState | Should -BeExactly 'VerifiedForToken'
+                $r.Provenance.TokenFingerprint | Should -BeExactly 'test-token-fingerprint'
+                $r.Provenance.CredentialGeneration | Should -BeExactly 'test-generation'
+                $r.Provenance.Cloud | Should -BeExactly 'Global'
+                $r.Provenance.Keys | Should -Not -Contain 'ClientId'
+                $r.Provenance.Keys | Should -Not -Contain 'ClientScopeFingerprint'
+            }
+
+            It 'rejects verified transport provenance with <Case>' -ForEach @(
+                @{ Case = 'a blank token fingerprint'; Token = '   '; Generation = 'test-generation' }
+                @{ Case = 'a blank credential generation'; Token = 'test-token-fingerprint'; Generation = "`t" }
+            ) {
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @('must-not-escape') }))
+                $tokenSource = New-TestTokenSource -TokenFingerprint $Token -CredentialGeneration $Generation
+
+                {
+                    InModuleScope GraphKit -ArgumentList `
+                        (New-TestContext -TokenSource $tokenSource -IdentityState NotAcquired), `
+                        (New-TestDescriptor -CredentialPolicy GraphBearer -IdentityRequirement Verified), `
+                        (New-TestInjections) {
+                        param($Context, $Descriptor, $Injections)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                    }
+                } | Should -Throw -ExpectedMessage '*non-empty TokenFingerprint and CredentialGeneration*'
+
+                $script:sendCount | Should -Be 1
+                $script:completeCalls | Should -Be 1 -Because 'the attempt admission must still be released'
             }
         }
     }

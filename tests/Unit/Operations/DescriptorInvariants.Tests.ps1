@@ -10,6 +10,16 @@ BeforeAll {
 
 Describe 'Descriptor invariants that fail silently if broken' {
 
+    It 'declares every Graph operation compatible with every persisted auth mode' {
+        # All catalogued operations attach a Graph bearer and the persisted source determines
+        # acquisition, not endpoint semantics. Keeping this exact list prevents a fixed bearer
+        # from being silently documented as unsupported while the transport still accepts it.
+        $expected = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
+        foreach ($descriptor in $script:catalog) {
+            $descriptor.SupportedAuthModes | Should -Be $expected -Because "$($descriptor.Type)/$($descriptor.Operation) is GraphBearer"
+        }
+    }
+
     It 'keeps the $select on Organization/GetMdmAuthority' {
         # mobileDeviceManagementAuthority is a workload-extension property: it is returned only
         # when named in $select, on the ENTITY url, and it is absent from /organization
@@ -353,5 +363,4 @@ Describe 'The TenantPulse-unblocking reads keep their official paths' {
         $d.ApiVersion | Should -Be 'v1.0'
     }
 }
-
 

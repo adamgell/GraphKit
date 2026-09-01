@@ -161,6 +161,7 @@ Describe 'Import-GraphOperationDescriptor' {
             $d['ThrottleClass'] | Should -Be 'Read'
             $d['ResourceFamily'] | Should -Be 'Intune.ManagedDevices'
             $d['SupportedClouds'] | Should -Contain 'USGovDoD'
+            $d['SupportedAuthModes'] | Should -Be @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
         }
 
         It 'loads DeviceReport.Export as a LongRunningJob' {
@@ -233,6 +234,73 @@ Describe 'Import-GraphOperationDescriptor' {
     }
 
     Context 'Cross-field rules' {
+        It 'rejects a missing SupportedAuthModes declaration' {
+            $d = New-ValidDescriptor
+            $d.Remove('SupportedAuthModes')
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "Missing required field 'SupportedAuthModes'"
+        }
+
+        It 'rejects a scalar SupportedAuthModes declaration' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = 'Certificate'
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "Field 'SupportedAuthModes' must be an array"
+        }
+
+        It 'rejects an empty SupportedAuthModes declaration' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @()
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*non-empty"
+        }
+
+        It 'rejects a non-string SupportedAuthModes element' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @('Certificate', 7)
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*only non-empty auth-mode names"
+        }
+
+        It 'rejects an empty or whitespace-only SupportedAuthModes element' -ForEach @(
+            @{ Value = '' }
+            @{ Value = '   ' }
+        ) {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @('Certificate', $Value)
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*only non-empty auth-mode names"
+        }
+
+        It 'rejects an unknown SupportedAuthModes value' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @('Certificate', 'Bogus')
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*Bogus"
+        }
+
+        It 'rejects duplicate SupportedAuthModes values' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @('Certificate', 'Certificate')
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*duplicate"
+        }
+
+        It 'rejects case-variant duplicate SupportedAuthModes values' {
+            $d = New-ValidDescriptor
+            $d['SupportedAuthModes'] = @('Certificate', 'certificate')
+            $path = New-TestDescriptorFile $d
+
+            Get-DescriptorError $path | Should -Match "SupportedAuthModes.*duplicate"
+        }
+
         It 'rejects CredentialPolicy None with an empty AllowedHosts' {
             $d = New-ValidDescriptor
             $d['CredentialPolicy'] = 'None'

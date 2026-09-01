@@ -45,7 +45,7 @@ function Test-GraphDeadlineExpired {
         [System.Diagnostics.Stopwatch] $Stopwatch,
         [datetime] $DeadlineUtc,
         [scriptblock] $UtcNow,
-        [int] $DeadlineSeconds
+        [double] $DeadlineSeconds
     )
 
     if ($Stopwatch.Elapsed.TotalSeconds -ge [double] $DeadlineSeconds) { return $true }
@@ -137,8 +137,8 @@ function Invoke-GraphRetry {
         [ValidateRange(1, 100)]
         [int] $MaxAttempts = 5,
 
-        [ValidateRange(1, 86400)]
-        [int] $DeadlineSeconds = 300
+        [ValidateRange(0.001, 86400)]
+        [double] $DeadlineSeconds = 300
     )
 
     # ---- Resolve injections ----
@@ -164,7 +164,24 @@ function Invoke-GraphRetry {
         }
     }
     if ($null -eq $utcNow) { $utcNow = { [datetime]::UtcNow } }
-    if ($null -eq $delay) { $delay = { param([double] $Seconds) Start-Sleep -Seconds $Seconds } }
+    if ($null -eq $delay) {
+        $delay = {
+            param(
+                [double] $Seconds,
+                [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None
+            )
+
+            if ($Seconds -le 0) { return }
+            if ($CancellationToken.CanBeCanceled) {
+                if ($CancellationToken.WaitHandle.WaitOne([TimeSpan]::FromSeconds($Seconds))) {
+                    $CancellationToken.ThrowIfCancellationRequested()
+                }
+            }
+            else {
+                Start-Sleep -Seconds $Seconds
+            }
+        }
+    }
     if ($null -eq $jitter) { $jitter = { Get-Random -Minimum 0.0 -Maximum 1.0 } }
 
     # ---- Deadline: monotonic Stopwatch plus the injected (virtual) clock ----
@@ -175,6 +192,13 @@ function Invoke-GraphRetry {
 
     $credentialPolicy = [string] $Descriptor.CredentialPolicy
     $isMutating = $Method -notin @('GET', 'HEAD')
+    # Catalog operations declare whether tenant-attributed results require proof.
+    # Method-based mutation remains the fail-closed fallback for raw/private callers
+    # whose synthesized descriptor predates IdentityRequirement. A verified GET must
+    # be proved just as a write is: Graph's shared authority cannot identify which
+    # tenant the bearer addresses.
+    $requiresTenantBinding = $isMutating -or
+        ([string] $Descriptor.IdentityRequirement -ceq 'Verified')
     $canRefresh = ($null -ne $Context.TokenSource) -and ($Context.TokenSource.CanRefresh -eq $true)
 
     # ---- Throttle scope (coarse + leaf) ----
@@ -188,6 +212,8 @@ function Invoke-GraphRetry {
     $certaintyFinal = 'Known'
     $data = @()
     $verifiedTenantId = $null
+    $verifiedTokenFingerprint = $null
+    $verifiedCredentialGeneration = $null
     $lastAttemptCertainty = $null
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
@@ -204,7 +230,49 @@ function Invoke-GraphRetry {
         }
 
         # ---- Throttle admission ----
-        $admission = Wait-GraphThrottleGate -Scope $scope
+        $remainingGateStopwatchSeconds = [double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds
+        $remainingGateClockSeconds = ($deadlineUtc - (& $utcNow)).TotalSeconds
+        $remainingGateSeconds = [Math]::Max(
+            0.0,
+            [Math]::Min($remainingGateStopwatchSeconds, $remainingGateClockSeconds)
+        )
+        try {
+            $admission = Wait-GraphThrottleGate -Scope $scope `
+                -CancellationToken $CancellationToken `
+                -UtcNow (& $utcNow) `
+                -UtcNowScript $utcNow `
+                -DeadlineUtc $deadlineUtc `
+                -RemainingDeadline ([TimeSpan]::FromSeconds($remainingGateSeconds))
+        }
+        catch {
+            $gateFailure = $_.Exception
+            $candidate = $gateFailure
+            $isCancellationFailure = $false
+            $isOperationDeadline = $false
+            while ($null -ne $candidate) {
+                if ($candidate -is [System.OperationCanceledException]) {
+                    $isCancellationFailure = $true
+                }
+                if ($candidate -is [System.TimeoutException] -and
+                    $candidate.Data['GraphKit.OperationDeadlineExpired'] -eq $true) {
+                    $isOperationDeadline = $true
+                }
+                $candidate = $candidate.InnerException
+            }
+
+            if ($CancellationToken.IsCancellationRequested -and
+                ($isCancellationFailure -or $isOperationDeadline)) {
+                $outcome = 'Cancelled'
+                $certaintyFinal = 'Indeterminate'
+                break
+            }
+            if ($isOperationDeadline) {
+                $outcome = 'DeadlineExpired'
+                $certaintyFinal = 'Indeterminate'
+                break
+            }
+            throw
+        }
 
         # ---- Deadline / cancellation mid-throttle (wait may have consumed time) ----
         if ($CancellationToken.IsCancellationRequested -or
@@ -291,8 +359,25 @@ function Invoke-GraphRetry {
                 $sendParams.TokenAcquisitionKey = [string] $Context.AcquisitionCacheKey
                 $sendParams.ExpectedAuthority = $Context.GraphBaseUri
                 $sendParams.TargetTenantId = $Context.TenantId
-                if ($isMutating) {
+                if ($requiresTenantBinding) {
                     $sendParams.VerifyTenantBinding = $true
+                    # The proof is part of this attempt, not a new operation with
+                    # a fresh five-minute clock. Pass the smaller remaining budget
+                    # reported by the monotonic and injected clocks, plus the exact
+                    # caller scope needed by the nested proof admission.
+                    $remainingStopwatchSeconds = [double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds
+                    $remainingClockSeconds = ($deadlineUtc - (& $utcNow)).TotalSeconds
+                    $remainingProofSeconds = [Math]::Max(
+                        0.0,
+                        [Math]::Min($remainingStopwatchSeconds, $remainingClockSeconds)
+                    )
+                    $sendParams.TenantBindingContext = [pscustomobject] @{
+                        Cloud             = $Context.Cloud
+                        ClientId          = $Context.ClientId
+                        RemainingDeadline = [TimeSpan]::FromSeconds($remainingProofSeconds)
+                        DeadlineUtc       = $deadlineUtc
+                        UtcNow            = $utcNow
+                    }
                 }
             }
 
@@ -305,9 +390,19 @@ function Invoke-GraphRetry {
             }
 
             $attemptVerifiedTenantId = $null
+            $attemptTokenFingerprint = $null
+            $attemptCredentialGeneration = $null
             if (-not [string]::IsNullOrEmpty([string] $result.VerifiedTenantId) -and
                 [string]::Equals([string] $result.VerifiedTenantId, [string] $Context.TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                if ([string]::IsNullOrWhiteSpace([string] $result.TokenFingerprint) -or
+                    [string]::IsNullOrWhiteSpace([string] $result.CredentialGeneration)) {
+                    throw [System.InvalidOperationException]::new(
+                        'VerifiedForToken transport provenance requires a non-empty TokenFingerprint and CredentialGeneration.'
+                    )
+                }
                 $attemptVerifiedTenantId = $Context.TenantId
+                $attemptTokenFingerprint = [string] $result.TokenFingerprint
+                $attemptCredentialGeneration = [string] $result.CredentialGeneration
             }
 
             # ---- Runtime certainty, then release admission ----
@@ -333,16 +428,29 @@ function Invoke-GraphRetry {
             # because the caller token happened to be signalled at the same time.
             $candidate = $sendFailure
             $isCancellationFailure = $false
+            $isTenantBindingDeadline = $false
             while ($null -ne $candidate) {
                 if ($candidate -is [System.OperationCanceledException]) {
                     $isCancellationFailure = $true
-                    break
+                }
+                if ($candidate -is [System.TimeoutException] -and
+                    $candidate.Data['GraphKit.TenantBindingDeadlineExpired'] -eq $true) {
+                    $isTenantBindingDeadline = $true
                 }
                 $candidate = $candidate.InnerException
             }
 
-            if ($CancellationToken.IsCancellationRequested -and $isCancellationFailure) {
+            # Caller cancellation wins at a simultaneous proof-deadline boundary.
+            # The sender normally preserves OCE causality, but a marked deadline
+            # can be thrown in the narrow race after the proof checked its token.
+            if ($CancellationToken.IsCancellationRequested -and
+                ($isCancellationFailure -or $isTenantBindingDeadline)) {
                 $outcome = 'Cancelled'
+                $certaintyFinal = 'Indeterminate'
+                break
+            }
+            if ($isTenantBindingDeadline) {
+                $outcome = 'DeadlineExpired'
                 $certaintyFinal = 'Indeterminate'
                 break
             }
@@ -433,7 +541,63 @@ function Invoke-GraphRetry {
         # ---- Retry or finish ----
         if ($decision.ShouldRetry) {
             if ($null -ne $delayInfo) {
-                & $delay $delayInfo.DelaySeconds
+                # Never grant a retry sleep a fresh or unbounded budget. Clamp it
+                # to the smaller remaining monotonic/injected-clock deadline and
+                # pass caller/proof cancellation into the wait implementation.
+                if ($CancellationToken.IsCancellationRequested) {
+                    $outcome = 'Cancelled'
+                    $certaintyFinal = 'Indeterminate'
+                    break
+                }
+
+                $remainingStopwatchSeconds = [double] $DeadlineSeconds - $stopwatch.Elapsed.TotalSeconds
+                $remainingClockSeconds = ($deadlineUtc - (& $utcNow)).TotalSeconds
+                $remainingDelaySeconds = [Math]::Max(
+                    0.0,
+                    [Math]::Min($remainingStopwatchSeconds, $remainingClockSeconds)
+                )
+                if ($remainingDelaySeconds -le 0.0) {
+                    $outcome = 'DeadlineExpired'
+                    $certaintyFinal = 'Indeterminate'
+                    break
+                }
+
+                $requestedDelaySeconds = [double] $delayInfo.DelaySeconds
+                $boundedDelaySeconds = [Math]::Min($requestedDelaySeconds, $remainingDelaySeconds)
+                try {
+                    & $delay $boundedDelaySeconds -CancellationToken $CancellationToken
+                }
+                catch {
+                    $delayFailure = $_.Exception
+                    $candidate = $delayFailure
+                    $isCancellationFailure = $false
+                    while ($null -ne $candidate) {
+                        if ($candidate -is [System.OperationCanceledException]) {
+                            $isCancellationFailure = $true
+                            break
+                        }
+                        $candidate = $candidate.InnerException
+                    }
+
+                    if ($CancellationToken.IsCancellationRequested -and $isCancellationFailure) {
+                        $outcome = 'Cancelled'
+                        $certaintyFinal = 'Indeterminate'
+                        break
+                    }
+                    throw
+                }
+
+                if ($CancellationToken.IsCancellationRequested) {
+                    $outcome = 'Cancelled'
+                    $certaintyFinal = 'Indeterminate'
+                    break
+                }
+                if ($requestedDelaySeconds -ge $remainingDelaySeconds -or
+                    (Test-GraphDeadlineExpired -Stopwatch $stopwatch -DeadlineUtc $deadlineUtc -UtcNow $utcNow -DeadlineSeconds $DeadlineSeconds)) {
+                    $outcome = 'DeadlineExpired'
+                    $certaintyFinal = 'Indeterminate'
+                    break
+                }
             }
             continue
         }
@@ -442,6 +606,8 @@ function Invoke-GraphRetry {
         # A proven token that receives 401 must never lend its identity to the
         # refreshed token whose response becomes the operation result.
         $verifiedTenantId = $attemptVerifiedTenantId
+        $verifiedTokenFingerprint = $attemptTokenFingerprint
+        $verifiedCredentialGeneration = $attemptCredentialGeneration
         $outcome = $decision.Outcome
         $certaintyFinal = $decision.Certainty
         if ($decision.Outcome -eq 'Succeeded') {
@@ -464,6 +630,9 @@ function Invoke-GraphRetry {
         RetrievedUtc   = (& $utcNow)
         IdentityState  = if ($null -ne $verifiedTenantId) { 'VerifiedForToken' } else { $Context.IdentityState }
         ActualTenantId = $verifiedTenantId
+        TokenFingerprint = $verifiedTokenFingerprint
+        CredentialGeneration = $verifiedCredentialGeneration
+        Cloud          = $Context.Cloud
     }
 
     # Carry the operation's declared secret-bearing properties on the envelope so it is

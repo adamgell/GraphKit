@@ -38,7 +38,7 @@
     ResourceFamily      = 'Intune.Reporting'
     ThrottleClass       = 'Write'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'DeviceManagementManagedDevices.Read.All' }
     )

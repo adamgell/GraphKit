@@ -135,6 +135,7 @@ function Invoke-GraphOperation {
         $Method = $Method.ToUpperInvariant()
     } else {
         $Descriptor = Get-GraphOperation -Type $Type -Operation $Operation
+        $null = Assert-GraphOperationAuthMode -Context $Context -Descriptor $Descriptor
         $parameters = if ($PSBoundParameters.ContainsKey('Parameters') -and $null -ne $Parameters) { $Parameters } else { @{} }
 
         $baseUri = [uri] ('{0}/{1}' -f $Context.GraphBaseUri.AbsoluteUri.TrimEnd('/'), $Descriptor.ApiVersion)
@@ -165,19 +166,26 @@ function Invoke-GraphOperation {
             [string] $Method,
             [hashtable] $Headers,
             $Body,
-            [System.Threading.CancellationToken] $CancellationToken
+            [System.Threading.CancellationToken] $CancellationToken,
+            [Nullable[double]] $DeadlineSeconds
         )
 
         $null = Test-GraphCredentialPolicy -Uri $Uri -Descriptor $Descriptor -Context $Context
 
-        Invoke-GraphRetry `
-            -Context $Context `
-            -Descriptor $Descriptor `
-            -Uri $Uri `
-            -Method $Method `
-            -Headers $Headers `
-            -Body $Body `
-            -CancellationToken $CancellationToken
+        $retryParameters = @{
+            Context           = $Context
+            Descriptor        = $Descriptor
+            Uri               = $Uri
+            Method            = $Method
+            Headers           = $Headers
+            Body              = $Body
+            CancellationToken = $CancellationToken
+        }
+        if ($null -ne $DeadlineSeconds) {
+            $retryParameters.DeadlineSeconds = [double] $DeadlineSeconds
+        }
+
+        Invoke-GraphRetry @retryParameters
     }
 
     # 6. Dry-run gate for mutating operations.

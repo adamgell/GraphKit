@@ -40,7 +40,7 @@
     ResourceFamily      = 'Intune.MobileApp'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'DeviceManagementServiceConfig.Read.All' }
     )

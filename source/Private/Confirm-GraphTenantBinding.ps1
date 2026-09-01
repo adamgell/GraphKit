@@ -7,8 +7,9 @@
     result, telemetry record, and evidence page was stamped Tenant A. This
     function performs the actual proof: a GET /v1.0/organization issued with the
     token itself through the normal GraphKit pipeline (Invoke-GraphRetry), using
-    a synthetic read descriptor. The read is a GET, so Invoke-GraphRetry never
-    sets VerifyTenantBinding on it - the proof cannot recurse into another proof.
+    a synthetic AllowUnverifiedRead descriptor. That explicit identity requirement
+    exempts the proof request from recursively requiring another proof while every
+    ordinary descriptor that requires Verified identity remains fail-closed.
 
     The proof is bound to the CURRENT token result via its TokenFingerprint and
     CredentialGeneration. A successful proof is cached; a cache hit skips the
@@ -39,6 +40,17 @@ function Get-GraphTenantBindingKey {
         [guid] $TenantId
     )
 
+    if ([string]::IsNullOrWhiteSpace($Fingerprint)) {
+        throw [System.InvalidOperationException]::new(
+            'Tenant binding requires a non-empty TokenFingerprint.'
+        )
+    }
+    if ([string]::IsNullOrWhiteSpace($Generation)) {
+        throw [System.InvalidOperationException]::new(
+            'Tenant binding requires a non-empty CredentialGeneration.'
+        )
+    }
+
     return '{0}|{1}|{2}' -f ([string] $Fingerprint), ([string] $Generation), $TenantId.ToString()
 }
 
@@ -58,8 +70,28 @@ function Test-GraphTenantBinding {
         [guid] $TenantId
     )
 
+    # An incomplete tuple is never a cache identity. Return false here so a
+    # provider-supplied tenant claim cannot turn missing metadata into the
+    # shared key "||tenant"; Confirm-GraphTenantBinding owns the diagnostic.
+    if ([string]::IsNullOrWhiteSpace($Fingerprint) -or
+        [string]::IsNullOrWhiteSpace($Generation)) {
+        return $false
+    }
+
     $key = Get-GraphTenantBindingKey -Fingerprint $Fingerprint -Generation $Generation -TenantId $TenantId
     return ($script:GraphTenantBindingCache.ContainsKey($key) -and $script:GraphTenantBindingCache[$key] -eq $true)
+}
+
+function New-GraphTenantBindingDeadlineException {
+    [CmdletBinding()]
+    [OutputType([System.TimeoutException])]
+    param()
+
+    $exception = [System.TimeoutException]::new(
+        'Tenant proof deadline expired before the token could be verified.'
+    )
+    $exception.Data['GraphKit.TenantBindingDeadlineExpired'] = $true
+    return $exception
 }
 
 <#
@@ -108,12 +140,32 @@ function Confirm-GraphTenantBinding {
 
         [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None,
 
+        [TimeSpan] $RemainingDeadline = [TimeSpan]::FromSeconds(300),
+
         [scriptblock] $ProofTransport,
 
         [hashtable] $ProofCache
     )
 
     $targetTenant = $Context.TenantId
+    $fingerprintProperty = $TokenResult.PSObject.Properties['TokenFingerprint']
+    $generationProperty = $TokenResult.PSObject.Properties['CredentialGeneration']
+    $fingerprint = if ($null -eq $fingerprintProperty) { $null } else { [string] $fingerprintProperty.Value }
+    $generation = if ($null -eq $generationProperty) { $null } else { [string] $generationProperty.Value }
+
+    # Validate the complete cache identity before even selecting or consulting
+    # a cache. Empty metadata would otherwise collapse distinct bearer tokens
+    # onto the same "||tenant" entry and let the second token inherit proof.
+    if ([string]::IsNullOrWhiteSpace($fingerprint)) {
+        throw [System.InvalidOperationException]::new(
+            'Tenant binding cannot proceed without a non-empty TokenFingerprint.'
+        )
+    }
+    if ([string]::IsNullOrWhiteSpace($generation)) {
+        throw [System.InvalidOperationException]::new(
+            'Tenant binding cannot proceed without a non-empty CredentialGeneration.'
+        )
+    }
 
     # The binding decision is made from the cache (fingerprint + generation +
     # tenant), never from a VerifiedTenantId the result already carries: a
@@ -124,14 +176,22 @@ function Confirm-GraphTenantBinding {
     }
 
     $cacheKey = Get-GraphTenantBindingKey `
-        -Fingerprint ([string] $TokenResult.TokenFingerprint) `
-        -Generation ([string] $TokenResult.CredentialGeneration) `
+        -Fingerprint $fingerprint `
+        -Generation $generation `
         -TenantId $targetTenant
 
     if ($cache.ContainsKey($cacheKey) -and $cache[$cacheKey] -eq $true) {
         # Already proven for this exact token/generation/tenant: reuse it.
         $TokenResult.VerifiedTenantId = $targetTenant.ToString()
         return
+    }
+
+    # Caller/module cancellation wins when it coincides with budget exhaustion.
+    # A pure proof-budget cancellation is converted back to DeadlineExpired by
+    # the sender, but a caller-signalled token must retain Cancelled semantics.
+    $CancellationToken.ThrowIfCancellationRequested()
+    if ($RemainingDeadline -le [TimeSpan]::Zero) {
+        throw (New-GraphTenantBindingDeadlineException)
     }
 
     # ---- Proof read: GET /v1.0/organization with the token itself ----
@@ -142,7 +202,7 @@ function Confirm-GraphTenantBinding {
         ReplayPolicy        = 'Safe'
         ThrottleClass       = 'Read'
         ResourceFamily      = 'Graph.Directory'
-        IdentityRequirement = 'Verified'
+        IdentityRequirement = 'AllowUnverifiedRead'
         ApiVersion          = 'v1.0'
         Condition           = $null
         Reconciliation      = $null
@@ -151,31 +211,61 @@ function Confirm-GraphTenantBinding {
     $transport = $ProofTransport
     if ($null -eq $transport) {
         $transport = {
-            param($Context, $Descriptor, $Uri, $CancellationToken)
+            param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline)
+            $deadlineSeconds = [int] [Math]::Ceiling(([TimeSpan] $RemainingDeadline).TotalSeconds)
+            if ($deadlineSeconds -lt 1) {
+                throw (New-GraphTenantBindingDeadlineException)
+            }
+            $deadlineSeconds = [Math]::Min(86400, $deadlineSeconds)
             Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri $Uri -Method GET `
-                -Headers @{} -Body $null -CancellationToken $CancellationToken
+                -Headers @{} -Body $null -CancellationToken $CancellationToken `
+                -DeadlineSeconds $deadlineSeconds
         }
     }
 
     # Invoke the normal retry/sender pipeline with a source pinned to this exact
     # result. The original provider may rotate on every call; it must never be
     # consulted while proving the bearer that the outer sender is about to use.
+    $proofCloud = if ($null -ne $Context.PSObject.Properties['Cloud']) {
+        [string] $Context.Cloud
+    }
+    else {
+        'TenantProof'
+    }
+    $proofClientId = if ($null -ne $Context.PSObject.Properties['ClientId']) {
+        $Context.ClientId
+    }
+    else {
+        $null
+    }
     $proofContext = [pscustomobject] @{
         ProfileId             = 'tenant-proof'
         TenantId              = $targetTenant
-        Cloud                 = 'TenantProof'
+        Cloud                 = $proofCloud
         GraphBaseUri          = $Context.GraphBaseUri
-        ClientId              = $null
+        ClientId              = $proofClientId
         TokenSource           = New-GraphPinnedTokenSource -TokenResult $TokenResult
-        CredentialFingerprint = [string] $TokenResult.TokenFingerprint
+        CredentialFingerprint = $fingerprint
         AcquisitionCacheKey   = "tenant-proof|$cacheKey"
         IdentityState         = 'NotAcquired'
     }
 
     $envelope = & $transport -Context $proofContext -Descriptor $proofDescriptor -Uri $proofUri `
-        -CancellationToken $CancellationToken
+        -CancellationToken $CancellationToken -RemainingDeadline $RemainingDeadline
 
     if ($null -eq $envelope -or $envelope.Outcome -ne 'Succeeded') {
+        # Invoke-GraphRetry represents cancellation as an envelope. Convert a
+        # caller-signalled proof cancellation back to OperationCanceledException
+        # so the outer retry loop preserves its established Cancelled outcome and
+        # releases its admission instead of treating cancellation as an identity
+        # failure with a misleading diagnostic.
+        if ($CancellationToken.IsCancellationRequested) {
+            $CancellationToken.ThrowIfCancellationRequested()
+        }
+        if ($null -ne $envelope -and [string] $envelope.Outcome -ceq 'DeadlineExpired') {
+            throw (New-GraphTenantBindingDeadlineException)
+        }
+
         throw (
             'Tenant proof failed: the /organization read did not succeed, so the token cannot be verified for tenant {0}.' -f $targetTenant
         )

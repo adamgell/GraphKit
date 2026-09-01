@@ -47,7 +47,7 @@
     ResourceFamily      = 'Directory.Group'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'Group.Read.All' }
     )

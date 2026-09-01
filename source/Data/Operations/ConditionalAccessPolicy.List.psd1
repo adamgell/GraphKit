@@ -47,7 +47,7 @@
     ResourceFamily      = 'Directory.ConditionalAccess'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'Policy.Read.All' }
     )

@@ -34,11 +34,29 @@ function Invoke-GraphPaging {
         [int] $MaxPages = 200,
 
         [Parameter()]
-        [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None
+        [System.Threading.CancellationToken] $CancellationToken = [System.Threading.CancellationToken]::None,
+
+        [Parameter()]
+        [ValidateRange(0.001, 86400)]
+        [double] $DeadlineSeconds = 300,
+
+        [Parameter()]
+        [scriptblock] $UtcNow
     )
+
+    if ($null -eq $UtcNow) { $UtcNow = { [datetime]::UtcNow } }
+    $operationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $deadlineUtc = (& $UtcNow).AddSeconds($DeadlineSeconds)
+    $getRemainingSeconds = {
+        $remainingStopwatch = $DeadlineSeconds - $operationStopwatch.Elapsed.TotalSeconds
+        $remainingClock = ($deadlineUtc - (& $UtcNow)).TotalSeconds
+        return [Math]::Max(0.0, [Math]::Min($remainingStopwatch, $remainingClock))
+    }.GetNewClosure()
 
     $allData = [System.Collections.Generic.List[object]]::new()
     $allTelemetry = [System.Collections.Generic.List[object]]::new()
+    $aggregateProvenance = $null
+    $verifiedTokenIdentity = $null
     $seenIds = $null
     if ($Descriptor.DeduplicationKey) {
         $seenIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -48,6 +66,33 @@ function Invoke-GraphPaging {
     $pageCount = 0
 
     while ($nextLink -and $pageCount -lt $MaxPages) {
+        # Caller cancellation wins at the exact deadline boundary. No URI
+        # validation, request construction, acquisition or send may begin after
+        # this one collection-wide budget is exhausted.
+        if ($CancellationToken.IsCancellationRequested) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'Cancelled'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
+        $remainingSeconds = [double] (& $getRemainingSeconds)
+        if ($remainingSeconds -lt 0.001) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'DeadlineExpired'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
+
         $pageCount++
 
         # Validate the nextLink authority before attaching a bearer token. The link is opaque
@@ -57,6 +102,35 @@ function Invoke-GraphPaging {
 
         # Build the page request. The factory may repeat RequiredPagingHeaders.
         $request = & $RequestFactoryScript -Uri $nextLink -Descriptor $Descriptor
+
+        # URI validation and request construction are part of this collection's
+        # one budget. Recompute immediately before transport so elapsed setup
+        # time cannot be handed to retry as a fresh/stale allowance. Retry cannot
+        # represent less than one millisecond, so a smaller positive remainder is
+        # expired here rather than rounded up or surfaced as a binding failure.
+        if ($CancellationToken.IsCancellationRequested) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'Cancelled'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
+        $remainingSeconds = [double] (& $getRemainingSeconds)
+        if ($remainingSeconds -lt 0.001) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'DeadlineExpired'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
 
         # Execute with retry via the transport delegate.
         #
@@ -70,7 +144,8 @@ function Invoke-GraphPaging {
             -Method $request.Method `
             -Headers $request.Headers `
             -Body $request.Body `
-            -CancellationToken $CancellationToken
+            -CancellationToken $CancellationToken `
+            -DeadlineSeconds $remainingSeconds
 
         if ($null -eq $pageResult) {
             throw "Transport delegate returned null for page $pageCount; expected a GraphKit.OperationResult."
@@ -83,16 +158,103 @@ function Invoke-GraphPaging {
 
         # A non-success outcome stops pagination.
         if ($pageResult.Outcome -ne 'Succeeded') {
-            $allData = @($allData)
             $allTelemetry = @($allTelemetry)
             return [PSCustomObject]@{
                 PSTypeName = 'GraphKit.OperationResult'
-                Data       = $allData
+                # A collection is one certainty boundary. Never return a
+                # successful prefix when a later page failed, cancelled or ran
+                # out of budget: consumers cannot treat that prefix as complete.
+                Data       = @()
                 Outcome    = $pageResult.Outcome
                 Certainty  = $pageResult.Certainty
                 Telemetry  = $allTelemetry
                 Provenance = $pageResult.Provenance
+                PageCount  = $pageCount
             }
+        }
+
+        # A successful transport result is not allowed to outlive the pager's
+        # canonical collection deadline. Check before provenance validation or
+        # row retention so a late terminal page cannot be returned as success.
+        # Cancellation wins when it arrives at the same boundary.
+        if ($CancellationToken.IsCancellationRequested) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'Cancelled'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
+        if ([double] (& $getRemainingSeconds) -le 0.0) {
+            return [pscustomobject] @{
+                PSTypeName = 'GraphKit.OperationResult'
+                Data       = @()
+                Outcome    = 'DeadlineExpired'
+                Certainty  = 'Indeterminate'
+                Telemetry  = @($allTelemetry)
+                Provenance = $aggregateProvenance
+                PageCount  = $pageCount
+            }
+        }
+
+        # A collection envelope attributes every aggregated row to one context, so
+        # every successful page of a Verified operation must independently carry
+        # the transport's exact tenant proof. Checking only the final page could
+        # relabel rows from an earlier unverified or wrong-tenant page. Validate
+        # before retaining any row, then carry the final validated provenance onto
+        # the aggregate instead of discarding it.
+        $pageProvenance = $pageResult.Provenance
+        if ([string] $Descriptor.IdentityRequirement -ceq 'Verified') {
+            $contextTenant = [guid]::Empty
+            $pageTenant = [guid]::Empty
+            $actualTenant = [guid]::Empty
+            $contextTenantParsed = [guid]::TryParse([string] $Context.TenantId, [ref] $contextTenant)
+            $pageTenantParsed = $null -ne $pageProvenance -and
+                [guid]::TryParse([string] $pageProvenance.TenantId, [ref] $pageTenant)
+            $actualTenantParsed = $null -ne $pageProvenance -and
+                [guid]::TryParse([string] $pageProvenance.ActualTenantId, [ref] $actualTenant)
+            $identityVerified = $null -ne $pageProvenance -and
+                ([string] $pageProvenance.IdentityState -ceq 'VerifiedForToken')
+            $tokenFingerprint = if ($null -ne $pageProvenance) { [string] $pageProvenance.TokenFingerprint } else { $null }
+            $credentialGeneration = if ($null -ne $pageProvenance) { [string] $pageProvenance.CredentialGeneration } else { $null }
+            $pageCloud = if ($null -ne $pageProvenance) { [string] $pageProvenance.Cloud } else { $null }
+            $cloudMatches = [string]::Equals(
+                $pageCloud,
+                [string] $Context.Cloud,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+            $tokenIdentityComplete =
+                -not [string]::IsNullOrWhiteSpace($tokenFingerprint) -and
+                -not [string]::IsNullOrWhiteSpace($credentialGeneration)
+            $tokenIdentityMatches = $true
+            if ($null -ne $verifiedTokenIdentity) {
+                $tokenIdentityMatches =
+                    [string]::Equals($tokenFingerprint, [string] $verifiedTokenIdentity.TokenFingerprint, [System.StringComparison]::Ordinal) -and
+                    [string]::Equals($credentialGeneration, [string] $verifiedTokenIdentity.CredentialGeneration, [System.StringComparison]::Ordinal) -and
+                    [string]::Equals($pageCloud, [string] $verifiedTokenIdentity.Cloud, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+
+            if (-not $contextTenantParsed -or $contextTenant -eq [guid]::Empty -or
+                -not $pageTenantParsed -or -not $actualTenantParsed -or
+                -not $identityVerified -or
+                $pageTenant -ne $contextTenant -or $actualTenant -ne $contextTenant -or
+                -not $cloudMatches -or -not $tokenIdentityComplete -or -not $tokenIdentityMatches) {
+                throw [System.InvalidOperationException]::new(
+                    'A successful page of a Verified operation did not carry exact VerifiedForToken tenant provenance or exact-token provenance.'
+                )
+            }
+
+            if ($null -eq $verifiedTokenIdentity) {
+                $verifiedTokenIdentity = [pscustomobject] @{
+                    TokenFingerprint     = $tokenFingerprint
+                    CredentialGeneration = $credentialGeneration
+                    Cloud                = $pageCloud
+                }
+            }
+            $aggregateProvenance = $pageProvenance
         }
 
         # Collect rows from this page. Data is the parsed response body; for collections it is a
@@ -176,6 +338,6 @@ function Invoke-GraphPaging {
         Truncated  = $truncated
         PageCount  = $pageCount
         Telemetry  = @($allTelemetry)
-        Provenance = $null
+        Provenance = $aggregateProvenance
     }
 }

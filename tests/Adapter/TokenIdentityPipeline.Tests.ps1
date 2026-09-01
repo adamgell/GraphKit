@@ -129,7 +129,8 @@ BeforeAll {
     function New-TokenPipelineContext {
         param(
             [uri] $Authority,
-            [object] $TokenSource
+            [object] $TokenSource,
+            [guid] $ClientId = [guid] '00000000-0000-0000-0000-000000000010'
         )
 
         return [pscustomobject] @{
@@ -137,7 +138,7 @@ BeforeAll {
             TenantId              = $script:TenantId
             Cloud                 = 'Global'
             GraphBaseUri          = $Authority
-            ClientId              = 'client-id'
+            ClientId              = $ClientId
             TokenSource           = $TokenSource
             CredentialFingerprint = 'credential-fingerprint'
             AcquisitionCacheKey   = 'token-identity-acquisition-key'
@@ -148,10 +149,11 @@ BeforeAll {
     function New-TokenPipelineDescriptor {
         param(
             [string] $ReplayPolicy = 'Safe',
-            [string] $ThrottleClass = 'Read'
+            [string] $ThrottleClass = 'Read',
+            [string] $IdentityRequirement
         )
 
-        return @{
+        $descriptor = @{
             CredentialPolicy = 'GraphBearer'
             ReplayPolicy     = $ReplayPolicy
             ThrottleClass    = $ThrottleClass
@@ -160,6 +162,12 @@ BeforeAll {
             Condition        = $null
             Reconciliation   = $null
         }
+
+        if ($PSBoundParameters.ContainsKey('IdentityRequirement')) {
+            $descriptor.IdentityRequirement = $IdentityRequirement
+        }
+
+        return $descriptor
     }
 }
 
@@ -204,6 +212,198 @@ Describe 'Composed retry and sender token identity' {
         $tokenSource.AcquireFlags.Count | Should -Be 1
         $captured.Count | Should -Be 1
         $captured[0].Authorization | Should -Be 'Bearer token-1'
+    }
+
+    It 'proves a descriptor-verified GET even when the provider claims the tenant without a cache record' {
+        $port = Get-TokenPipelineFreePort
+        $server = Start-TokenPipelineServer -Port $port -Responses @(
+            @{ StatusCode = 200; Body = '{"value":[]}' }
+        )
+        $authority = [uri] "http://127.0.0.1:$port"
+        $tokenSource = New-RotatingTokenSource -ClaimedTenantId $script:TenantId.ToString()
+        $script:verifiedGetProofCalls = 0
+        $script:verifiedGetProofToken = $null
+        $script:verifiedGetProofScope = $null
+        $script:verifiedGetProofRemaining = [TimeSpan]::Zero
+
+        Mock Confirm-GraphTenantBinding -ModuleName GraphKit {
+            param($Context, $TokenResult, $CancellationToken, $RemainingDeadline)
+
+            $script:verifiedGetProofCalls++
+            $script:verifiedGetProofToken = [string] $TokenResult.AccessToken
+            $script:verifiedGetProofRemaining = [TimeSpan] $RemainingDeadline
+            $script:verifiedGetProofScope = & (Get-Module GraphKit) {
+                param($ProofContext, $ProofTokenResult)
+                $scope = New-GraphThrottleScope -Context $ProofContext -Descriptor @{
+                    ThrottleClass  = 'Read'
+                    ResourceFamily = 'Graph.Directory'
+                }
+                $cacheKey = Get-GraphTenantBindingKey `
+                    -Fingerprint ([string] $ProofTokenResult.TokenFingerprint) `
+                    -Generation ([string] $ProofTokenResult.CredentialGeneration) `
+                    -TenantId $ProofContext.TenantId
+                $script:GraphTenantBindingCache[$cacheKey] = $true
+                return $scope
+            } $Context $TokenResult
+            $TokenResult.VerifiedTenantId = [string] $Context.TenantId
+        }
+
+        $result = InModuleScope GraphKit -ArgumentList `
+            (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), `
+            (New-TokenPipelineDescriptor -IdentityRequirement Verified), $authority {
+            param($Context, $Descriptor, $Authority)
+            Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri ([uri]::new($Authority, 'resource')) `
+                -Method GET -Headers @{} -Body $null -DeadlineSeconds 17 `
+                -CancellationToken ([System.Threading.CancellationToken]::None)
+        }
+
+        $captured = Stop-TokenPipelineServer $server
+        $result.Outcome | Should -Be 'Succeeded'
+        $result.Provenance.IdentityState | Should -BeExactly 'VerifiedForToken'
+        $result.Provenance.TenantId | Should -Be $script:TenantId
+        $result.Provenance.ActualTenantId | Should -Be $script:TenantId
+        $result.Provenance.TokenFingerprint | Should -BeExactly 'fingerprint-1'
+        $result.Provenance.CredentialGeneration | Should -BeExactly 'generation-1'
+        $result.Provenance.Cloud | Should -BeExactly 'Global'
+        $result.Provenance.Keys | Should -Not -Contain 'ClientId'
+        $result.Provenance.Keys | Should -Not -Contain 'ClientScopeFingerprint'
+        $script:verifiedGetProofCalls | Should -Be 1
+        $script:verifiedGetProofToken | Should -BeExactly 'token-1'
+        $script:verifiedGetProofRemaining | Should -BeGreaterThan ([TimeSpan]::Zero)
+        $script:verifiedGetProofRemaining | Should -BeLessOrEqual ([TimeSpan]::FromSeconds(17))
+        $script:verifiedGetProofScope.CoarseKey | Should -BeExactly 'Global|00000000-0000-0000-0000-000000000001|00000000-0000-0000-0000-000000000010|Read'
+        $script:verifiedGetProofScope.LeafKey | Should -BeExactly 'Global|00000000-0000-0000-0000-000000000001|00000000-0000-0000-0000-000000000010|Read|Graph.Directory'
+        $captured | Should -HaveCount 1
+        $captured[0].Path | Should -Be '/resource'
+        $captured[0].Authorization | Should -BeExactly 'Bearer token-1'
+    }
+
+    It 'returns DeadlineExpired and releases admission before acquisition when the inherited proof budget is exhausted' {
+        $port = Get-TokenPipelineFreePort
+        $authority = [uri] "http://127.0.0.1:$port"
+        $tokenSource = New-RotatingTokenSource
+        $script:deadlineProofEntered = 0
+        $script:deadlineProofSawCancellation = $false
+        $script:deadlineOuterBudget = [TimeSpan]::Zero
+
+        Mock Confirm-GraphTenantBinding -ModuleName GraphKit {
+            param($Context, $TokenResult, [System.Threading.CancellationToken] $CancellationToken, $RemainingDeadline)
+            $script:deadlineProofEntered++
+            $script:deadlineProofSawCancellation = $CancellationToken.IsCancellationRequested
+            $CancellationToken.ThrowIfCancellationRequested()
+        }
+
+        $capture = InModuleScope GraphKit -ArgumentList `
+            (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), `
+            (New-TokenPipelineDescriptor -IdentityRequirement Verified), $authority {
+            param($Context, $Descriptor, $Authority)
+
+            $script:deadlineClock = [datetime] '2026-09-01T12:00:00Z'
+            $send = {
+                param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy,
+                      $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority,
+                      $TargetTenantId, $VerifyTenantBinding, $TenantBindingContext)
+
+                # The outer retry supplied both monotonic remaining time and its
+                # injected clock deadline. Move that clock to the exact deadline
+                # without sleeping; the sender must deduct it before proof.
+                $script:deadlineOuterBudget = [TimeSpan] $TenantBindingContext.RemainingDeadline
+                $script:deadlineClock = $script:deadlineClock.AddSeconds(5)
+                Send-GraphHttpRequest -Uri $Uri -Method $Method -Headers $Headers -Body $Body `
+                    -CancellationToken $CancellationToken -CredentialPolicy $CredentialPolicy `
+                    -TokenSource $TokenSource -ForceRefresh:$ForceRefresh `
+                    -TokenAcquisitionKey $TokenAcquisitionKey -ExpectedAuthority $ExpectedAuthority `
+                    -TargetTenantId $TargetTenantId -VerifyTenantBinding:$VerifyTenantBinding `
+                    -TenantBindingContext $TenantBindingContext
+            }
+
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $result = Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                -Uri ([uri]::new($Authority, 'resource')) -Method GET -Headers @{} -Body $null `
+                -DeadlineSeconds 5 -CancellationToken ([System.Threading.CancellationToken]::None) `
+                -Injections @{
+                    Send   = $send
+                    UtcNow = { $script:deadlineClock }
+                    Delay  = { param($Seconds) }
+                    Jitter = { 0.0 }
+                }
+            [pscustomobject] @{
+                Result   = $result
+                InFlight = (Get-GraphThrottleCoordinator).GetInFlight([string] $scope.LeafKey)
+            }
+        }
+
+        $capture.Result.Outcome | Should -BeExactly 'DeadlineExpired'
+        $capture.Result.Certainty | Should -BeExactly 'Indeterminate'
+        $capture.InFlight | Should -Be 0
+        $script:deadlineOuterBudget | Should -BeGreaterThan ([TimeSpan]::Zero)
+        $script:deadlineOuterBudget | Should -BeLessOrEqual ([TimeSpan]::FromSeconds(5))
+        $script:deadlineProofEntered | Should -Be 0
+        $script:deadlineProofSawCancellation | Should -BeFalse
+        $tokenSource.AcquireFlags | Should -HaveCount 0
+    }
+
+    It 'returns Cancelled and releases admission when a descriptor-verified GET is cancelled during proof' {
+        $port = Get-TokenPipelineFreePort
+        $authority = [uri] "http://127.0.0.1:$port"
+        $cts = [System.Threading.CancellationTokenSource]::new()
+        $tokenSource = New-RotatingTokenSource
+        $tokenSource | Add-Member -MemberType NoteProperty -Name CancellationSource -Value $cts
+        $script:cancelledVerifiedGetClock = [datetime] '2026-09-01T12:00:00Z'
+        $tokenSource | Add-Member -MemberType ScriptMethod -Name Acquire -Force -Value {
+            param([bool] $forceRefresh, $cancellationToken)
+
+            $this.AcquireFlags.Add($forceRefresh)
+            $this.CancellationSource.Cancel()
+            $script:cancelledVerifiedGetClock = $script:cancelledVerifiedGetClock.AddSeconds(5)
+            return [pscustomobject] @{
+                AccessToken           = 'cancelled-verified-get-token'
+                ExpiresOnUtc          = [System.DateTimeOffset]::UtcNow.AddHours(1)
+                ReceivedOnUtc         = [System.DateTimeOffset]::UtcNow
+                TokenType             = 'Bearer'
+                Scopes                = @('https://graph.microsoft.com/.default')
+                VerifiedTenantId      = $null
+                TokenFingerprint      = 'cancelled-verified-get-fingerprint'
+                CredentialGeneration = $this.CredentialGeneration
+            }
+        }
+        $script:cancelledVerifiedGetProofCalls = 0
+
+        Mock Confirm-GraphTenantBinding -ModuleName GraphKit {
+            param($Context, $TokenResult, [System.Threading.CancellationToken] $CancellationToken)
+            $script:cancelledVerifiedGetProofCalls++
+            $CancellationToken.ThrowIfCancellationRequested()
+        }
+
+        try {
+            $capture = InModuleScope GraphKit -ArgumentList `
+                (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), `
+                (New-TokenPipelineDescriptor -IdentityRequirement Verified), $authority, $cts.Token {
+                param($Context, $Descriptor, $Authority, $CancellationToken)
+
+                $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+                $result = Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                    -Uri ([uri]::new($Authority, 'resource')) -Method GET -Headers @{} -Body $null `
+                    -DeadlineSeconds 5 -CancellationToken $CancellationToken `
+                    -Injections @{
+                        UtcNow = { $script:cancelledVerifiedGetClock }
+                        Delay  = { param($Seconds) }
+                        Jitter = { 0.0 }
+                    }
+                [pscustomobject] @{
+                    Result   = $result
+                    InFlight = (Get-GraphThrottleCoordinator).GetInFlight([string] $scope.LeafKey)
+                }
+            }
+
+            $capture.Result.Outcome | Should -BeExactly 'Cancelled'
+            $capture.Result.Certainty | Should -BeExactly 'Indeterminate'
+            $capture.InFlight | Should -Be 0
+            $script:cancelledVerifiedGetProofCalls | Should -Be 1
+        }
+        finally {
+            $cts.Dispose()
+        }
     }
 
     It 'uses false then true acquisition flags across one 401 refresh' {
@@ -313,23 +513,18 @@ Describe 'Composed retry and sender token identity' {
         }
 
         try {
-            $message = InModuleScope GraphKit -ArgumentList (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), (New-TokenPipelineDescriptor -ReplayPolicy NeverReplay -ThrottleClass Write), $authority, $cts.Token {
+            $result = InModuleScope GraphKit -ArgumentList (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), (New-TokenPipelineDescriptor -ReplayPolicy NeverReplay -ThrottleClass Write), $authority, $cts.Token {
                 param($Context, $Descriptor, $Authority, $CancellationToken)
-                try {
-                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri ([uri]::new($Authority, 'mutation')) `
-                        -Method POST -Headers @{} -Body @{ value = 'x' } -CancellationToken $CancellationToken
-                    return ''
-                }
-                catch {
-                    return $_.Exception.Message
-                }
+                Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri ([uri]::new($Authority, 'mutation')) `
+                    -Method POST -Headers @{} -Body @{ value = 'x' } -CancellationToken $CancellationToken
             }
 
             $listener.Pending() | Should -BeFalse
             $tokenSource.AcquireFlags.Count | Should -Be 1
             $tokenSource.LastResult.VerifiedTenantId | Should -BeNullOrEmpty
             (InModuleScope GraphKit { $script:GraphTenantBindingCache.Count }) | Should -Be 0
-            $message | Should -BeLike '*Tenant proof failed*'
+            $result.Outcome | Should -BeExactly 'Cancelled'
+            $result.Certainty | Should -BeExactly 'Indeterminate'
         }
         finally {
             $listener.Stop()
@@ -364,5 +559,10 @@ Describe 'Composed retry and sender token identity' {
         $captured[1].Authorization | Should -Be 'Bearer token-1'
         $result.Provenance.ActualTenantId | Should -Be $script:TenantId
         $result.Provenance.IdentityState | Should -Be 'VerifiedForToken'
+        $result.Provenance.TokenFingerprint | Should -BeExactly 'fingerprint-1'
+        $result.Provenance.CredentialGeneration | Should -BeExactly 'generation-1'
+        $result.Provenance.Cloud | Should -BeExactly 'Global'
+        $result.Provenance.Keys | Should -Not -Contain 'ClientId'
+        $result.Provenance.Keys | Should -Not -Contain 'ClientScopeFingerprint'
     }
 }

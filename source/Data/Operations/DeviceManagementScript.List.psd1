@@ -55,7 +55,7 @@
 
     SensitiveProperties = @('scriptContent')
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'DeviceManagementScripts.Read.All' }
     )

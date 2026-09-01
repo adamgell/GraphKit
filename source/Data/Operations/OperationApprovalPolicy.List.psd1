@@ -41,7 +41,7 @@
     ResourceFamily      = 'Intune.ServiceConfig'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'DeviceManagementRBAC.Read.All' }
     )

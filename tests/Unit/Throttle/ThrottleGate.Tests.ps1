@@ -155,6 +155,379 @@ Describe 'Wait-GraphThrottleGate' {
             $coordinator.GetInFlight($scope.LeafKey) | Should -Be 1
         }
     }
+
+    It 'does not delay or acquire when cancellation is already requested before cooldown' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.ApplyCooldown($scope.CoarseKey, 60, $UtcNow)
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $cts.Cancel()
+            $delayCalls = 0
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                        -UtcNow $UtcNow -CancellationToken $cts.Token `
+                        -Delay { param($Milliseconds) $delayCalls++ }
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                $isCancellation = $false
+                $candidate = $failure
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.OperationCanceledException]) {
+                        $isCancellation = $true
+                        break
+                    }
+                    $candidate = $candidate.InnerException
+                }
+
+                [pscustomobject] @{
+                    IsCancellation = $isCancellation
+                    DelayCalls     = $delayCalls
+                    InFlight       = $coordinator.GetInFlight($scope.LeafKey)
+                }
+            }
+            finally {
+                $cts.Dispose()
+            }
+        }
+
+        $capture.IsCancellation | Should -BeTrue
+        $capture.DelayCalls | Should -Be 0
+        $capture.InFlight | Should -Be 0
+    }
+
+    It 'does not acquire a new slot when cancellation is raised by an admission poll' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($Context, $Descriptor)
+
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.SetMaxConcurrent($scope.LeafKey, 1)
+            $first = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                -Delay { param($Milliseconds) }
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $delayCalls = [System.Collections.Generic.List[long]]::new()
+            $delay = {
+                param($Milliseconds, $CancellationToken)
+                $delayCalls.Add([long] $Milliseconds)
+                $cts.Cancel()
+            }.GetNewClosure()
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                        -CancellationToken $cts.Token -Delay $delay
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                $isCancellation = $false
+                $candidate = $failure
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.OperationCanceledException]) {
+                        $isCancellation = $true
+                        break
+                    }
+                    $candidate = $candidate.InnerException
+                }
+
+                [pscustomobject] @{
+                    IsCancellation       = $isCancellation
+                    DelayCalls           = @($delayCalls)
+                    InFlightBeforeCleanup = $coordinator.GetInFlight($scope.LeafKey)
+                }
+            }
+            finally {
+                Complete-GraphThrottleGate -Admission $first
+                $cts.Dispose()
+            }
+        }
+
+        $capture.IsCancellation | Should -BeTrue
+        $capture.DelayCalls | Should -Be @(50)
+        $capture.InFlightBeforeCleanup | Should -Be 1 -Because 'only the original holder may remain admitted'
+    }
+
+    It 'clamps a cooldown to the inherited deadline and acquires no admission after expiry' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $clock = [pscustomobject] @{ Value = $UtcNow }
+            $utcNowScript = { $clock.Value }.GetNewClosure()
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.ApplyCooldown($scope.CoarseKey, 60, $UtcNow)
+            $delays = [System.Collections.Generic.List[long]]::new()
+            $delay = {
+                param([long] $Milliseconds, [System.Threading.CancellationToken] $CancellationToken)
+                $delays.Add($Milliseconds)
+                $clock.Value = $clock.Value.AddMilliseconds($Milliseconds)
+            }.GetNewClosure()
+
+            $failure = $null
+            try {
+                $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                    -UtcNow $UtcNow -UtcNowScript $utcNowScript `
+                    -DeadlineUtc $UtcNow.AddSeconds(5) `
+                    -RemainingDeadline ([TimeSpan]::FromSeconds(5)) -Delay $delay
+            }
+            catch {
+                $failure = $_.Exception
+            }
+
+            [pscustomobject] @{
+                Failure  = $failure
+                Delays   = @($delays)
+                InFlight = $coordinator.GetInFlight($scope.LeafKey)
+            }
+        }
+
+        $capture.Failure | Should -BeOfType [System.TimeoutException]
+        $capture.Failure.Data['GraphKit.OperationDeadlineExpired'] | Should -BeTrue
+        $capture.Delays | Should -HaveCount 1
+        $capture.Delays[0] | Should -BeGreaterThan 0
+        $capture.Delays[0] | Should -BeLessOrEqual 5000
+        $capture.InFlight | Should -Be 0
+    }
+
+    It 'clamps admission polling to the inherited deadline without leaking a slot' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $clock = [pscustomobject] @{ Value = $UtcNow }
+            $utcNowScript = { $clock.Value }.GetNewClosure()
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.SetMaxConcurrent($scope.LeafKey, 1)
+            $holder = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator -Delay { param($Milliseconds) }
+            $delays = [System.Collections.Generic.List[long]]::new()
+            $delay = {
+                param([long] $Milliseconds, [System.Threading.CancellationToken] $CancellationToken)
+                $delays.Add($Milliseconds)
+                $clock.Value = $clock.Value.AddMilliseconds($Milliseconds)
+            }.GetNewClosure()
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                        -UtcNow $UtcNow -UtcNowScript $utcNowScript `
+                        -DeadlineUtc $UtcNow.AddMilliseconds(75) `
+                        -RemainingDeadline ([TimeSpan]::FromMilliseconds(75)) -Delay $delay
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                [pscustomobject] @{
+                    Failure  = $failure
+                    Delays   = @($delays)
+                    InFlight = $coordinator.GetInFlight($scope.LeafKey)
+                }
+            }
+            finally {
+                Complete-GraphThrottleGate -Admission $holder
+            }
+        }
+
+        $capture.Failure | Should -BeOfType [System.TimeoutException]
+        $capture.Failure.Data['GraphKit.OperationDeadlineExpired'] | Should -BeTrue
+        $capture.Delays | Should -Be @(50, 25)
+        $capture.InFlight | Should -Be 1 -Because 'only the pre-existing holder may remain admitted'
+    }
+
+    It 'gives caller cancellation precedence at the exact cooldown deadline boundary' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $clock = [pscustomobject] @{ Value = $UtcNow }
+            $utcNowScript = { $clock.Value }.GetNewClosure()
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.ApplyCooldown($scope.CoarseKey, 60, $UtcNow)
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $delay = {
+                param([long] $Milliseconds, [System.Threading.CancellationToken] $CancellationToken)
+                $clock.Value = $clock.Value.AddMilliseconds($Milliseconds)
+                $cts.Cancel()
+            }.GetNewClosure()
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                        -UtcNow $UtcNow -UtcNowScript $utcNowScript `
+                        -DeadlineUtc $UtcNow.AddSeconds(5) `
+                        -RemainingDeadline ([TimeSpan]::FromSeconds(5)) `
+                        -CancellationToken $cts.Token -Delay $delay
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                [pscustomobject] @{
+                    Failure  = $failure
+                    InFlight = $coordinator.GetInFlight($scope.LeafKey)
+                }
+            }
+            finally {
+                $cts.Dispose()
+            }
+        }
+
+        $isCancellation = $false
+        $candidate = $capture.Failure
+        while ($null -ne $candidate) {
+            if ($candidate -is [System.OperationCanceledException]) {
+                $isCancellation = $true
+                break
+            }
+            $candidate = $candidate.InnerException
+        }
+        $isCancellation | Should -BeTrue
+        $capture.InFlight | Should -Be 0
+    }
+
+    It 'preserves the admission back-pressure timeout when it expires before the operation deadline' {
+        $capture = InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $clock = [pscustomobject] @{ Value = $UtcNow }
+            $utcNowScript = { $clock.Value }.GetNewClosure()
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.SetMaxConcurrent($scope.LeafKey, 1)
+            $holder = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator -Delay { param($Milliseconds) }
+            $delay = {
+                param([long] $Milliseconds, [System.Threading.CancellationToken] $CancellationToken)
+                $clock.Value = $clock.Value.AddMilliseconds($Milliseconds)
+            }.GetNewClosure()
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                        -UtcNow $UtcNow -UtcNowScript $utcNowScript `
+                        -DeadlineUtc $UtcNow.AddSeconds(5) `
+                        -RemainingDeadline ([TimeSpan]::FromSeconds(5)) `
+                        -AdmissionTimeoutSeconds 1 -Delay $delay
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                [pscustomobject] @{
+                    Failure  = $failure
+                    InFlight = $coordinator.GetInFlight($scope.LeafKey)
+                }
+            }
+            finally {
+                Complete-GraphThrottleGate -Admission $holder
+            }
+        }
+
+        $capture.Failure | Should -Not -BeNullOrEmpty
+        $capture.Failure.Message | Should -BeLike '*Throttle admission timed out after 1s*back-pressure*'
+        $capture.Failure.Data['GraphKit.OperationDeadlineExpired'] | Should -Not -BeTrue
+        $capture.InFlight | Should -Be 1 -Because 'only the pre-existing holder may remain admitted'
+    }
+
+    It 'gives caller cancellation precedence when the final admission attempt reaches the back-pressure timeout' {
+        $capture = InModuleScope GraphKit {
+            $cts = [System.Threading.CancellationTokenSource]::new()
+            $coordinator = [pscustomobject] @{
+                Attempts = 0
+                Releases = 0
+                Cts      = $cts
+            }
+            $coordinator | Add-Member -MemberType ScriptMethod -Name GetWaitMilliseconds -Value {
+                param($Key, $UtcNow)
+                return 0L
+            }
+            $coordinator | Add-Member -MemberType ScriptMethod -Name TryAcquireAdmission -Value {
+                param($Key)
+                $this.Attempts++
+                if ($this.Attempts -eq 21) {
+                    $this.Cts.Cancel()
+                }
+                return $false
+            }
+            $coordinator | Add-Member -MemberType ScriptMethod -Name ReleaseAdmission -Value {
+                param($Key, $Success)
+                $this.Releases++
+            }
+
+            try {
+                $failure = $null
+                try {
+                    $null = Wait-GraphThrottleGate -Scope @{ CoarseKey = 'coarse'; LeafKey = 'leaf' } `
+                        -Coordinator $coordinator -CancellationToken $cts.Token `
+                        -AdmissionTimeoutSeconds 1 -Delay { param($Milliseconds, $CancellationToken) }
+                }
+                catch {
+                    $failure = $_.Exception
+                }
+
+                $isCancellation = $false
+                $candidate = $failure
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.OperationCanceledException]) {
+                        $isCancellation = $true
+                        break
+                    }
+                    $candidate = $candidate.InnerException
+                }
+
+                [pscustomobject] @{
+                    Failure        = $failure
+                    IsCancellation = $isCancellation
+                    Attempts       = $coordinator.Attempts
+                    Releases       = $coordinator.Releases
+                }
+            }
+            finally {
+                $cts.Dispose()
+            }
+        }
+
+        $capture.IsCancellation | Should -BeTrue
+        $capture.Failure.Message | Should -Not -BeLike '*back-pressure*'
+        $capture.Attempts | Should -Be 21
+        $capture.Releases | Should -Be 0 -Because 'no slot was acquired in the cancellation race'
+    }
 }
 
 Describe 'Complete-GraphThrottleGate' {

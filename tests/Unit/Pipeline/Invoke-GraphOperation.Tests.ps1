@@ -16,6 +16,7 @@ BeforeAll {
         ProfileId     = 'ivy24'
         TenantId      = [guid] '00000000-0000-0000-0000-000000000001'
         IdentityState = 'VerifiedForToken'
+        TokenSource   = [PSCustomObject]@{ AuthMode = 'Certificate' }
     }
 
     function New-FakeEnvelope {
@@ -44,6 +45,7 @@ Describe 'Invoke-GraphOperation' {
                     Type = 'Thing'; Operation = 'Read'; Stability = 'BetaPreferred'
                     BetaReason = 'v1.0 missing a field'; ApiVersion = 'beta'
                     ResourceFamily = 'F'; CredentialPolicy = 'GraphBearer'; AllowedHosts = @()
+                    SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
                 }
             }
             Mock Resolve-GraphUri -ModuleName GraphKit { return [uri] 'https://graph.microsoft.com/beta/thing' }
@@ -62,6 +64,7 @@ Describe 'Invoke-GraphOperation' {
                     Type = 'Thing'; Operation = 'Read'; Stability = 'Stable'
                     ApiVersion = 'v1.0'; ResourceFamily = 'F'
                     CredentialPolicy = 'GraphBearer'; AllowedHosts = @()
+                    SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
                 }
             }
             Mock Resolve-GraphUri -ModuleName GraphKit { return [uri] 'https://graph.microsoft.com/v1.0/thing' }
@@ -93,6 +96,105 @@ Describe 'Invoke-GraphOperation' {
         }
     }
 
+    Context 'Descriptor auth-mode policy' {
+        It 'rejects an unsupported context auth mode before URI resolution or handler execution' {
+            $context = [PSCustomObject]@{}
+            foreach ($property in $script:Context.PSObject.Properties) {
+                $context | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+            $context.TokenSource = [PSCustomObject]@{ AuthMode = 'BearerToken' }
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                return @{
+                    Type = 'Thing'; Operation = 'Read'; Stability = 'Stable'
+                    ApiVersion = 'v1.0'; ResourceFamily = 'F'
+                    CredentialPolicy = 'GraphBearer'; AllowedHosts = @()
+                    SupportedAuthModes = @('Certificate')
+                }
+            }
+            Mock Resolve-GraphUri -ModuleName GraphKit { throw 'URI resolution must not run' }
+            Mock Invoke-GraphHandlerStrategy -ModuleName GraphKit { throw 'handler must not run' }
+
+            {
+                Invoke-GraphOperation -Context $context -Type Thing -Operation Read
+            } | Should -Throw -ExpectedMessage "*does not support auth mode 'BearerToken'*"
+
+            Should-NotInvoke Resolve-GraphUri -ModuleName GraphKit
+            Should-NotInvoke Invoke-GraphHandlerStrategy -ModuleName GraphKit
+        }
+
+        It 'does not apply descriptor auth-mode policy to a raw request' {
+            Mock Invoke-GraphRetry -ModuleName GraphKit { return (New-FakeEnvelope) }
+
+            $result = Invoke-GraphOperation -Context $script:Context -Uri 'https://graph.microsoft.com/v1.0/me' -Method GET
+
+            $result.Outcome | Should -Be 'Succeeded'
+            Should-Invoke Invoke-GraphRetry -ModuleName GraphKit -Times 1 -Exactly
+        }
+    }
+
+    Context 'Collection paging deadline composition' {
+        It 'forwards the pager inherited remaining deadline through Collection.Default into retry' {
+            $script:retryDeadlineSeconds = $null
+            $script:retryBoundParameters = $null
+            $script:transportParameterNames = $null
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                return @{
+                    Type                  = 'Thing'
+                    Operation             = 'List'
+                    OperationKind         = 'Collection'
+                    HandlerStrategyId     = 'Collection.Default'
+                    Method                = 'GET'
+                    PathTemplate          = '/things'
+                    PagingStrategy        = 'NextLink'
+                    DeduplicationKey      = 'id'
+                    RequiredPagingHeaders = @()
+                    AdvancedQuery         = @{ Supported = $false }
+                    Concurrency           = @{ Mode = 'None'; Header = $null; Required = $false; AllowWildcard = $false }
+                    ReplayPolicy          = 'Safe'
+                    ResponseKind          = 'Json'
+                    Stability             = 'Stable'
+                    ApiVersion            = 'v1.0'
+                    ResourceFamily        = 'F'
+                    CredentialPolicy      = 'GraphBearer'
+                    AllowedHosts          = @()
+                    SupportedAuthModes    = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
+                }
+            }
+            Mock Resolve-GraphUri -ModuleName GraphKit {
+                return [uri] 'https://graph.microsoft.com/v1.0/things'
+            }
+            Mock Invoke-GraphRetry -ModuleName GraphKit {
+                param($DeadlineSeconds)
+                $script:retryBoundParameters = @{} + $PSBoundParameters
+                $script:retryDeadlineSeconds = [double] $DeadlineSeconds
+                return (New-FakeEnvelope)
+            }
+            Mock Invoke-GraphPaging -ModuleName GraphKit {
+                param($Context, $Descriptor, $FirstPageUri, $RequestFactoryScript, $TransportScript)
+                $script:transportParameterNames = @(
+                    $TransportScript.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+                )
+                & $TransportScript $FirstPageUri 'GET' @{} $null `
+                    ([System.Threading.CancellationToken]::None) 17.25
+            }
+
+            $result = InModuleScope GraphKit -ArgumentList $script:Context {
+                param($Context)
+                Invoke-GraphOperation -Context $Context -Type Thing -Operation List
+            }
+
+            $result.Outcome | Should -BeExactly 'Succeeded'
+            $script:transportParameterNames | Should -Contain 'DeadlineSeconds'
+            $script:retryBoundParameters.Keys | Should -Contain 'DeadlineSeconds'
+            $script:retryDeadlineSeconds | Should -Be 17.25
+            Should-Invoke Invoke-GraphRetry -ModuleName GraphKit -Times 1 -Exactly -ParameterFilter {
+                [double] $DeadlineSeconds -eq 17.25
+            }
+        }
+    }
+
     Context 'Provenance stamping' {
         It 'stamps provenance onto the returned envelope' {
             Mock Get-GraphOperation -ModuleName GraphKit {
@@ -100,6 +202,7 @@ Describe 'Invoke-GraphOperation' {
                     Type = 'Thing'; Operation = 'Read'; Stability = 'Stable'
                     ApiVersion = 'v1.0'; ResourceFamily = 'F'
                     CredentialPolicy = 'GraphBearer'; AllowedHosts = @()
+                    SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
                 }
             }
             Mock Resolve-GraphUri -ModuleName GraphKit { return [uri] 'https://graph.microsoft.com/v1.0/thing' }
