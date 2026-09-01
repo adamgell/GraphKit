@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 
 namespace GraphKit.Auth;
@@ -17,6 +18,8 @@ public sealed class GraphAuthHost : IDisposable
     private const int Finalized = 3;
     private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan MaximumShutdownTimeout = TimeSpan.FromMinutes(2);
+    private static readonly ConditionalWeakTable<object, object> ConsumedOwnedMaterials = new();
+    private static readonly object ConsumedMaterialMarker = new();
 
     private readonly object _gate = new();
     private readonly HashSet<GraphTokenSourceProxy> _sources = [];
@@ -108,52 +111,107 @@ public sealed class GraphAuthHost : IDisposable
     public IGraphTokenSource CreateSource(GraphTokenRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        lock (_gate)
+
+        IDisposable? acceptedMaterial = GetOwnedMaterial(request.Credential);
+        if (acceptedMaterial is not null)
         {
-            ThrowIfStopping();
-            IGraphTokenSourceFactory factory = _factory ??
-                throw new ObjectDisposedException(nameof(GraphAuthHost));
-            IGraphTokenSource? source;
             try
             {
-                source = factory.Create(request);
+                ConsumedOwnedMaterials.Add(acceptedMaterial, ConsumedMaterialMarker);
             }
-            catch (Exception exception)
+            catch (ArgumentException)
             {
-                throw ProviderBoundaryFailure.Recreate(
-                    exception,
-                    CancellationToken.None,
-                    "provider_construction_failed",
-                    "Provider");
+                throw new GraphAuthException(
+                    "credential_material_consumed",
+                    "CredentialOwnership",
+                    "The owned credential material has already been transferred to an authentication source.",
+                    retryAfter: null,
+                    correlationId: null);
             }
+        }
 
-            if (source is null)
+        bool providerFactoryInvoked = false;
+        try
+        {
+            lock (_gate)
             {
-                throw new InvalidOperationException(
-                    "The GraphKit.Auth provider factory returned a null token source.");
-            }
-
-            try
-            {
-                ValidateProviderSource(source);
-                GraphTokenSourceProxy proxy = new(this, source);
-                _sources.Add(proxy);
-                return proxy;
-            }
-            catch
-            {
+                ThrowIfStopping();
+                IGraphTokenSourceFactory factory = _factory ??
+                    throw new ObjectDisposedException(nameof(GraphAuthHost));
+                IGraphTokenSource? source;
                 try
                 {
-                    source.Dispose();
+                    providerFactoryInvoked = true;
+                    source = factory.Create(request);
+                }
+                catch (Exception exception)
+                {
+                    throw ProviderBoundaryFailure.Recreate(
+                        exception,
+                        CancellationToken.None,
+                        "provider_construction_failed",
+                        "Provider");
+                }
+
+                if (source is null)
+                {
+                    throw new InvalidOperationException(
+                        "The GraphKit.Auth provider factory returned a null token source.");
+                }
+
+                try
+                {
+                    ValidateProviderSource(source);
+                    GraphTokenSourceProxy proxy = new(this, source);
+                    _sources.Add(proxy);
+                    return proxy;
                 }
                 catch
                 {
-                    throw CreateProviderDisposalFailure();
-                }
+                    try
+                    {
+                        source.Dispose();
+                    }
+                    catch
+                    {
+                        throw CreateProviderDisposalFailure();
+                    }
 
-                throw;
+                    throw;
+                }
             }
         }
+        catch
+        {
+            if (acceptedMaterial is not null && !providerFactoryInvoked)
+            {
+                try
+                {
+                    acceptedMaterial.Dispose();
+                }
+                catch
+                {
+                    throw new GraphAuthException(
+                        "credential_material_cleanup_failed",
+                        "CredentialOwnership",
+                        "GraphKit.Auth could not clean up credential material after source construction was rejected before provider entry.",
+                        retryAfter: null,
+                        correlationId: null);
+                }
+            }
+
+            throw;
+        }
+    }
+
+    private static IDisposable? GetOwnedMaterial(GraphCredential credential)
+    {
+        return credential switch
+        {
+            CertificateCredential { OwnsMaterial: true } certificate => certificate.Certificate,
+            ClientSecretCredential { OwnsMaterial: true } secret => secret.Secret,
+            _ => null
+        };
     }
 
     public void Dispose()

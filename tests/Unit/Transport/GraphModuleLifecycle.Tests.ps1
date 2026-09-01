@@ -516,7 +516,9 @@ Describe 'GraphKit module lifecycle' {
 
             $stateType = $state.PSObject.TypeNames[0]
             $onRemoveInstalled = $module.OnRemove -is [scriptblock]
-            $resourceRegistered = $state.OwnedResources.Count -eq 1
+            $resourceRegistered =
+                $state.OwnedResources.Count -ge 1 -and
+                [object]::ReferenceEquals($state.OwnedResources[$state.OwnedResources.Count - 1], $owned)
 
             $null = Remove-Module -ModuleInfo $module -Force -ErrorAction Stop
 
@@ -547,6 +549,66 @@ Describe 'GraphKit module lifecycle' {
             $result[0].CleanupComplete | Should -BeTrue
             $result[0].ResourceDisposed | Should -BeTrue
             $result[0].DisposeCount | Should -Be 1
+        }
+        finally {
+            $job | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'registers the compiled auth host before sources so module cleanup is source-first LIFO' {
+        $job = Start-ThreadJob -ScriptBlock {
+            param($Manifest)
+            $module = Import-Module $Manifest -Force -PassThru -ErrorAction Stop
+            $result = & $module {
+                $before = @($script:GraphKitModuleLifecycle.OwnedResources)
+                $source = New-GraphAuthTokenSource -Profile @{
+                    TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                    ClientId = $null
+                    AuthMethod = 'BearerToken'
+                    Environment = 'Global'
+                    Credential = @{ Token = 'module-lifecycle-fixed-bearer'; Version = 'fixture-v1' }
+                } -Cloud @{
+                    Name = 'Global'
+                    Authority = [uri]'https://login.microsoftonline.com'
+                    Resource = [uri]'https://graph.microsoft.com'
+                }
+                [pscustomobject]@{
+                    BeforeCount = $before.Count
+                    BeforeType = $before[0].GetType().FullName
+                    HostReferenceMatches = [object]::ReferenceEquals($before[0], $script:GraphKitAuthHost)
+                    ResourceTypes = @($script:GraphKitModuleLifecycle.OwnedResources | ForEach-Object { $_.GetType().FullName })
+                    Source = $source
+                }
+            }
+            $null = Remove-Module -ModuleInfo $module -Force -ErrorAction Stop
+            $rejected = $false
+            try {
+                $null = $result.Source.Acquire($false, [Threading.CancellationToken]::None)
+            }
+            catch [ObjectDisposedException] {
+                $rejected = $true
+            }
+            [pscustomobject]@{
+                BeforeCount = $result.BeforeCount
+                BeforeType = $result.BeforeType
+                HostReferenceMatches = $result.HostReferenceMatches
+                ResourceTypes = $result.ResourceTypes
+                SourceRejectedAfterRemoval = $rejected
+            }
+        } -ArgumentList $script:BuiltManifest
+
+        try {
+            $job | Wait-Job -Timeout 15 | Should -Not -BeNullOrEmpty
+            $result = @($job | Receive-Job -ErrorAction Stop)
+            $result.Count | Should -Be 1
+            $result[0].BeforeCount | Should -Be 1
+            $result[0].BeforeType | Should -BeExactly 'GraphKit.Auth.GraphAuthHost'
+            $result[0].HostReferenceMatches | Should -BeTrue
+            @($result[0].ResourceTypes) | Should -Be @(
+                'GraphKit.Auth.GraphAuthHost',
+                'GraphKit.Auth.GraphTokenSourceProxy'
+            )
+            $result[0].SourceRejectedAfterRemoval | Should -BeTrue
         }
         finally {
             $job | Remove-Job -Force -ErrorAction SilentlyContinue

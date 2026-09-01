@@ -30,8 +30,8 @@ function Register-GraphTenant {
         The canonical target tenant GUID. Must be a valid GUID.
 
     .PARAMETER ClientId
-        The application (client) GUID. May be omitted for a fixed bearer or a
-        system-assigned managed identity.
+        The application (client) GUID. Required for Certificate and ClientSecret.
+        It must not be supplied for ManagedIdentity or BearerToken.
 
     .PARAMETER Environment
         The Graph cloud: Global, China, Germany, USGov or USGovDoD.
@@ -107,8 +107,10 @@ function Register-GraphTenant {
         The certificate subject to look up in the Windows certificate store.
 
     .PARAMETER ManagedIdentityClientId
-        The user-assigned managed identity client GUID; omit for a
-        system-assigned managed identity.
+        Registration input persisted only as Credential.ClientId for a
+        user-assigned managed identity client GUID. For system-assigned identity, omit it.
+        It must not be supplied for any other
+        authentication mode.
 
     .PARAMETER StorePath
         Optional override for the profile store path. Defaults to
@@ -129,6 +131,7 @@ function Register-GraphTenant {
     .EXAMPLE
         Register-GraphTenant -ProfileId acme -Name Acme -Kind customer `
             -TenantId 3a4b5c6d-... -Environment Global -AuthMethod ClientSecret `
+            -ClientId 7d6e5f44-... `
             -VaultName GraphKit -SecretName acme-client-secret
 
     .EXAMPLE
@@ -137,7 +140,8 @@ function Register-GraphTenant {
 
     .EXAMPLE
         Register-GraphTenant -ProfileId contoso -Name 'Contoso' -Kind customer `
-            -TenantId 3a4b5c6d-... -AuthMethod Certificate -PfxPath ./contoso.pfx `
+            -TenantId 3a4b5c6d-... -AuthMethod Certificate `
+            -ClientId 7d6e5f44-... -PfxPath ./contoso.pfx `
             -PfxVaultName GraphKit -PfxSecretName contoso-pfx-password
     #>
     [CmdletBinding()]
@@ -230,13 +234,14 @@ function Register-GraphTenant {
     }
     $tenantIdString = $tenantGuid.ToString()
 
-    $clientIdString = $null
-    if (-not [string]::IsNullOrEmpty($ClientId)) {
-        $clientGuid = [guid]::Empty
-        if (-not [guid]::TryParse([string]$ClientId, [ref]$clientGuid)) {
-            throw "ClientId '$ClientId' is not a valid GUID."
-        }
-        $clientIdString = $clientGuid.ToString()
+    # Preserve the successor store's nullable top-level field for modes that do
+    # not use an application client id. An explicitly supplied blank string is
+    # still non-null metadata and the shared schema validator rejects it.
+    $clientIdString = if ($PSBoundParameters.ContainsKey('ClientId')) {
+        $ClientId
+    }
+    else {
+        $null
     }
 
     switch ($AuthMethod) {
@@ -296,7 +301,33 @@ function Register-GraphTenant {
             $credential = @{ VaultName = $VaultName; SecretName = $SecretName; Version = $SecretVersion }
         }
         'ManagedIdentity' {
-            $credential = @{ ClientId = $ManagedIdentityClientId }
+            $credential = @{}
+            if ($PSBoundParameters.ContainsKey('ManagedIdentityClientId')) {
+                $credential.ClientId = $ManagedIdentityClientId
+            }
+        }
+    }
+
+    if ($AuthMethod -ne 'ManagedIdentity' -and
+        $PSBoundParameters.ContainsKey('ManagedIdentityClientId')) {
+        # Registration accepts the public spelling only as input. Represent a
+        # contradictory use as alternate nested metadata so the one persisted-
+        # schema validator rejects it with the same matrix used everywhere else.
+        $credential.ManagedIdentityClientId = $ManagedIdentityClientId
+    }
+
+    $schema = Assert-GraphTenantProfileAuthSchema -Profile @{
+        AuthMethod = $AuthMethod
+        ClientId   = $clientIdString
+        Credential = $credential
+    }
+    $clientIdString = $schema.ApplicationClientId
+    if ($AuthMethod -eq 'ManagedIdentity') {
+        if ([string]::IsNullOrEmpty([string] $schema.ManagedIdentityClientId)) {
+            $null = $credential.Remove('ClientId')
+        }
+        else {
+            $credential.ClientId = $schema.ManagedIdentityClientId
         }
     }
 

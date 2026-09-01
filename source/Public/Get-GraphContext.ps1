@@ -6,8 +6,10 @@ function Get-GraphContext {
     .DESCRIPTION
         Resolves a persisted tenant profile (by its canonical ProfileId) into an
         immutable GraphKit.Context object that owns a per-context token source.
-        Resolution performs zero network calls and never acquires a token; the
-        context carries a 'NotAcquired' identity state until the first
+        Resolution performs zero token acquisitions and no Graph call. Persisted
+        certificate, client-secret and fixed-bearer modes perform the local
+        credential resolution needed to transfer material into the compiled
+        source. The context carries a 'NotAcquired' identity state until the first
         acquisition. A caller may inject an X509Certificate2 or a token-provider
         scriptblock for context-only use; injected material is never persisted.
 
@@ -29,9 +31,10 @@ function Get-GraphContext {
         only when a token is acquired.
 
     .PARAMETER MsalFactory
-        An optional scriptblock that returns a configured MSAL confidential
-        client application builder. Supplied for testability and by the
-        auth-resolution phase; it is invoked only when a token is acquired.
+        An optional same-runspace legacy compatibility factory. Supplying it
+        selects the legacy PowerShell source for every built-in mode, including
+        fixed bearer (where the scriptblock is not invoked). Omit it to use the
+        compiled runspace-neutral GraphKit.Auth source.
 
     .EXAMPLE
         $context = Get-GraphContext -ProfileId contoso
@@ -71,6 +74,29 @@ function Get-GraphContext {
         throw "No profile with ProfileId '$ProfileId' exists in the profile store at '$StorePath'."
     }
 
+    $schema = Assert-GraphTenantProfileAuthSchema -Profile $tenantProfile
+
+    if ([string] $tenantProfile.AuthMethod -eq 'ManagedIdentity') {
+        # Canonicalize once at the persisted-profile boundary. Every downstream
+        # generation, material/source, context, selector, and acquisition-key
+        # consumer receives this same clone in compiled and compatibility paths.
+        $canonicalProfile = $tenantProfile.Clone()
+        $canonicalCredential = if ($tenantProfile.Credential -is [hashtable]) {
+            $tenantProfile.Credential.Clone()
+        }
+        else {
+            @{}
+        }
+        if ([string]::IsNullOrEmpty([string] $schema.ManagedIdentityClientId)) {
+            $null = $canonicalCredential.Remove('ClientId')
+        }
+        else {
+            $canonicalCredential.ClientId = [string] $schema.ManagedIdentityClientId
+        }
+        $canonicalProfile.Credential = $canonicalCredential
+        $tenantProfile = $canonicalProfile
+    }
+
     $cloud = Get-GraphCloudMetadata -Name ([string]$tenantProfile.Environment)
 
     $identitySelector = ''
@@ -91,35 +117,24 @@ function Get-GraphContext {
             AuthMethod = 'Certificate'
             Credential = @{ Thumbprint = $Certificate.Thumbprint }
         }
-        $factory = $MsalFactory
-        if ($null -eq $factory) {
+        if ($null -eq $MsalFactory) {
+            $injectedProfile = $tenantProfile.Clone()
+            $injectedProfile.AuthMethod = 'Certificate'
+            $injectedProfile.Credential = @{ Thumbprint = $Certificate.Thumbprint }
+            $source = New-GraphAuthTokenSource -Profile $injectedProfile -Cloud $cloud `
+                -Certificate $Certificate
+        }
+        else {
             # An injected X509Certificate2 is context-only and never persisted, so the
             # resolver simply hands the certificate straight back.
-            $injected = $Certificate
-            $factory = New-GraphMsalApplicationFactory `
-                -Profile @{
-                    TenantId   = $tenantProfile.TenantId
-                    ClientId   = $tenantProfile.ClientId
-                    AuthMethod = 'Certificate'
-                    Credential = @{ Thumbprint = $Certificate.Thumbprint }
-                } `
-                -Cloud $cloud `
-                -ExpectedCredentialGeneration $generation `
-                -CredentialResolver {
-                    # The resolver contract takes a profile, but this implementation
-                    # ignores it: the certificate was supplied directly by the caller and
-                    # is never persisted, so there is nothing to look up.
-                    param($P)
-                    $null = $P
-                    [pscustomobject] @{
-                        AuthMethod           = 'Certificate'
-                        Material             = $injected
-                        OwnsMaterial         = $false
-                        CredentialGeneration = $generation
-                    }
-                }.GetNewClosure()
+            $factory = $MsalFactory
+            $source = [ConfidentialClientTokenSource]::new(
+                $factory,
+                'Certificate',
+                [string] $cloud.Resource,
+                [string] $schema.ApplicationClientId,
+                $generation)
         }
-        $source = [ConfidentialClientTokenSource]::new($factory, 'Certificate', [string]$cloud.Resource, $tenantProfile.ClientId, $generation)
         $authMode = 'Certificate'
     }
     else {
@@ -128,7 +143,7 @@ function Get-GraphContext {
         if ($authMode -eq 'ManagedIdentity') {
             $cred = $tenantProfile.Credential
             if ($null -ne $cred.ClientId -and $cred.ClientId -ne '') {
-                $identitySelector = [string]$cred.ClientId
+                $identitySelector = [string]$schema.ManagedIdentityClientId
             }
             else {
                 $identitySelector = 'system'
@@ -142,7 +157,7 @@ function Get-GraphContext {
         -TenantId ([string]$tenantProfile.TenantId) `
         -Authority ([string]$cloud.Authority) `
         -Resource ([string]$cloud.Resource) `
-        -ClientId $tenantProfile.ClientId `
+        -ClientId $schema.ApplicationClientId `
         -AuthMode $authMode `
         -IdentitySelector $identitySelector `
         -Generation $source.CredentialGeneration `
@@ -150,8 +165,17 @@ function Get-GraphContext {
 
     $tenantGuid = [guid] ([string]$tenantProfile.TenantId)
     $clientGuid = $null
-    if ($null -ne $tenantProfile.ClientId -and [string]$tenantProfile.ClientId -ne '') {
-        $clientGuid = [guid] ([string]$tenantProfile.ClientId)
+    $contextClientId = if ($authMode -eq 'ManagedIdentity') {
+        $schema.ManagedIdentityClientId
+    }
+    elseif ($authMode -eq 'BearerToken') {
+        $null
+    }
+    else {
+        $schema.ApplicationClientId
+    }
+    if (-not [string]::IsNullOrEmpty([string] $contextClientId)) {
+        $clientGuid = [guid] ([string]$contextClientId)
     }
 
     return [PSCustomObject]@{

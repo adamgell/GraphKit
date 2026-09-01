@@ -7,6 +7,90 @@ BeforeAll {
     }
     Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force -ErrorAction Stop
 
+    if ($null -eq ('GraphKit.Tests.CompiledAdoptionTokenSource' -as [type])) {
+        $fixtureRoot = Join-Path $TestDrive 'compiled-adoption-source'
+        $outputRoot = Join-Path $fixtureRoot 'out'
+        $null = New-Item -ItemType Directory -Path $fixtureRoot -Force
+        $contractsPath = [GraphKit.Auth.IGraphTokenSource].Assembly.Location
+        $escapedContractsPath = [Security.SecurityElement]::Escape($contractsPath)
+        Set-Content -LiteralPath (Join-Path $fixtureRoot 'Fixture.cs') -NoNewline -Encoding utf8NoBOM -Value @'
+using System;
+using System.Threading;
+using GraphKit.Auth;
+
+namespace GraphKit.Tests;
+
+public sealed class CompiledAdoptionTokenSource : IGraphTokenSource
+{
+    private readonly string _generation;
+    private int _adoptCount;
+
+    public CompiledAdoptionTokenSource(string generation) => _generation = generation;
+    public int AdoptCount => Volatile.Read(ref _adoptCount);
+    public bool CanRefresh => true;
+    public string AuthMode => "BearerToken";
+    public string Audience => "https://graph.microsoft.com";
+    public string? ClientId => null;
+    public DateTimeOffset ExpiresOn { get; private set; }
+    public string? VerifiedTenantId { get; private set; }
+    public string CredentialGeneration => _generation;
+
+    public GraphTokenResult Acquire(bool forceRefresh, CancellationToken cancellation)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        return new GraphTokenResult
+        {
+            AccessToken = "compiled-adoption-token",
+            ExpiresOnUtc = now.AddHours(1),
+            ReceivedOnUtc = now,
+            TokenType = "Bearer",
+            Scopes = new[] { "https://graph.microsoft.com/.default" },
+            TokenFingerprint = "compiled-fingerprint",
+            CredentialGeneration = _generation
+        };
+    }
+
+    public void AdoptSharedResult(GraphTokenResult result, bool forceRefresh)
+    {
+        if (!string.Equals(result.CredentialGeneration, _generation, StringComparison.Ordinal))
+            throw new InvalidOperationException("wrong generation");
+        Interlocked.Increment(ref _adoptCount);
+        ExpiresOn = result.ExpiresOnUtc;
+        VerifiedTenantId = result.VerifiedTenantId;
+    }
+
+    public void Dispose() { }
+}
+'@
+        Set-Content -LiteralPath (Join-Path $fixtureRoot 'Fixture.csproj') -NoNewline -Encoding utf8NoBOM -Value @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>GraphKit.Task6.SenderFixture</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="GraphKit.Auth.Contracts">
+      <HintPath>$escapedContractsPath</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
+"@
+        $compilerOutput = & dotnet build (Join-Path $fixtureRoot 'Fixture.csproj') `
+            -c Release -o $outputRoot --nologo --verbosity quiet 2>&1
+        $fixtureAssembly = Join-Path $outputRoot 'GraphKit.Task6.SenderFixture.dll'
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureAssembly -PathType Leaf)) {
+            throw "Task 6 compiled sender fixture did not compile: $($compilerOutput | Out-String)"
+        }
+        $null = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($fixtureAssembly)
+    }
+
     $script:VerifiedTenant = [guid] '00000000-0000-0000-0000-000000000001'
     $script:openServers = [System.Collections.Generic.List[object]]::new()
 
@@ -123,19 +207,20 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
     Context 'loopback server lifecycle' {
         AfterEach {
             foreach ($server in @($script:openServers)) {
-                if ($null -eq $server) { continue }
-                # Stop the listener first so a runspace still blocked in
-                # Listener.GetContext() fails fast instead of hanging EndInvoke().
-                if ($null -ne $server.Listener) {
-                    try { $server.Listener.Stop() } catch { }
-                    try { $server.Listener.Close() } catch { }
-                }
-                if ($null -ne $server.Ps -and $null -ne $server.Handle) {
-                    try { $null = $server.Ps.EndInvoke($server.Handle) } catch { }
-                }
-                if ($null -ne $server.Runspace) {
-                    try { $server.Runspace.Close() } catch { }
-                    try { $server.Runspace.Dispose() } catch { }
+                if ($null -ne $server) {
+                    # Stop the listener first so a runspace still blocked in
+                    # Listener.GetContext() fails fast instead of hanging EndInvoke().
+                    if ($null -ne $server.Listener) {
+                        try { $server.Listener.Stop() } catch { }
+                        try { $server.Listener.Close() } catch { }
+                    }
+                    if ($null -ne $server.Ps -and $null -ne $server.Handle) {
+                        try { $null = $server.Ps.EndInvoke($server.Handle) } catch { }
+                    }
+                    if ($null -ne $server.Runspace) {
+                        try { $server.Runspace.Close() } catch { }
+                        try { $server.Runspace.Dispose() } catch { }
+                    }
                 }
             }
             $script:openServers.Clear()
@@ -176,6 +261,64 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         $captured = Stop-GraphLoopback $server
         $captured['Authorization'] | Should -Be 'Bearer test-bearer-token'
         $r.StatusCode | Should -Be 204
+    }
+
+    It 'adopts a shared compiled result only through the exact compiled source/result branch' {
+        $port = Get-FreePort
+        $server = Start-GraphLoopback -Port $port -Handler {
+            param($Context, $Listener, $Captured)
+            $Context.Response.StatusCode = 200
+        }
+        $authority = [uri] "http://127.0.0.1:$port"
+        $source = [GraphKit.Tests.CompiledAdoptionTokenSource]::new('compiled-generation')
+
+        $result = InModuleScope GraphKit -ArgumentList $port, $authority, $source {
+            param($Port, $ExpectedAuthority, $TokenSource)
+            Send-GraphHttpRequest -Method GET -Uri ([uri] "http://127.0.0.1:$Port/compiled") `
+                -CredentialPolicy GraphBearer -ExpectedAuthority $ExpectedAuthority -TokenSource $TokenSource `
+                -TokenAcquisitionKey 'task6-compiled-adoption' -TimeoutConnectionSeconds 5 `
+                -TimeoutHeadersSeconds 5 -TimeoutBodySeconds 5
+        }
+        $captured = Stop-GraphLoopback -Server $server
+
+        $result.StatusCode | Should -Be 200
+        $captured.Authorization | Should -BeExactly 'Bearer compiled-adoption-token'
+        $source.AdoptCount | Should -Be 1
+    }
+
+    It 'does not duck-type compiled shared-result adoption onto an arbitrary source' {
+        $port = Get-FreePort
+        $server = Start-GraphLoopback -Port $port -Handler {
+            param($Context, $Listener, $Captured)
+            $Context.Response.StatusCode = 200
+        }
+        $authority = [uri] "http://127.0.0.1:$port"
+        $duck = [pscustomobject]@{ AdoptCount = 0 }
+        $duck | Add-Member -MemberType ScriptMethod -Name Acquire -Value {
+            param([bool]$forceRefresh, $cancellation)
+            $now = [datetimeoffset]::UtcNow
+            [GraphKit.Auth.GraphTokenResult]@{
+                AccessToken = 'duck-compiled-token'; ExpiresOnUtc = $now.AddHours(1); ReceivedOnUtc = $now
+                TokenType = 'Bearer'; Scopes = @('https://graph.microsoft.com/.default')
+                TokenFingerprint = 'duck-fingerprint'; CredentialGeneration = 'duck-generation'
+            }
+        }
+        $duck | Add-Member -MemberType ScriptMethod -Name AdoptSharedResult -Value {
+            param($result, [bool]$forceRefresh)
+            $this.AdoptCount++
+        }
+
+        $result = InModuleScope GraphKit -ArgumentList $port, $authority, $duck {
+            param($Port, $ExpectedAuthority, $TokenSource)
+            Send-GraphHttpRequest -Method GET -Uri ([uri] "http://127.0.0.1:$Port/duck") `
+                -CredentialPolicy GraphBearer -ExpectedAuthority $ExpectedAuthority -TokenSource $TokenSource `
+                -TokenAcquisitionKey 'task6-duck-adoption' -TimeoutConnectionSeconds 5 `
+                -TimeoutHeadersSeconds 5 -TimeoutBodySeconds 5
+        }
+        $null = Stop-GraphLoopback -Server $server
+
+        $result.StatusCode | Should -Be 200
+        $duck.AdoptCount | Should -Be 0
     }
 
     It 'GraphBearer refuses a foreign authority with a hard error' {

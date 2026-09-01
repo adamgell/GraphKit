@@ -221,6 +221,7 @@ $sourceType = $assembly.GetType('GraphKit.Auth.IGraphTokenSource', $true, $false
         Set-Content -LiteralPath $sourcePath -NoNewline -Encoding utf8NoBOM -Value @'
 using System;
 using System.IO;
+using System.Security;
 using System.Threading;
 using GraphKit.Auth;
 
@@ -242,11 +243,31 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
     public Uri FrameworkUri => new("https://graph.microsoft.com");
     public IGraphTokenSource Create(GraphTokenRequest request)
     {
+        string? factoryMarker = Environment.GetEnvironmentVariable(
+            "GRAPHKIT_AUTH_TEST_FACTORY_ENTRY_MARKER");
+        if (!string.IsNullOrEmpty(factoryMarker))
+        {
+            File.AppendAllText(factoryMarker, "entered" + Environment.NewLine);
+        }
+
         if (string.Equals(
                 Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE"),
                 "1",
                 StringComparison.Ordinal))
         {
+            IDisposable? ownedMaterial = request.Credential switch
+            {
+                CertificateCredential { OwnsMaterial: true } certificate => certificate.Certificate,
+                ClientSecretCredential { OwnsMaterial: true } secret => secret.Secret,
+                _ => null
+            };
+            ownedMaterial?.Dispose();
+            string? cleanupMarker = Environment.GetEnvironmentVariable(
+                "GRAPHKIT_AUTH_TEST_FACTORY_CLEANUP_MARKER");
+            if (!string.IsNullOrEmpty(cleanupMarker))
+            {
+                File.AppendAllText(cleanupMarker, "disposed" + Environment.NewLine);
+            }
             throw ProviderFailure.Create("source-construction");
         }
 
@@ -260,10 +281,20 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
     private static readonly ManualResetEventSlim BlockedAcquireEntered = new(false);
     private static readonly ManualResetEventSlim BlockedAcquireRelease = new(false);
     private readonly GraphTokenRequest _request;
+    private readonly IDisposable? _ownedMaterial;
     private readonly string? _disposeMarker = Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_MARKER");
     private int _disposed;
 
-    public FixtureTokenSource(GraphTokenRequest request) => _request = request;
+    public FixtureTokenSource(GraphTokenRequest request)
+    {
+        _request = request;
+        _ownedMaterial = request.Credential switch
+        {
+            CertificateCredential { OwnsMaterial: true } certificate => certificate.Certificate,
+            ClientSecretCredential { OwnsMaterial: true } secret => secret.Secret,
+            _ => null
+        };
+    }
 
     public bool CanRefresh => true;
     public string AuthMode => IsFailureMode("ReadGraph")
@@ -336,6 +367,8 @@ internal sealed class FixtureTokenSource : IGraphTokenSource
         {
             File.AppendAllText(_disposeMarker, "disposed" + Environment.NewLine);
         }
+
+        _ownedMaterial?.Dispose();
 
         if (string.Equals(
                 Environment.GetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_FAILURE"),
@@ -530,6 +563,9 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
+using System.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -538,6 +574,480 @@ using GraphKit.Auth;
 
 public static class GraphKitAuthRuntimeHarness
 {
+    public static string OwnershipLedgerProof(string payloadRoot, string markerRoot)
+    {
+        Directory.CreateDirectory(markerRoot);
+        var distinctHost = RunRace(payloadRoot, markerRoot, useCertificate: false, distinctHosts: true);
+        var sameHost = RunRace(payloadRoot, markerRoot, useCertificate: true, distinctHosts: false);
+        var reentrant = RunReentrant(payloadRoot);
+        var stopped = RunPreProviderRejection(payloadRoot, clearFactory: false);
+        var missingFactory = RunPreProviderRejection(payloadRoot, clearFactory: true);
+        var postProvider = RunPostProviderFailure(payloadRoot, markerRoot);
+        var sanitized = RunSanitizedCleanupFailure(payloadRoot);
+        var weakKeys = RunWeakKeyProof(payloadRoot);
+        return JsonSerializer.Serialize(new
+        {
+            DistinctHostSecretRace = distinctHost,
+            SameHostCertificateRace = sameHost,
+            ReentrantFactory = reentrant,
+            StoppedHost = stopped,
+            MissingFactory = missingFactory,
+            PostProviderFailure = postProvider,
+            SanitizedCleanupFailure = sanitized,
+            WeakKeys = weakKeys
+        });
+    }
+
+    private static object RunRace(
+        string payloadRoot,
+        string markerRoot,
+        bool useCertificate,
+        bool distinctHosts)
+    {
+        GraphAuthHost firstHost = NewHost(payloadRoot);
+        GraphAuthHost secondHost = distinctHosts ? NewHost(payloadRoot) : firstHost;
+        IDisposable material = useCertificate
+            ? new CountingOwnedCertificate(CreatePfxBytes())
+            : CreateSecret();
+        GraphTokenRequest firstRequest = NewOwnedRequest(material, useCertificate);
+        GraphTokenRequest secondRequest = NewOwnedRequest(material, useCertificate);
+        var barrier = new BarrierFactory(GetFactory(firstHost));
+        SetFactory(firstHost, barrier);
+        IGraphTokenSource? firstSource = null;
+        IGraphTokenSource? secondSource = null;
+        Exception? firstFailure = null;
+        Exception? secondFailure = null;
+        string disposeMarker = Path.Combine(
+            markerRoot,
+            $"race-{(useCertificate ? "certificate" : "secret")}-{(distinctHosts ? "distinct" : "same")}.txt");
+        Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_MARKER", disposeMarker);
+        try
+        {
+            Task first = Task.Run(() =>
+            {
+                try { firstSource = firstHost.CreateSource(firstRequest); }
+                catch (Exception exception) { firstFailure = exception; }
+            });
+            if (!barrier.Entered.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The winning provider factory did not enter its barrier.");
+            }
+
+            Task second = Task.Run(() =>
+            {
+                try { secondSource = secondHost.CreateSource(secondRequest); }
+                catch (Exception exception) { secondFailure = exception; }
+            });
+            if (!second.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The duplicate material claim did not finish before the winner was released.");
+            }
+
+            bool winnerUsableBeforeRelease = MaterialIsUsable(material);
+            barrier.Release.Set();
+            if (!first.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The winning material claim did not finish after release.");
+            }
+
+            int acceptedCount = (firstSource is null ? 0 : 1) + (secondSource is null ? 0 : 1);
+            int rejectedCount = (firstFailure is null ? 0 : 1) + (secondFailure is null ? 0 : 1);
+            Exception? rejection = firstFailure ?? secondFailure;
+            firstSource?.Dispose();
+            firstSource?.Dispose();
+            secondSource?.Dispose();
+            secondSource?.Dispose();
+            return new
+            {
+                DistinctRequests = !ReferenceEquals(firstRequest, secondRequest),
+                DistinctCredentials = !ReferenceEquals(firstRequest.Credential, secondRequest.Credential),
+                SharedMaterial = ReferenceEquals(GetOwnedMaterial(firstRequest), GetOwnedMaterial(secondRequest)),
+                AcceptedCount = acceptedCount,
+                RejectedCount = rejectedCount,
+                FactoryEntryCount = barrier.EntryCount,
+                RejectionType = rejection?.GetType().FullName,
+                RejectionCode = (rejection as GraphAuthException)?.Code,
+                RejectionCategory = (rejection as GraphAuthException)?.Category,
+                WinnerUsableBeforeRelease = winnerUsableBeforeRelease,
+                MaterialDisposedAfterWinner = !MaterialIsUsable(material),
+                MaterialDisposeCount = (material as CountingOwnedCertificate)?.DisposeCount,
+                WinnerDisposeCount = File.Exists(disposeMarker)
+                    ? File.ReadAllLines(disposeMarker).Length
+                    : 0
+            };
+        }
+        finally
+        {
+            barrier.Release.Set();
+            Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_DISPOSE_MARKER", null);
+            try { firstSource?.Dispose(); } catch { }
+            try { secondSource?.Dispose(); } catch { }
+            firstHost.Dispose();
+            if (distinctHosts) secondHost.Dispose();
+            ReleaseHarnessMaterial(material);
+        }
+    }
+
+    private static object RunReentrant(string payloadRoot)
+    {
+        using GraphAuthHost host = NewHost(payloadRoot);
+        SecureString material = CreateSecret();
+        GraphTokenRequest outer = NewOwnedRequest(material, useCertificate: false);
+        GraphTokenRequest nested = NewOwnedRequest(material, useCertificate: false);
+        var factory = new ReentrantFactory(GetFactory(host), host, nested);
+        SetFactory(host, factory);
+        using IGraphTokenSource source = host.CreateSource(outer);
+        return new
+        {
+            DistinctRequests = !ReferenceEquals(outer, nested),
+            DistinctCredentials = !ReferenceEquals(outer.Credential, nested.Credential),
+            SharedMaterial = ReferenceEquals(GetOwnedMaterial(outer), GetOwnedMaterial(nested)),
+            FactoryEntryCount = factory.EntryCount,
+            NestedFailureType = factory.NestedFailure?.GetType().FullName,
+            NestedFailureCode = (factory.NestedFailure as GraphAuthException)?.Code,
+            NestedFailureCategory = (factory.NestedFailure as GraphAuthException)?.Category,
+            MaterialUsableBeforeWinnerDisposal = MaterialIsUsable(material)
+        };
+    }
+
+    private static object RunPreProviderRejection(string payloadRoot, bool clearFactory)
+    {
+        GraphAuthHost rejectingHost = NewHost(payloadRoot);
+        CountingOwnedCertificate material = new(CreatePfxBytes());
+        GraphTokenRequest first = NewOwnedRequest(material, useCertificate: true);
+        GraphTokenRequest second = NewOwnedRequest(material, useCertificate: true);
+        if (clearFactory)
+        {
+            SetFactory(rejectingHost, null);
+        }
+        else
+        {
+            rejectingHost.Dispose();
+        }
+
+        Exception initial = CaptureOwnershipFailure(() => rejectingHost.CreateSource(first));
+        using GraphAuthHost retryHost = NewHost(payloadRoot);
+        var retryFactory = new CountingFactory(GetFactory(retryHost));
+        SetFactory(retryHost, retryFactory);
+        Exception repeated = CaptureOwnershipFailure(() => retryHost.CreateSource(second));
+        if (clearFactory) rejectingHost.Dispose();
+        return new
+        {
+            InitialFailureType = initial.GetType().FullName,
+            MaterialDisposed = !MaterialIsUsable(material),
+            MaterialDisposeCount = material.DisposeCount,
+            RepeatedFailureType = repeated.GetType().FullName,
+            RepeatedFailureCode = (repeated as GraphAuthException)?.Code,
+            RepeatedFailureCategory = (repeated as GraphAuthException)?.Category,
+            FactoryEntryCount = retryFactory.EntryCount
+        };
+    }
+
+    private static object RunPostProviderFailure(string payloadRoot, string markerRoot)
+    {
+        string entryMarker = Path.Combine(markerRoot, "post-provider-entry.txt");
+        string cleanupMarker = Path.Combine(markerRoot, "post-provider-cleanup.txt");
+        Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_ENTRY_MARKER", entryMarker);
+        Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_CLEANUP_MARKER", cleanupMarker);
+        Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE", "1");
+        CountingOwnedCertificate material = new(CreatePfxBytes());
+        GraphTokenRequest first = NewOwnedRequest(material, useCertificate: true);
+        GraphTokenRequest second = NewOwnedRequest(material, useCertificate: true);
+        try
+        {
+            using GraphAuthHost firstHost = NewHost(payloadRoot);
+            Exception initial = CaptureOwnershipFailure(() => firstHost.CreateSource(first));
+            using GraphAuthHost retryHost = NewHost(payloadRoot);
+            Exception repeated = CaptureOwnershipFailure(() => retryHost.CreateSource(second));
+            return new
+            {
+                InitialFailureType = initial.GetType().FullName,
+                InitialFailureCode = (initial as GraphAuthException)?.Code,
+                InitialFailureCategory = (initial as GraphAuthException)?.Category,
+                ContainsSensitiveDetail = DescribeFailure(initial).Contains(
+                    "isolated-provider-source-construction-sensitive-detail",
+                    StringComparison.Ordinal),
+                MaterialDisposed = !MaterialIsUsable(material),
+                MaterialDisposeCount = material.DisposeCount,
+                RepeatedFailureCode = (repeated as GraphAuthException)?.Code,
+                FactoryEntryCount = File.Exists(entryMarker)
+                    ? File.ReadAllLines(entryMarker).Length
+                    : 0,
+                ProviderCleanupCount = File.Exists(cleanupMarker)
+                    ? File.ReadAllLines(cleanupMarker).Length
+                    : 0
+            };
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_ENTRY_MARKER", null);
+            Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_CLEANUP_MARKER", null);
+            Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE", null);
+            material.DisposeWithoutCounting();
+        }
+    }
+
+    private static object RunSanitizedCleanupFailure(string payloadRoot)
+    {
+        GraphAuthHost stopped = NewHost(payloadRoot);
+        stopped.Dispose();
+        ThrowingOwnedCertificate material = new(CreatePfxBytes());
+        GraphTokenRequest request = NewOwnedRequest(material, useCertificate: true);
+        Exception failure = CaptureOwnershipFailure(() => stopped.CreateSource(request));
+        string failureText = DescribeFailure(failure);
+        var result = new
+        {
+            FailureType = failure.GetType().FullName,
+            FailureCode = (failure as GraphAuthException)?.Code,
+            FailureCategory = (failure as GraphAuthException)?.Category,
+            FailureMessage = failure.Message,
+            InnerExceptionIsNull = failure.InnerException is null,
+            DataCount = failure.Data.Count,
+            ContainsSensitiveDetail = failureText.Contains(
+                ThrowingOwnedCertificate.SensitiveDetail,
+                StringComparison.Ordinal),
+            ContainsRawCleanupType = failureText.Contains(
+                typeof(InvalidOperationException).FullName!,
+                StringComparison.Ordinal),
+            ContainsRawCleanupStack = failureText.Contains(
+                nameof(ThrowingOwnedCertificate),
+                StringComparison.Ordinal) || failureText.Contains(
+                "System.IDisposable.Dispose",
+                StringComparison.Ordinal),
+            DisposeCount = material.DisposeCount
+        };
+        ((X509Certificate2)material).Dispose();
+        return result;
+    }
+
+    private static object RunWeakKeyProof(string payloadRoot)
+    {
+        (WeakReference material, WeakReference credential, WeakReference request) =
+            CreateRejectedWeakReferences(payloadRoot);
+        ForceCollection(material);
+        ForceCollection(credential);
+        ForceCollection(request);
+        return new
+        {
+            MaterialAlive = material.IsAlive,
+            CredentialAlive = credential.IsAlive,
+            RequestAlive = request.IsAlive
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference, WeakReference, WeakReference) CreateRejectedWeakReferences(
+        string payloadRoot)
+    {
+        GraphAuthHost stopped = NewHost(payloadRoot);
+        stopped.Dispose();
+        SecureString material = CreateSecret();
+        GraphTokenRequest request = NewOwnedRequest(material, useCertificate: false);
+        GraphCredential credential = request.Credential;
+        _ = CaptureOwnershipFailure(() => stopped.CreateSource(request));
+        return (new WeakReference(material), new WeakReference(credential), new WeakReference(request));
+    }
+
+    private static GraphAuthHost NewHost(string payloadRoot) => new(
+        payloadRoot,
+        new Version(1, 0, 0, 0),
+        TimeSpan.FromSeconds(2));
+
+    private static IGraphTokenSourceFactory? GetFactory(GraphAuthHost host) =>
+        (IGraphTokenSourceFactory?)typeof(GraphAuthHost)
+            .GetField("_factory", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(host);
+
+    private static void SetFactory(GraphAuthHost host, IGraphTokenSourceFactory? factory) =>
+        (typeof(GraphAuthHost).GetField("_factory", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Host factory field was not found."))
+            .SetValue(host, factory);
+
+    private static GraphTokenRequest NewOwnedRequest(IDisposable material, bool useCertificate)
+    {
+        GraphCredential credential = useCertificate
+            ? new CertificateCredential((X509Certificate2)material, ownsMaterial: true)
+            : new ClientSecretCredential((SecureString)material, ownsMaterial: true);
+        return new GraphTokenRequest(
+            "Global",
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            new Uri("https://login.microsoftonline.com"),
+            new Uri("https://graph.microsoft.com"),
+            Guid.Parse("00000000-0000-0000-0000-000000000002"),
+            useCertificate ? GraphAuthMode.Certificate : GraphAuthMode.ClientSecret,
+            credential,
+            "owned-material-generation");
+    }
+
+    private static IDisposable? GetOwnedMaterial(GraphTokenRequest request) =>
+        request.Credential switch
+        {
+            CertificateCredential certificate => certificate.Certificate,
+            ClientSecretCredential secret => secret.Secret,
+            _ => null
+        };
+
+    private static SecureString CreateSecret()
+    {
+        SecureString value = new();
+        foreach (char character in "task6-owned-secret") value.AppendChar(character);
+        value.MakeReadOnly();
+        return value;
+    }
+
+    private static X509Certificate2 CreateCertificate() =>
+        new(CreatePfxBytes());
+
+    private static void ReleaseHarnessMaterial(IDisposable material)
+    {
+        if (material is CountingOwnedCertificate counting)
+        {
+            counting.DisposeWithoutCounting();
+        }
+        else
+        {
+            material.Dispose();
+        }
+    }
+
+    private static byte[] CreatePfxBytes()
+    {
+        using RSA rsa = RSA.Create(2048);
+        CertificateRequest request = new(
+            "CN=GraphKit-Task6-Ownership",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using X509Certificate2 certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+        return certificate.Export(X509ContentType.Pkcs12);
+    }
+
+    private static bool MaterialIsUsable(IDisposable material)
+    {
+        try
+        {
+            if (material is SecureString secret)
+            {
+                using SecureString copy = secret.Copy();
+            }
+            else
+            {
+                _ = ((X509Certificate2)material).GetCertHash();
+            }
+            return true;
+        }
+        catch (ObjectDisposedException) { return false; }
+        catch (CryptographicException) { return false; }
+    }
+
+    private static Exception CaptureOwnershipFailure(Action action)
+    {
+        try
+        {
+            action();
+            return new InvalidOperationException("The expected ownership operation succeeded.");
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
+    private class CountingFactory : IGraphTokenSourceFactory
+    {
+        protected readonly IGraphTokenSourceFactory Inner;
+        private int _entryCount;
+
+        internal CountingFactory(IGraphTokenSourceFactory? inner) =>
+            Inner = inner ?? throw new InvalidOperationException("Provider factory was unavailable.");
+
+        internal int EntryCount => Volatile.Read(ref _entryCount);
+
+        protected void RecordEntry() => Interlocked.Increment(ref _entryCount);
+
+        public virtual IGraphTokenSource Create(GraphTokenRequest request)
+        {
+            RecordEntry();
+            return Inner.Create(request);
+        }
+    }
+
+    private sealed class BarrierFactory : CountingFactory
+    {
+        internal readonly ManualResetEventSlim Entered = new(false);
+        internal readonly ManualResetEventSlim Release = new(false);
+
+        internal BarrierFactory(IGraphTokenSourceFactory? inner) : base(inner) { }
+
+        public override IGraphTokenSource Create(GraphTokenRequest request)
+        {
+            RecordEntry();
+            Entered.Set();
+            if (!Release.Wait(TimeSpan.FromSeconds(10)))
+            {
+                throw new TimeoutException("The ownership race factory was not released.");
+            }
+            return Inner.Create(request);
+        }
+
+    }
+
+    private sealed class ReentrantFactory : CountingFactory
+    {
+        private readonly GraphAuthHost _host;
+        private readonly GraphTokenRequest _nested;
+        internal Exception? NestedFailure { get; private set; }
+
+        internal ReentrantFactory(
+            IGraphTokenSourceFactory? inner,
+            GraphAuthHost host,
+            GraphTokenRequest nested) : base(inner)
+        {
+            _host = host;
+            _nested = nested;
+        }
+
+        public override IGraphTokenSource Create(GraphTokenRequest request)
+        {
+            try { _host.CreateSource(_nested); }
+            catch (Exception exception) { NestedFailure = exception; }
+            return base.Create(request);
+        }
+    }
+
+    private sealed class ThrowingOwnedCertificate : X509Certificate2, IDisposable
+    {
+        internal const string SensitiveDetail = "task6-sensitive-cleanup-detail";
+        private int _disposeCount;
+
+        internal ThrowingOwnedCertificate(byte[] pfx) : base(pfx) { }
+        internal int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        void IDisposable.Dispose()
+        {
+            Interlocked.Increment(ref _disposeCount);
+            throw new InvalidOperationException(SensitiveDetail);
+        }
+    }
+
+    private sealed class CountingOwnedCertificate : X509Certificate2, IDisposable
+    {
+        private int _disposeCount;
+
+        internal CountingOwnedCertificate(byte[] pfx) : base(pfx) { }
+        internal int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        public new void Dispose()
+        {
+            Interlocked.Increment(ref _disposeCount);
+            base.Dispose();
+        }
+
+        internal void DisposeWithoutCounting() => base.Dispose();
+    }
+
     public static string RetainedFactoryConstructionFailure(string payloadRoot)
     {
         WeakReference? weakReference = null;
@@ -1477,7 +1987,7 @@ foreach ($type in @($assembly.GetExportedTypes() | Sort-Object FullName)) {
         param(
             [Parameter(Mandatory)] [string] $ContractsPath,
             [string] $PayloadRoot,
-            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'FactoryConstructionFailure', 'SourceConstructionFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'ImmediateDisposalFailure', 'DeferredDisposalFailure', 'SamePathReplacement')] [string] $Scenario,
+            [Parameter(Mandatory)] [ValidateSet('Validation', 'Lifecycle', 'ProviderFailure', 'FactoryConstructionFailure', 'SourceConstructionFailure', 'VersionMismatch', 'IncompatibleDefault', 'HostLoadFailure', 'ConcurrentDispose', 'BlockedCancellationCallback', 'ImmediateDisposalFailure', 'DeferredDisposalFailure', 'SamePathReplacement', 'OwnershipLedger')] [string] $Scenario,
             [string] $DisposeMarker,
             [string] $ReplacementContractsPath,
             [string] $PreloadPath,
@@ -1521,6 +2031,39 @@ function New-ValidRequest {
         [GraphKit.Auth.FixedBearerCredential]::new('fixture-bearer'),
         'generation-1'
     )
+}
+
+function New-OwnedSecretRequest {
+    param([Parameter(Mandatory)] [Security.SecureString] $Secret)
+    return [GraphKit.Auth.GraphTokenRequest]::new(
+        'Global',
+        [guid] '00000000-0000-0000-0000-000000000001',
+        [uri] 'https://login.microsoftonline.com',
+        [uri] 'https://graph.microsoft.com',
+        [guid] '00000000-0000-0000-0000-000000000002',
+        [GraphKit.Auth.GraphAuthMode]::ClientSecret,
+        [GraphKit.Auth.ClientSecretCredential]::new($Secret, $true),
+        'owned-secret-generation'
+    )
+}
+
+function New-TestSecureString {
+    $secret = [Security.SecureString]::new()
+    foreach ($character in 'owned-secret'.ToCharArray()) { $secret.AppendChar($character) }
+    $secret.MakeReadOnly()
+    return $secret
+}
+
+function Test-SecureStringDisposed {
+    param([Parameter(Mandatory)] [Security.SecureString] $Secret)
+    try {
+        $copy = $Secret.Copy()
+        $copy.Dispose()
+        return $false
+    }
+    catch [ObjectDisposedException] {
+        return $true
+    }
 }
 
 function Get-Rejection {
@@ -1715,6 +2258,9 @@ switch ($Scenario) {
             Message = $message
             ResidentMvid = $residentMvid
         } | ConvertTo-Json -Compress
+    }
+    'OwnershipLedger' {
+        [GraphKitAuthRuntimeHarness]::OwnershipLedgerProof($PayloadRoot, $DisposeMarker)
     }
 }
 '@
@@ -2560,5 +3106,84 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Data.Message | Should -Match "provider assembly 'Wrong.Auth'"
         $result.Data.Message | Should -Match "not 'GraphKit.Auth'"
+    }
+
+    It 'claims owned material in the default context before host state or provider entry' {
+        $payloadRoot = Join-Path $TestDrive 'ownership-ledger-provider'
+        $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
+        $harnessPath = New-GraphKitAuthRuntimeHarnessAssembly -Root (Join-Path $TestDrive 'ownership-ledger-harness')
+        $markerRoot = Join-Path $TestDrive 'ownership-ledger-markers'
+        Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
+
+        $result = Invoke-GraphKitAuthRuntimeProbe `
+            -ContractsPath (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll') `
+            -PayloadRoot (Split-Path -Parent $providerPath) `
+            -Scenario OwnershipLedger `
+            -HarnessPath $harnessPath `
+            -DisposeMarker $markerRoot
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        foreach ($race in @(
+            $result.Data.DistinctHostSecretRace,
+            $result.Data.SameHostCertificateRace
+        )) {
+            $race.DistinctRequests | Should -BeTrue
+            $race.DistinctCredentials | Should -BeTrue
+            $race.SharedMaterial | Should -BeTrue
+            $race.AcceptedCount | Should -Be 1
+            $race.RejectedCount | Should -Be 1
+            $race.FactoryEntryCount | Should -Be 1
+            $race.RejectionType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+            $race.RejectionCode | Should -BeExactly 'credential_material_consumed'
+            $race.RejectionCategory | Should -BeExactly 'CredentialOwnership'
+            $race.WinnerUsableBeforeRelease | Should -BeTrue -Because 'the losing duplicate must not dispose the winning material'
+            $race.MaterialDisposedAfterWinner | Should -BeTrue
+            $race.WinnerDisposeCount | Should -Be 1
+        }
+        $result.Data.SameHostCertificateRace.MaterialDisposeCount | Should -Be 1
+
+        $result.Data.ReentrantFactory.DistinctRequests | Should -BeTrue
+        $result.Data.ReentrantFactory.DistinctCredentials | Should -BeTrue
+        $result.Data.ReentrantFactory.SharedMaterial | Should -BeTrue
+        $result.Data.ReentrantFactory.FactoryEntryCount | Should -Be 1
+        $result.Data.ReentrantFactory.NestedFailureType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+        $result.Data.ReentrantFactory.NestedFailureCode | Should -BeExactly 'credential_material_consumed'
+        $result.Data.ReentrantFactory.NestedFailureCategory | Should -BeExactly 'CredentialOwnership'
+        $result.Data.ReentrantFactory.MaterialUsableBeforeWinnerDisposal | Should -BeTrue
+
+        foreach ($preProvider in @($result.Data.StoppedHost, $result.Data.MissingFactory)) {
+            $preProvider.InitialFailureType | Should -BeExactly 'System.ObjectDisposedException'
+            $preProvider.MaterialDisposed | Should -BeTrue
+            $preProvider.MaterialDisposeCount | Should -Be 1
+            $preProvider.RepeatedFailureType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+            $preProvider.RepeatedFailureCode | Should -BeExactly 'credential_material_consumed'
+            $preProvider.RepeatedFailureCategory | Should -BeExactly 'CredentialOwnership'
+            $preProvider.FactoryEntryCount | Should -Be 0
+        }
+
+        $result.Data.PostProviderFailure.InitialFailureType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+        $result.Data.PostProviderFailure.InitialFailureCode | Should -BeExactly 'fixture'
+        $result.Data.PostProviderFailure.InitialFailureCategory | Should -BeExactly 'Fixture'
+        $result.Data.PostProviderFailure.ContainsSensitiveDetail | Should -BeFalse
+        $result.Data.PostProviderFailure.MaterialDisposed | Should -BeTrue
+        $result.Data.PostProviderFailure.MaterialDisposeCount | Should -Be 1
+        $result.Data.PostProviderFailure.RepeatedFailureCode | Should -BeExactly 'credential_material_consumed'
+        $result.Data.PostProviderFailure.FactoryEntryCount | Should -Be 1
+        $result.Data.PostProviderFailure.ProviderCleanupCount | Should -Be 1
+
+        $result.Data.SanitizedCleanupFailure.FailureType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+        $result.Data.SanitizedCleanupFailure.FailureCode | Should -BeExactly 'credential_material_cleanup_failed'
+        $result.Data.SanitizedCleanupFailure.FailureCategory | Should -BeExactly 'CredentialOwnership'
+        $result.Data.SanitizedCleanupFailure.FailureMessage | Should -BeExactly 'GraphKit.Auth could not clean up credential material after source construction was rejected before provider entry.'
+        $result.Data.SanitizedCleanupFailure.InnerExceptionIsNull | Should -BeTrue
+        $result.Data.SanitizedCleanupFailure.DataCount | Should -Be 0
+        $result.Data.SanitizedCleanupFailure.ContainsSensitiveDetail | Should -BeFalse
+        $result.Data.SanitizedCleanupFailure.ContainsRawCleanupType | Should -BeFalse
+        $result.Data.SanitizedCleanupFailure.ContainsRawCleanupStack | Should -BeFalse
+        $result.Data.SanitizedCleanupFailure.DisposeCount | Should -Be 1
+
+        $result.Data.WeakKeys.MaterialAlive | Should -BeFalse
+        $result.Data.WeakKeys.CredentialAlive | Should -BeFalse
+        $result.Data.WeakKeys.RequestAlive | Should -BeFalse
     }
 }

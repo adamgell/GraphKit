@@ -8,6 +8,169 @@ BeforeAll {
     $script:BuiltManifest = Join-Path $built.FullName 'GraphKit.psd1'
     Import-Module $script:BuiltManifest -Force
 
+    if ($null -eq ('GraphKit.Tests.Task6CredentialFixture' -as [type])) {
+        Add-Type -CompilerOptions '/nowarn:SYSLIB0057' -TypeDefinition @'
+using System;
+using System.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+namespace GraphKit.Tests;
+
+public static class Task6CredentialFixture
+{
+    public static X509Certificate2 CreateCertificate()
+    {
+        using RSA rsa = RSA.Create(2048);
+        CertificateRequest request = new(
+            "CN=GraphKit-Task6-Test",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using X509Certificate2 source = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+        return X509CertificateLoader.LoadPkcs12(source.Export(X509ContentType.Pkcs12), null);
+    }
+
+    public static SecureString CreateSecret()
+    {
+        SecureString secret = new();
+        foreach (char value in "task6-secret") secret.AppendChar(value);
+        secret.MakeReadOnly();
+        return secret;
+    }
+}
+
+'@
+    }
+
+    if ($null -eq ('GraphKit.Tests.Task6CountingCertificate' -as [type])) {
+        Add-Type -CompilerOptions '/nowarn:SYSLIB0057' -TypeDefinition @'
+using System;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+namespace GraphKit.Tests;
+
+public sealed class Task6CountingCertificate : X509Certificate2, IDisposable
+{
+    private int _disposeCount;
+
+    private Task6CountingCertificate(byte[] pfx) : base(pfx) { }
+
+    public int DisposeCount => System.Threading.Volatile.Read(ref _disposeCount);
+
+    public static Task6CountingCertificate Create()
+    {
+        using RSA rsa = RSA.Create(2048);
+        CertificateRequest request = new(
+            "CN=GraphKit-Task6-Counting",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using X509Certificate2 source = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+        return new Task6CountingCertificate(source.Export(X509ContentType.Pkcs12));
+    }
+
+    public new void Dispose()
+    {
+        System.Threading.Interlocked.Increment(ref _disposeCount);
+        base.Dispose();
+    }
+
+    public void DisposeWithoutCounting() => base.Dispose();
+}
+'@
+    }
+
+    if ($null -eq ('GraphKit.Tests.Task6CleanupProbe' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+namespace GraphKit.Tests;
+
+public sealed class Task6CleanupProbe : IDisposable
+{
+    public const string SensitiveDetail = "task6-sensitive-bridge-cleanup-detail";
+    private int _disposeCount;
+
+    public Task6CleanupProbe(bool throwOnDispose)
+    {
+        ThrowOnDispose = throwOnDispose;
+    }
+
+    public int DisposeCount => System.Threading.Volatile.Read(ref _disposeCount);
+    public bool ThrowOnDispose { get; }
+
+    public void Dispose()
+    {
+        System.Threading.Interlocked.Increment(ref _disposeCount);
+        if (ThrowOnDispose)
+        {
+            throw new InvalidOperationException(SensitiveDetail);
+        }
+    }
+}
+
+public static class Task6PfxFixture
+{
+    public static byte[] CreatePfxBytes(string password)
+    {
+        using RSA rsa = RSA.Create(2048);
+        CertificateRequest request = new(
+            "CN=GraphKit-Task6-PFX",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using X509Certificate2 source = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+        return source.Export(X509ContentType.Pkcs12, password);
+    }
+
+    public static string GetThumbprint(byte[] pfx, string password)
+    {
+        using X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12(
+            pfx,
+            password,
+            X509KeyStorageFlags.Exportable);
+        return certificate.Thumbprint;
+    }
+}
+'@
+    }
+
+    function Test-Task6SecretDisposed {
+        param([Parameter(Mandatory)] [Security.SecureString] $Secret)
+        try {
+            $copy = $Secret.Copy()
+            $copy.Dispose()
+            return $false
+        }
+        catch [ObjectDisposedException] {
+            return $true
+        }
+    }
+
+    function Test-Task6CertificateDisposed {
+        param([Parameter(Mandatory)] [Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+        try {
+            $null = $Certificate.GetCertHash()
+            return $false
+        }
+        catch [ObjectDisposedException] {
+            return $true
+        }
+        catch [Security.Cryptography.CryptographicException] {
+            return $true
+        }
+    }
+
     if ($null -eq ('GraphKit.Tests.ConcurrentApplicationHarness' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -339,6 +502,27 @@ Describe 'GraphTokenSource' {
 
     Context 'New-GraphTokenSource factory' {
 
+        BeforeEach {
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                param($Credential, $VaultName, $AuthMethod)
+                $null = $VaultName
+                switch ($AuthMethod) {
+                    Certificate {
+                        [pscustomobject]@{ Material = [GraphKit.Tests.Task6CredentialFixture]::CreateCertificate(); OwnsMaterial = $true; CredentialGeneration = 'cert-generation' }
+                    }
+                    ClientSecret {
+                        [pscustomobject]@{ Material = [GraphKit.Tests.Task6CredentialFixture]::CreateSecret(); OwnsMaterial = $true; CredentialGeneration = 'secret-generation' }
+                    }
+                    BearerToken {
+                        [pscustomobject]@{ Material = 'fixed-value'; OwnsMaterial = $false; CredentialGeneration = 'bearer-generation' }
+                    }
+                    ManagedIdentity {
+                        [pscustomobject]@{ Material = $null; ManagedIdentityClientId = $Credential.ClientId; OwnsMaterial = $false; CredentialGeneration = 'mi-generation' }
+                    }
+                }
+            }
+        }
+
         It 'builds the correct source per AuthMethod with the right CanRefresh' {
             InModuleScope GraphKit {
                 $cloud = @{ GraphBaseUri = 'https://graph.microsoft.com'; Authority = 'https://login.microsoftonline.com'; Resource = 'https://graph.microsoft.com' }
@@ -351,21 +535,319 @@ Describe 'GraphTokenSource' {
                 $secret.AuthMode | Should -Be 'ClientSecret'
 
                 $cert = New-GraphTokenSource -Profile @{
-                    AuthMethod = 'Certificate'; ClientId = $null
+                    AuthMethod = 'Certificate'; ClientId = '7d6e5f44-9999-8888-7777-666655554444'
                     Credential = @{ VaultName = 'v'; CertificateName = 'cert'; Version = '1' }
                 } -Cloud $cloud -MsalFactory { throw 'not invoked' }
                 $cert.CanRefresh | Should -BeTrue
                 $cert.AuthMode | Should -Be 'Certificate'
 
-                $mi = New-GraphTokenSource -Profile @{ AuthMethod = 'ManagedIdentity'; Credential = @{} } -Cloud $cloud
+                $mi = New-GraphTokenSource -Profile @{ AuthMethod = 'ManagedIdentity'; Credential = @{} } -Cloud $cloud -MsalFactory { throw 'not invoked' }
                 $mi.CanRefresh | Should -BeTrue
                 $mi.AuthMode | Should -Be 'ManagedIdentity'
 
                 $bearer = New-GraphTokenSource -Profile @{
                     AuthMethod = 'BearerToken'; Credential = @{ Token = 'fixed-value' }
-                } -Cloud $cloud
+                } -Cloud $cloud -MsalFactory { throw 'not invoked' }
                 $bearer.CanRefresh | Should -BeFalse
                 $bearer.AuthMode | Should -Be 'BearerToken'
+            }
+        }
+
+        It 'routes every no-factory built-in through the exact compiled contract' -ForEach @(
+            @{ Mode = 'Certificate'; ClientId = '7d6e5f44-9999-8888-7777-666655554444'; Credential = @{ VaultName = 'v'; CertificateName = 'cert'; Version = 'v1' } }
+            @{ Mode = 'ClientSecret'; ClientId = '7d6e5f44-9999-8888-7777-666655554444'; Credential = @{ VaultName = 'v'; SecretName = 'secret'; Version = 'v1' } }
+            @{ Mode = 'ManagedIdentity'; ClientId = $null; Credential = @{} }
+            @{ Mode = 'ManagedIdentity'; ClientId = $null; Credential = @{ ClientId = '11111111-2222-3333-4444-555555555555' } }
+            @{ Mode = 'BearerToken'; ClientId = $null; Credential = @{ VaultName = 'v'; SecretName = 'bearer'; Version = 'v1' } }
+        ) {
+            $source = InModuleScope GraphKit -Parameters @{
+                Mode = $Mode; ClientId = $ClientId; Credential = $Credential
+            } {
+                param($Mode, $ClientId, $Credential)
+                New-GraphTokenSource -Profile @{
+                    TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                    ClientId = $ClientId
+                    AuthMethod = $Mode
+                    Environment = 'Global'
+                    Credential = $Credential
+                } -Cloud @{
+                    Name = 'Global'
+                    Authority = [uri]'https://login.microsoftonline.com'
+                    Resource = [uri]'https://graph.microsoft.com'
+                }
+            }
+
+            $source -is [GraphKit.Auth.IGraphTokenSource] | Should -BeTrue
+            $source.AuthMode | Should -BeExactly $Mode
+            $source.ExpiresOn | Should -Be ([datetimeoffset]::MinValue) -Because 'construction must perform zero acquisition'
+        }
+
+    }
+
+    Context 'Unsupported persisted credential versions' {
+
+        It 'checks unsupported PFX version metadata before any PFX bytes or vault are touched' {
+            Mock Get-GraphPfxSnapshot -ModuleName GraphKit { throw 'PFX_BYTES_WERE_TOUCHED' }
+            Mock Assert-GraphVaultRegistered -ModuleName GraphKit { throw 'VAULT_WAS_TOUCHED' }
+
+            {
+                InModuleScope GraphKit {
+                    New-GraphTokenSource -Profile @{
+                        TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'Certificate'; Environment = 'Global'
+                        Credential = @{
+                            PfxPath = 'must-not-open.pfx'
+                            Password = @{ VaultName = 'v'; SecretName = 'password'; Version = 'unsupported-v1' }
+                        }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            } | Should -Throw -ExpectedMessage '*does not support per-secret versions*'
+            Should -Invoke Get-GraphPfxSnapshot -ModuleName GraphKit -Times 0 -Exactly
+            Should -Invoke Assert-GraphVaultRegistered -ModuleName GraphKit -Times 0 -Exactly
+        }
+    }
+
+    Context 'Compiled persisted PFX bridge' {
+
+        It 'reads one hashed snapshot and imports the exact same PFX bytes' {
+            $passwordText = 'task6-pfx-password'
+            $snapshotBytes = [GraphKit.Tests.Task6PfxFixture]::CreatePfxBytes($passwordText)
+            $expectedThumbprint = [GraphKit.Tests.Task6PfxFixture]::GetThumbprint(
+                $snapshotBytes,
+                $passwordText)
+            $expectedSha = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($snapshotBytes)).ToLowerInvariant()
+            $script:Task6CompiledPfxSnapshot = [byte[]]$snapshotBytes.Clone()
+
+            Mock Get-GraphPfxSnapshot -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Path = '/task6/credential.pfx'
+                    Bytes = $script:Task6CompiledPfxSnapshot
+                    Sha256 = $expectedSha
+                }
+            }
+            Mock Resolve-GraphVaultPassword -ModuleName GraphKit {
+                ConvertTo-SecureString $passwordText -AsPlainText -Force
+            }
+
+            $source = $null
+            try {
+                $source = InModuleScope GraphKit {
+                    New-GraphTokenSource -Profile @{
+                        TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'Certificate'; Environment = 'Global'
+                        Credential = @{
+                            PfxPath = 'must-not-be-opened-directly.pfx'
+                            Password = @{ VaultName = 'v'; SecretName = 'password' }
+                        }
+                    } -Cloud @{
+                        Name = 'Global'
+                        Authority = [uri]'https://login.microsoftonline.com'
+                        Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+
+                $inner = [GraphKit.Auth.IGraphTokenSource].Assembly.GetType(
+                    'GraphKit.Auth.GraphTokenSourceProxy', $true, $false
+                ).GetField('_inner', [Reflection.BindingFlags]'Instance,NonPublic').GetValue($source)
+                $credential = $inner.GetType().GetField(
+                    '_credentialReference', [Reflection.BindingFlags]'Instance,NonPublic').GetValue($inner)
+
+                $credential.GetType().FullName | Should -BeExactly 'GraphKit.Auth.CertificateCredential'
+                $credential.Certificate.Thumbprint | Should -BeExactly $expectedThumbprint
+                $source.CredentialGeneration | Should -Match ([regex]::Escape("sha256:$expectedSha"))
+                Should -Invoke Get-GraphPfxSnapshot -ModuleName GraphKit -Times 1 -Exactly
+                @($script:Task6CompiledPfxSnapshot | Where-Object { $_ -ne 0 }).Count |
+                    Should -Be 0 -Because 'the exact imported snapshot is zeroed after the transfer'
+            }
+            finally {
+                if ($null -ne $source) { $source.Dispose() }
+            }
+        }
+    }
+
+    Context 'Compiled bridge credential ownership failures' {
+
+        It 'cleans an owned client secret exactly once when request construction fails before host entry' {
+            $script:Task6RequestFailureSecret = [GraphKit.Tests.Task6CredentialFixture]::CreateSecret()
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Material = $script:Task6RequestFailureSecret
+                    OwnsMaterial = $true
+                    CredentialGeneration = 'task6-request-failure-secret'
+                }
+            }
+
+            {
+                InModuleScope GraphKit {
+                    New-GraphAuthTokenSource -Profile @{
+                        TenantId = 'not-a-guid'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'ClientSecret'; Environment = 'Global'
+                        Credential = @{ VaultName = 'v'; SecretName = 's'; Version = 'v1' }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            } | Should -Throw
+
+            Test-Task6SecretDisposed -Secret $script:Task6RequestFailureSecret | Should -BeTrue
+            Should -Invoke Get-GraphVaultCredential -ModuleName GraphKit -Times 1 -Exactly
+        }
+
+        It 'cleans an owned certificate exactly once when request construction fails before host entry' {
+            $script:Task6RequestFailureCertificate = [GraphKit.Tests.Task6CountingCertificate]::Create()
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Material = $script:Task6RequestFailureCertificate
+                    OwnsMaterial = $true
+                    CredentialGeneration = 'task6-request-failure-certificate'
+                }
+            }
+
+            {
+                InModuleScope GraphKit {
+                    New-GraphAuthTokenSource -Profile @{
+                        TenantId = 'not-a-guid'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'Certificate'; Environment = 'Global'
+                        Credential = @{ VaultName = 'v'; CertificateName = 'c'; Version = 'v1' }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            } | Should -Throw
+
+            Test-Task6CertificateDisposed -Certificate $script:Task6RequestFailureCertificate | Should -BeTrue
+            $script:Task6RequestFailureCertificate.DisposeCount | Should -Be 1
+            Should -Invoke Get-GraphVaultCredential -ModuleName GraphKit -Times 1 -Exactly
+        }
+
+        It 'sanitizes a cleanup failure after credential construction is rejected before host entry' {
+            $script:Task6BridgeCleanupProbe = [GraphKit.Tests.Task6CleanupProbe]::new($true)
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Material = $script:Task6BridgeCleanupProbe
+                    OwnsMaterial = $true
+                    CredentialGeneration = 'task6-cleanup-failure'
+                }
+            }
+
+            $failure = $null
+            try {
+                InModuleScope GraphKit {
+                    New-GraphAuthTokenSource -Profile @{
+                        TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'ClientSecret'; Environment = 'Global'
+                        Credential = @{ VaultName = 'v'; SecretName = 's'; Version = 'v1' }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            }
+            catch {
+                $failure = $_.Exception
+            }
+
+            $failure | Should -Not -BeNullOrEmpty
+            $failure.GetType().FullName | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
+            $failure.Code | Should -BeExactly 'credential_material_cleanup_failed'
+            $failure.Category | Should -BeExactly 'CredentialOwnership'
+            $failure.Message | Should -BeExactly 'GraphKit.Auth could not clean up credential material after request construction failed before host entry.'
+            $failure.ToString() | Should -Not -Match ([regex]::Escape([GraphKit.Tests.Task6CleanupProbe]::SensitiveDetail))
+            $failure.InnerException | Should -BeNullOrEmpty
+            $failure.Data.Count | Should -Be 0
+            $script:Task6BridgeCleanupProbe.DisposeCount | Should -Be 1
+        }
+
+        It 'disposes an owned client secret exactly once when lifecycle registration refuses the returned source' {
+            $script:Task6RegistrationSecret = [GraphKit.Tests.Task6CredentialFixture]::CreateSecret()
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Material = $script:Task6RegistrationSecret
+                    OwnsMaterial = $true
+                    CredentialGeneration = 'task6-registration-secret'
+                }
+            }
+            Mock Register-GraphModuleOwnedResource -ModuleName GraphKit { throw 'task6-registration-refused' }
+
+            {
+                InModuleScope GraphKit {
+                    New-GraphAuthTokenSource -Profile @{
+                        TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'ClientSecret'; Environment = 'Global'
+                        Credential = @{ VaultName = 'v'; SecretName = 's'; Version = 'v1' }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            } | Should -Throw -ExpectedMessage '*task6-registration-refused*'
+
+            Test-Task6SecretDisposed -Secret $script:Task6RegistrationSecret | Should -BeTrue
+            Should -Invoke Register-GraphModuleOwnedResource -ModuleName GraphKit -Times 1 -Exactly
+        }
+
+        It 'disposes an owned certificate exactly once when lifecycle registration refuses the returned source' {
+            $script:Task6RegistrationCertificate = [GraphKit.Tests.Task6CountingCertificate]::Create()
+            Mock Get-GraphVaultCredential -ModuleName GraphKit {
+                [pscustomobject]@{
+                    Material = $script:Task6RegistrationCertificate
+                    OwnsMaterial = $true
+                    CredentialGeneration = 'task6-registration-certificate'
+                }
+            }
+            Mock Register-GraphModuleOwnedResource -ModuleName GraphKit { throw 'task6-registration-refused' }
+
+            {
+                InModuleScope GraphKit {
+                    New-GraphAuthTokenSource -Profile @{
+                        TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                        ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                        AuthMethod = 'Certificate'; Environment = 'Global'
+                        Credential = @{ VaultName = 'v'; CertificateName = 'c'; Version = 'v1' }
+                    } -Cloud @{
+                        Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                    }
+                }
+            } | Should -Throw -ExpectedMessage '*task6-registration-refused*'
+
+            Test-Task6CertificateDisposed -Certificate $script:Task6RegistrationCertificate | Should -BeTrue
+            $script:Task6RegistrationCertificate.DisposeCount | Should -Be 1
+            Should -Invoke Register-GraphModuleOwnedResource -ModuleName GraphKit -Times 1 -Exactly
+        }
+
+        It 'never disposes an injected caller-owned certificate when lifecycle registration refuses the returned source' {
+            $certificate = [GraphKit.Tests.Task6CredentialFixture]::CreateCertificate()
+            Mock Get-GraphVaultCredential -ModuleName GraphKit { throw 'vault resolution must not run for an injected certificate' }
+            Mock Register-GraphModuleOwnedResource -ModuleName GraphKit { throw 'task6-registration-refused' }
+
+            try {
+                {
+                    InModuleScope GraphKit -Parameters @{ InjectedCertificate = $certificate } {
+                        param($InjectedCertificate)
+                        New-GraphAuthTokenSource -Profile @{
+                            TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                            ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                            AuthMethod = 'Certificate'; Environment = 'Global'
+                            Credential = @{}
+                        } -Cloud @{
+                            Name = 'Global'; Authority = [uri]'https://login.microsoftonline.com'; Resource = [uri]'https://graph.microsoft.com'
+                        } -Certificate $InjectedCertificate
+                    }
+                } | Should -Throw -ExpectedMessage '*task6-registration-refused*'
+
+                Test-Task6CertificateDisposed -Certificate $certificate | Should -BeFalse
+                Should -Invoke Get-GraphVaultCredential -ModuleName GraphKit -Times 0 -Exactly
+                Should -Invoke Register-GraphModuleOwnedResource -ModuleName GraphKit -Times 1 -Exactly
+            }
+            finally {
+                $certificate.Dispose()
             }
         }
     }
@@ -1063,19 +1545,11 @@ Describe 'GraphTokenSource' {
             @($script:GenerationSnapshotProbe | Where-Object { $_ -ne 0 }).Count | Should -Be 0
         }
 
-        It 'pins a relative PFX path to the canonical path passed into its lazy factory' {
+        It 'pins a relative PFX path into the legacy generation selected by a compatibility factory' {
             $original = Join-Path $TestDrive 'relative-pfx-origin'
             $elsewhere = Join-Path $TestDrive 'relative-pfx-elsewhere'
             $null = New-Item -ItemType Directory -Path $original, $elsewhere -Force
             [System.IO.File]::WriteAllBytes((Join-Path $original 'credential.pfx'), [byte[]] @(1, 3, 3, 7))
-            $script:CapturedPfxFactoryProfile = $null
-
-            Mock New-GraphMsalApplicationFactory -ModuleName GraphKit {
-                param($Profile, $Cloud, $ExpectedCredentialGeneration)
-                $script:CapturedPfxFactoryProfile = $Profile
-                return { throw 'canonical-path capture test must not acquire' }
-            }
-
             $source = InModuleScope GraphKit -Parameters @{ Origin = $original } {
                 param($Origin)
                 Push-Location $Origin
@@ -1091,7 +1565,7 @@ Describe 'GraphTokenSource' {
                         } -Cloud @{
                             Resource = 'https://graph.microsoft.com'
                             Authority = 'https://login.microsoftonline.com'
-                        }
+                        } -MsalFactory { throw 'canonical-path capture test must not acquire' }
                 }
                 finally {
                     Pop-Location
@@ -1100,10 +1574,10 @@ Describe 'GraphTokenSource' {
 
             Push-Location $elsewhere
             try {
-                $script:CapturedPfxFactoryProfile.Credential.PfxPath | Should -Be (
-                    [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
-                )
                 $source.CredentialGeneration | Should -Match '^g1\|Certificate\.PFX\|.+\|71:sha256:[0-9a-f]{64}\|5:vault\|8:password\|2:v1$'
+                $source.CredentialGeneration | Should -Match ([regex]::Escape(
+                    [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
+                ))
             }
             finally {
                 Pop-Location
@@ -1229,8 +1703,9 @@ Describe 'GraphTokenSource' {
             $result = InModuleScope GraphKit {
                 $profile = @{
                     TenantId = '00000000-0000-0000-0000-000000000001'
-                    ClientId = '00000000-0000-0000-0000-000000000002'
+                    ClientId = $null
                     AuthMethod = 'BearerToken'
+                    Environment = 'Global'
                     Credential = @{ VaultName = 'vault'; SecretName = 'bearer' }
                 }
                 $cloud = @{

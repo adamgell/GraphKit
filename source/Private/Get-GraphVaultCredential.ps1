@@ -87,7 +87,12 @@ function Get-GraphVaultCredential {
                 throw "Secret '$secretName' in vault '$vault' resolved to an empty bearer token."
             }
 
-            return New-GraphCredentialMaterial -AuthMethod 'BearerToken' -Material $plain
+            $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                AuthMethod = 'BearerToken'
+                Credential = $Credential
+            }
+            return New-GraphCredentialMaterial -AuthMethod 'BearerToken' -Material $plain `
+                -CredentialGeneration $generation
         }
 
         'Certificate' {
@@ -177,7 +182,12 @@ function Get-GraphVaultCredential {
             if ($null -ne $clientId) {
                 $clientId = [string] $clientId
             }
-            return New-GraphCredentialMaterial -AuthMethod 'ManagedIdentity' -Material $null -ManagedIdentityClientId $clientId
+            $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                AuthMethod = 'ManagedIdentity'
+                Credential = $Credential
+            }
+            return New-GraphCredentialMaterial -AuthMethod 'ManagedIdentity' -Material $null `
+                -ManagedIdentityClientId $clientId -CredentialGeneration $generation
         }
     }
 }

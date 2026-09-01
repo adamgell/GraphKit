@@ -155,8 +155,15 @@ Describe 'Get-GraphVaultCredential' {
             Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
             Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:BearerSecret }
 
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ VaultName = 'v'; SecretName = 'bearer' } -AuthMethod BearerToken
+            $credential = @{ VaultName = 'v'; SecretName = 'bearer' }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod BearerToken
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'BearerToken'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'BearerToken'
@@ -164,6 +171,8 @@ Describe 'Get-GraphVaultCredential' {
             $result.Material | Should -Be $script:BearerPlain
             $result.OwnsMaterial | Should -BeFalse
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
         }
     }
 
@@ -390,27 +399,45 @@ Describe 'Get-GraphVaultCredential' {
 
     Context 'ManagedIdentity' {
         It 'returns the user-assigned client id with zero vault calls' {
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ ClientId = '7d6e5f44-9999-8888-7777-666655554444' } -AuthMethod ManagedIdentity
+            $credential = @{ ClientId = '7d6e5f44-9999-8888-7777-666655554444' }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod ManagedIdentity
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'ManagedIdentity'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -Be '7d6e5f44-9999-8888-7777-666655554444'
             $result.OwnsMaterial | Should -BeFalse
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
             Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
             Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }
 
         It 'returns null for a system-assigned identity with zero vault calls' {
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ ClientId = $null } -AuthMethod ManagedIdentity
+            $credential = @{ ClientId = $null }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod ManagedIdentity
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'ManagedIdentity'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
             $result.OwnsMaterial | Should -BeFalse
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
             Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
             Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }

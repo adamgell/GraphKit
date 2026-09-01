@@ -600,6 +600,22 @@ function Stop-GraphModule {
 }
 
 $script:GraphKitModuleLifecycle = New-GraphModuleLifecycleState
+$graphAuthPayloadRoot = Join-Path $PSScriptRoot 'Assemblies/GraphKit.Auth'
+$graphAuthHostCandidate = [GraphKit.Auth.GraphAuthHost]::new(
+    $graphAuthPayloadRoot,
+    [version] '1.0.0.0',
+    [timespan]::FromSeconds(5)
+)
+try {
+    $script:GraphKitAuthHost = Register-GraphModuleOwnedResource `
+        -Resource $graphAuthHostCandidate `
+        -OwnedByGraphKit:$true `
+        -State $script:GraphKitModuleLifecycle
+}
+catch {
+    $graphAuthHostCandidate.Dispose()
+    throw
+}
 $graphKitLifecycleForRemoval = $script:GraphKitModuleLifecycle
 $stopGraphModuleForRemoval = Get-Command -Name Stop-GraphModule -CommandType Function
 

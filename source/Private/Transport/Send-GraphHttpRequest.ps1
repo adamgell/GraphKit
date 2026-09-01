@@ -338,6 +338,16 @@ function Send-GraphHttpRequest {
                 $ForceRefresh
             )
         }
+        elseif (-not [string]::IsNullOrEmpty($TokenAcquisitionKey) -and
+            $TokenSource -is [GraphKit.Auth.IGraphTokenSource] -and
+            $tokenResult -is [GraphKit.Auth.GraphTokenResult]) {
+            # The compiled branch is intentionally exact. No arbitrary object
+            # with similarly named members receives a cross-context result.
+            ([GraphKit.Auth.IGraphTokenSource] $TokenSource).AdoptSharedResult(
+                [GraphKit.Auth.GraphTokenResult] $tokenResult,
+                $ForceRefresh
+            )
+        }
         if ($VerifyTenantBinding) {
             # Mutating sends require tenant proof BEFORE the request is issued.
             # A result that carries no VerifiedTenantId, or whose binding is not

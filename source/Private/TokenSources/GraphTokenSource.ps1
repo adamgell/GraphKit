@@ -953,6 +953,10 @@ function New-GraphTokenSource {
     $authMethod = [string]$Profile.AuthMethod
     $audience = [string]$Cloud.Resource
     $clientId = $Profile.ClientId
+    if ($null -eq $MsalFactory) {
+        return New-GraphAuthTokenSource -Profile $Profile -Cloud $Cloud
+    }
+
     $factoryProfile = $Profile
     if ($authMethod -eq 'Certificate' -and
         -not [string]::IsNullOrEmpty([string] $Profile.Credential.PfxPath)) {
@@ -1008,11 +1012,11 @@ function New-GraphTokenSource {
             return [ConfidentialClientTokenSource]::new($factory, 'ClientSecret', $audience, $clientId, $generation)
         }
         'ManagedIdentity' {
-            $factory = $MsalFactory
-            if ($null -eq $factory) {
-                $factory = New-GraphManagedIdentityFactory -Profile $Profile
-            }
-            return [ManagedIdentityTokenSource]::new($factory, $audience, $clientId, $generation)
+            return [ManagedIdentityTokenSource]::new(
+                $MsalFactory,
+                $audience,
+                ([string] $Profile.Credential.ClientId),
+                $generation)
         }
         'BearerToken' {
             # An inline token (context-only, never persisted) wins; otherwise resolve the
