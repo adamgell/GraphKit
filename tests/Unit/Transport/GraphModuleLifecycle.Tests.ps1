@@ -19,6 +19,7 @@ namespace GraphKit.Tests
 {
     public sealed class TrackingDisposable : IDisposable
     {
+        public const string ContractMarker = "GraphKit.Task7.ModuleLifecycleFixture/1";
         private int _disposeCount;
         public int DisposeCount { get { return _disposeCount; } }
         public ManualResetEventSlim Disposed { get; } = new ManualResetEventSlim(false);
@@ -115,6 +116,7 @@ namespace GraphKit.Tests
         private readonly string _name;
         private readonly ConcurrentQueue<string> _order;
         private readonly bool _throws;
+        private int _disposeCount;
 
         public OrderedDisposable(string name, ConcurrentQueue<string> order, bool throws)
         {
@@ -123,14 +125,32 @@ namespace GraphKit.Tests
             _throws = throws;
         }
 
+        public int DisposeCount { get { return Volatile.Read(ref _disposeCount); } }
+
         public void Dispose()
         {
+            Interlocked.Increment(ref _disposeCount);
             _order.Enqueue(_name);
             if (_throws) throw new InvalidOperationException("dispose-failed-" + _name);
         }
     }
 }
 '@
+    }
+    $trackingType = 'GraphKit.Tests.TrackingDisposable' -as [type]
+    $trackingMarker = if ($null -ne $trackingType) {
+        $trackingType.GetField('ContractMarker')
+    }
+    else {
+        $null
+    }
+    if ($null -eq $trackingMarker -or
+        [string] $trackingMarker.GetRawConstantValue() -cne
+            'GraphKit.Task7.ModuleLifecycleFixture/1') {
+        throw (
+            'The process-global GraphModuleLifecycle test fixture is stale. ' +
+            'Run this file in a fresh PowerShell process.'
+        )
     }
 }
 
@@ -196,7 +216,9 @@ Describe 'GraphKit module lifecycle' {
                 Exit-GraphModuleOperation -State $State
             }
 
-            $null = $stopJob | Receive-Job -Wait -ErrorAction Stop
+            $completedJobs = @($stopJob | Wait-Job -Timeout 10)
+            $completedJobs.Count | Should -Be 1 -Because 'active-operation release must let module cleanup finish within the bounded liveness timeout'
+            $null = $stopJob | Receive-Job -ErrorAction Stop
             $owned.DisposeCount | Should -Be 1
             $injected.DisposeCount | Should -Be 0 -Because 'caller-injected resources remain caller-owned'
         }
@@ -413,7 +435,9 @@ Describe 'GraphKit module lifecycle' {
             $completedBeforeRelease = $null -ne ($stopJob | Wait-Job -Timeout 1)
 
             $owned.Release.Set()
-            $null = $stopJob | Receive-Job -Wait -ErrorAction Stop
+            $completedJobs = @($stopJob | Wait-Job -Timeout 10)
+            $completedJobs.Count | Should -Be 1 -Because 'the background dispose must complete after its explicit release gate opens'
+            $null = $stopJob | Receive-Job -ErrorAction Stop
 
             $completedBeforeRelease | Should -BeTrue -Because 'blocking Dispose must run outside the bounded module-removal path'
             $state.CleanupDone.Wait(5000) | Should -BeTrue
@@ -433,40 +457,52 @@ Describe 'GraphKit module lifecycle' {
         }
     }
 
-    It 'disposes owned resources in LIFO order and reports an observed disposal failure' {
+    It 'disposes exact host and source probes once in LIFO order and reports an observed failure' {
         $state = InModuleScope GraphKit {
             New-GraphModuleLifecycleState
         }
         $order = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        $first = [GraphKit.Tests.OrderedDisposable]::new('first', $order, $false)
-        $second = [GraphKit.Tests.OrderedDisposable]::new('second', $order, $true)
-        $third = [GraphKit.Tests.OrderedDisposable]::new('third', $order, $false)
+        $hostProbe = [GraphKit.Tests.OrderedDisposable]::new('host', $order, $false)
+        $source1Probe = [GraphKit.Tests.OrderedDisposable]::new('source1', $order, $true)
+        $source2Probe = [GraphKit.Tests.OrderedDisposable]::new('source2', $order, $false)
         $injected = [GraphKit.Tests.OrderedDisposable]::new('injected', $order, $false)
 
         InModuleScope GraphKit -Parameters @{
             State = $state
-            First = $first
-            Second = $second
-            Third = $third
+            HostProbe = $hostProbe
+            Source1Probe = $source1Probe
+            Source2Probe = $source2Probe
             Injected = $injected
         } {
-            param($State, $First, $Second, $Third, $Injected)
-            $null = Register-GraphModuleOwnedResource -State $State -Resource $First -OwnedByGraphKit:$true
-            $null = Register-GraphModuleOwnedResource -State $State -Resource $Second -OwnedByGraphKit:$true
-            $null = Register-GraphModuleOwnedResource -State $State -Resource $Third -OwnedByGraphKit:$true
+            param($State, $HostProbe, $Source1Probe, $Source2Probe, $Injected)
+            $null = Register-GraphModuleOwnedResource -State $State -Resource $HostProbe -OwnedByGraphKit:$true
+            $null = Register-GraphModuleOwnedResource -State $State -Resource $Source1Probe -OwnedByGraphKit:$true
+            $null = Register-GraphModuleOwnedResource -State $State -Resource $Source2Probe -OwnedByGraphKit:$true
             $null = Register-GraphModuleOwnedResource -State $State -Resource $Injected -OwnedByGraphKit:$false
         }
+
+        $registered = @($state.OwnedResources)
+        $registered.Count | Should -Be 3
+        [object]::ReferenceEquals($registered[0], $hostProbe) | Should -BeTrue
+        [object]::ReferenceEquals($registered[1], $source1Probe) | Should -BeTrue
+        [object]::ReferenceEquals($registered[2], $source2Probe) | Should -BeTrue
 
         {
             InModuleScope GraphKit -Parameters @{ State = $state } {
                 param($State)
                 Stop-GraphModule -State $State
             }
-        } | Should -Throw -ExceptionType ([System.AggregateException]) -ExpectedMessage '*dispose-failed-second*'
+        } | Should -Throw -ExceptionType ([System.AggregateException]) -ExpectedMessage '*dispose-failed-source1*'
 
         $state.CleanupDone.IsSet | Should -BeTrue
         $state.CleanupComplete | Should -BeTrue
-        @($order.ToArray()) | Should -Be @('third', 'second', 'first')
+        $state.ActiveOperations | Should -Be 0
+        $state.OwnedResources.Count | Should -Be 0
+        @($order.ToArray()) | Should -Be @('source2', 'source1', 'host')
+        $hostProbe.DisposeCount | Should -Be 1
+        $source1Probe.DisposeCount | Should -Be 1
+        $source2Probe.DisposeCount | Should -Be 1
+        $injected.DisposeCount | Should -Be 0
         @($state.GetFailures()).Count | Should -Be 1
     }
 
@@ -561,7 +597,7 @@ Describe 'GraphKit module lifecycle' {
             $module = Import-Module $Manifest -Force -PassThru -ErrorAction Stop
             $result = & $module {
                 $before = @($script:GraphKitModuleLifecycle.OwnedResources)
-                $source = New-GraphAuthTokenSource -Profile @{
+                $source1 = New-GraphAuthTokenSource -Profile @{
                     TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
                     ClientId = $null
                     AuthMethod = 'BearerToken'
@@ -570,30 +606,60 @@ Describe 'GraphKit module lifecycle' {
                 } -Cloud @{
                     Name = 'Global'
                     Authority = [uri]'https://login.microsoftonline.com'
+                        Resource = [uri]'https://graph.microsoft.com'
+                }
+                $source2 = New-GraphAuthTokenSource -Profile @{
+                    TenantId = '4b5c6d7e-2222-3333-4444-555566667777'
+                    ClientId = $null
+                    AuthMethod = 'BearerToken'
+                    Environment = 'Global'
+                    Credential = @{
+                        Token = 'module-lifecycle-fixed-bearer-two'
+                        Version = 'fixture-v2'
+                    }
+                } -Cloud @{
+                    Name = 'Global'
+                    Authority = [uri]'https://login.microsoftonline.com'
                     Resource = [uri]'https://graph.microsoft.com'
                 }
+                $resources = @($script:GraphKitModuleLifecycle.OwnedResources)
                 [pscustomobject]@{
                     BeforeCount = $before.Count
                     BeforeType = $before[0].GetType().FullName
                     HostReferenceMatches = [object]::ReferenceEquals($before[0], $script:GraphKitAuthHost)
-                    ResourceTypes = @($script:GraphKitModuleLifecycle.OwnedResources | ForEach-Object { $_.GetType().FullName })
-                    Source = $source
+                    ExactResourceReferences =
+                        $resources.Count -eq 3 -and
+                        [object]::ReferenceEquals($resources[0], $script:GraphKitAuthHost) -and
+                        [object]::ReferenceEquals($resources[1], $source1) -and
+                        [object]::ReferenceEquals($resources[2], $source2)
+                    ResourceTypes = @($resources | ForEach-Object { $_.GetType().FullName })
+                    State = $script:GraphKitModuleLifecycle
+                    Source1 = $source1
+                    Source2 = $source2
                 }
             }
             $null = Remove-Module -ModuleInfo $module -Force -ErrorAction Stop
-            $rejected = $false
-            try {
-                $null = $result.Source.Acquire($false, [Threading.CancellationToken]::None)
-            }
-            catch [ObjectDisposedException] {
-                $rejected = $true
+            $rejectedCount = 0
+            foreach ($source in @($result.Source1, $result.Source2)) {
+                try {
+                    $null = $source.Acquire($false, [Threading.CancellationToken]::None)
+                }
+                catch [ObjectDisposedException] {
+                    $rejectedCount++
+                }
             }
             [pscustomobject]@{
                 BeforeCount = $result.BeforeCount
                 BeforeType = $result.BeforeType
                 HostReferenceMatches = $result.HostReferenceMatches
+                ExactResourceReferences = $result.ExactResourceReferences
                 ResourceTypes = $result.ResourceTypes
-                SourceRejectedAfterRemoval = $rejected
+                SourceRejectedCount = $rejectedCount
+                CleanupObserved = $result.State.CleanupDone.Wait(5000)
+                CleanupComplete = $result.State.CleanupComplete
+                ActiveOperations = $result.State.ActiveOperations
+                OwnedResourceCount = $result.State.OwnedResources.Count
+                FailureCount = @($result.State.GetFailures()).Count
             }
         } -ArgumentList $script:BuiltManifest
 
@@ -604,11 +670,18 @@ Describe 'GraphKit module lifecycle' {
             $result[0].BeforeCount | Should -Be 1
             $result[0].BeforeType | Should -BeExactly 'GraphKit.Auth.GraphAuthHost'
             $result[0].HostReferenceMatches | Should -BeTrue
+            $result[0].ExactResourceReferences | Should -BeTrue
             @($result[0].ResourceTypes) | Should -Be @(
                 'GraphKit.Auth.GraphAuthHost',
+                'GraphKit.Auth.GraphTokenSourceProxy',
                 'GraphKit.Auth.GraphTokenSourceProxy'
             )
-            $result[0].SourceRejectedAfterRemoval | Should -BeTrue
+            $result[0].SourceRejectedCount | Should -Be 2
+            $result[0].CleanupObserved | Should -BeTrue
+            $result[0].CleanupComplete | Should -BeTrue
+            $result[0].ActiveOperations | Should -Be 0
+            $result[0].OwnedResourceCount | Should -Be 0
+            $result[0].FailureCount | Should -Be 0
         }
         finally {
             $job | Remove-Job -Force -ErrorAction SilentlyContinue

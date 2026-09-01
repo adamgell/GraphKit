@@ -18,4 +18,10 @@
     <ProjectReference Include="../GraphKit.Auth/GraphKit.Auth.csproj" />
     <ProjectReference Include="../GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../../../tests/Fixtures/GraphKitAuthParityCases.json"
+          Link="Fixtures/GraphKitAuthParityCases.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never" />
+  </ItemGroup>
 </Project>

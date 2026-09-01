@@ -455,12 +455,71 @@ class FixedBearerTokenSource : GraphTokenSourceBase {
 class GraphTokenFlight {
     [System.Threading.Tasks.TaskCompletionSource[object]] $Completion
     [bool] $LeaderCancellationRequested
+    hidden [int] $WaiterCount
+    hidden [object] $WaiterCountLock
 
     GraphTokenFlight() {
+        $this.WaiterCountLock = [object]::new()
+        $this.WaiterCount = 0
         $this.Completion = [System.Threading.Tasks.TaskCompletionSource[object]]::new(
             [System.Threading.Tasks.TaskCreationOptions]::RunContinuationsAsynchronously
         )
         $this.LeaderCancellationRequested = $false
+    }
+}
+
+function Add-GraphTokenFlightWaiter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [GraphTokenFlight] $Flight
+    )
+
+    [System.Threading.Monitor]::Enter($Flight.WaiterCountLock)
+    try {
+        # Observation must remain behavior-neutral even at the diagnostic bound.
+        if ($Flight.WaiterCount -lt [int]::MaxValue) {
+            $Flight.WaiterCount = $Flight.WaiterCount + 1
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($Flight.WaiterCountLock)
+    }
+}
+
+function Remove-GraphTokenFlightWaiter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [GraphTokenFlight] $Flight
+    )
+
+    [System.Threading.Monitor]::Enter($Flight.WaiterCountLock)
+    try {
+        # A diagnostic invariant cannot replace the caller's primary outcome.
+        if ($Flight.WaiterCount -gt 0) {
+            $Flight.WaiterCount = $Flight.WaiterCount - 1
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($Flight.WaiterCountLock)
+    }
+}
+
+function Get-GraphTokenFlightWaiterCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory)]
+        [GraphTokenFlight] $Flight
+    )
+
+    [System.Threading.Monitor]::Enter($Flight.WaiterCountLock)
+    try {
+        return $Flight.WaiterCount
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($Flight.WaiterCountLock)
     }
 }
 
@@ -885,33 +944,39 @@ function Invoke-GraphTokenSingleFlight {
             continue
         }
 
+        Add-GraphTokenFlightWaiter -Flight $existing
         try {
-            return $existing.Completion.Task.WaitAsync($CancellationToken).GetAwaiter().GetResult()
-        }
-        catch {
-            $candidate = $_.Exception
-            $sharedAcquisitionWasCancelled = $false
-            while ($null -ne $candidate) {
-                if ($candidate -is [System.OperationCanceledException]) {
-                    $sharedAcquisitionWasCancelled = $true
-                    break
+            try {
+                return $existing.Completion.Task.WaitAsync($CancellationToken).GetAwaiter().GetResult()
+            }
+            catch {
+                $candidate = $_.Exception
+                $sharedAcquisitionWasCancelled = $false
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.OperationCanceledException]) {
+                        $sharedAcquisitionWasCancelled = $true
+                        break
+                    }
+                    $candidate = $candidate.InnerException
                 }
-                $candidate = $candidate.InnerException
+
+                $leaderCallerWasCancelled =
+                    $sharedAcquisitionWasCancelled -and $existing.LeaderCancellationRequested
+
+                if (-not $leaderCallerWasCancelled -or $CancellationToken.IsCancellationRequested) {
+                    throw
+                }
+
+                # A leader's caller-specific cancellation must not poison live
+                # waiters. Remove only the exact completed flight (never a newer
+                # replacement added for the same key), then let this caller compete
+                # to lead or join the replacement acquisition.
+                $null = Remove-GraphTokenFlightIfCurrent -Key $Key -Flight $existing
+                continue
             }
-
-            $leaderCallerWasCancelled =
-                $sharedAcquisitionWasCancelled -and $existing.LeaderCancellationRequested
-
-            if (-not $leaderCallerWasCancelled -or $CancellationToken.IsCancellationRequested) {
-                throw
-            }
-
-            # A leader's caller-specific cancellation must not poison live
-            # waiters. Remove only the exact completed flight (never a newer
-            # replacement added for the same key), then let this caller compete
-            # to lead or join the replacement acquisition.
-            $null = Remove-GraphTokenFlightIfCurrent -Key $Key -Flight $existing
-            continue
+        }
+        finally {
+            Remove-GraphTokenFlightWaiter -Flight $existing
         }
     }
 }

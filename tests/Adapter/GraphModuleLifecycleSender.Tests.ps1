@@ -11,6 +11,7 @@ BeforeAll {
     if ($null -eq ('GraphKit.Tests.LifecycleBlockingHandler' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +20,7 @@ namespace GraphKit.Tests
 {
     public sealed class LifecycleBlockingHandler : HttpMessageHandler
     {
+        public const string ContractMarker = "GraphKit.Task7.LifecycleSenderFixture/1";
         private int _disposeCount;
         private int _sendCount;
 
@@ -26,6 +28,8 @@ namespace GraphKit.Tests
         public int SendCount { get { return _sendCount; } }
         public CancellationToken SeenToken { get; private set; }
         public TaskCompletionSource<bool> Started { get; } =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Exited { get; } =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(
@@ -35,8 +39,15 @@ namespace GraphKit.Tests
             Interlocked.Increment(ref _sendCount);
             SeenToken = cancellationToken;
             Started.TrySetResult(true);
-            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException("The blocking test handler resumed without cancellation.");
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException("The blocking test handler resumed without cancellation.");
+            }
+            finally
+            {
+                Exited.TrySetResult(true);
+            }
         }
 
         protected override void Dispose(bool disposing)
@@ -48,8 +59,53 @@ namespace GraphKit.Tests
             base.Dispose(disposing);
         }
     }
+
+    public sealed class LifecycleCleanupProbe : IDisposable
+    {
+        private readonly string _name;
+        private readonly LifecycleBlockingHandler _handler;
+        private readonly ConcurrentQueue<string> _order;
+        private int _disposeCount;
+        private int _preconditionsSatisfied;
+
+        public LifecycleCleanupProbe(
+            string name,
+            LifecycleBlockingHandler handler,
+            ConcurrentQueue<string> order)
+        {
+            _name = name;
+            _handler = handler;
+            _order = order;
+        }
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+        public bool PreconditionsSatisfied => Volatile.Read(ref _preconditionsSatisfied) != 0;
+
+        public void Dispose()
+        {
+            if (_handler.SeenToken.IsCancellationRequested && _handler.Exited.Task.IsCompleted)
+                Volatile.Write(ref _preconditionsSatisfied, 1);
+            _order.Enqueue(_name);
+            Interlocked.Increment(ref _disposeCount);
+        }
+    }
 }
 '@
+    }
+    $handlerType = 'GraphKit.Tests.LifecycleBlockingHandler' -as [type]
+    $handlerMarker = if ($null -ne $handlerType) {
+        $handlerType.GetField('ContractMarker')
+    }
+    else {
+        $null
+    }
+    if ($null -eq $handlerMarker -or
+        [string] $handlerMarker.GetRawConstantValue() -cne
+            'GraphKit.Task7.LifecycleSenderFixture/1') {
+        throw (
+            'The process-global lifecycle sender fixture is stale. ' +
+            'Run this file in a fresh PowerShell process.'
+        )
     }
 }
 
@@ -104,6 +160,26 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
         }
         $handler = [GraphKit.Tests.LifecycleBlockingHandler]::new()
         $client = [System.Net.Http.HttpClient]::new($handler, $true)
+        $cleanupOrder = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $hostCleanup = [GraphKit.Tests.LifecycleCleanupProbe]::new(
+            'host', $handler, $cleanupOrder)
+        $sourceCleanup = [GraphKit.Tests.LifecycleCleanupProbe]::new(
+            'source', $handler, $cleanupOrder)
+        InModuleScope GraphKit -Parameters @{
+            State = $state
+            HostCleanup = $hostCleanup
+            SourceCleanup = $sourceCleanup
+        } {
+            param($State, $HostCleanup, $SourceCleanup)
+            $null = Register-GraphModuleOwnedResource `
+                -State $State -Resource $HostCleanup -OwnedByGraphKit:$true
+            $null = Register-GraphModuleOwnedResource `
+                -State $State -Resource $SourceCleanup -OwnedByGraphKit:$true
+        }
+        $registered = @($state.OwnedResources)
+        $registered.Count | Should -Be 2
+        [object]::ReferenceEquals($registered[0], $hostCleanup) | Should -BeTrue
+        [object]::ReferenceEquals($registered[1], $sourceCleanup) | Should -BeTrue
         $stateKey = 'GraphKitTest.SenderState.' + [guid]::NewGuid().ToString('N')
         $clientKey = 'GraphKitTest.SenderClient.' + [guid]::NewGuid().ToString('N')
         [System.AppDomain]::CurrentDomain.SetData($stateKey, $state)
@@ -151,23 +227,36 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
                 throw 'Stop-GraphModule did not cancel and drain the in-flight sender within five seconds.'
             }
 
-            $null = $stopJob | Receive-Job -Wait -ErrorAction Stop
-            $result = $sendJob | Receive-Job -Wait -ErrorAction Stop
+            $sendCompleted = @($sendJob | Wait-Job -Timeout 10)
+            $sendCompleted.Count | Should -Be 1
+            $null = $stopJob | Receive-Job -ErrorAction Stop
+            $result = $sendJob | Receive-Job -ErrorAction Stop
 
             $handler.SendCount | Should -Be 1
             $handler.SeenToken.IsCancellationRequested | Should -BeTrue
+            $handler.Exited.Task.IsCompleted | Should -BeTrue
             $result.TransportException | Should -Not -BeNullOrEmpty
+            $state.CleanupDone.Wait(5000) | Should -BeTrue
             $state.ActiveOperations | Should -Be 0
             $state.CleanupComplete | Should -BeTrue
+            $state.OwnedResources.Count | Should -Be 0
+            @($state.GetFailures()).Count | Should -Be 0
+            @($cleanupOrder.ToArray()) | Should -Be @('source', 'host')
+            $sourceCleanup.DisposeCount | Should -Be 1
+            $hostCleanup.DisposeCount | Should -Be 1
+            $sourceCleanup.PreconditionsSatisfied | Should -BeTrue
+            $hostCleanup.PreconditionsSatisfied | Should -BeTrue
             $handler.DisposeCount | Should -Be 0
             { $client.CancelPendingRequests() } | Should -Not -Throw
         }
         finally {
             try { $client.CancelPendingRequests() } catch { }
             if ($null -ne $sendJob) {
+                $null = @($sendJob | Wait-Job -Timeout 10)
                 $sendJob | Remove-Job -Force -ErrorAction SilentlyContinue
             }
             if ($null -ne $stopJob) {
+                $null = @($stopJob | Wait-Job -Timeout 10)
                 $stopJob | Remove-Job -Force -ErrorAction SilentlyContinue
             }
             [System.AppDomain]::CurrentDomain.SetData($stateKey, $null)

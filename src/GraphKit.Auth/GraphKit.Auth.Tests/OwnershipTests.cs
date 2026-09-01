@@ -318,18 +318,39 @@ public sealed class OwnershipTests
         var secondFactory = CreateFactory();
 
         Task<CreateOutcome> first = Task.Run(() => CaptureCreate(firstFactory, firstRequest));
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
-        Task<CreateOutcome> second = Task.Run(() => CaptureCreate(secondFactory, duplicateRequest));
-        bool duplicateRejectedBeforeWinnerCompleted = ReferenceEquals(
-            await Task.WhenAny(second, Task.Delay(TimeSpan.FromMilliseconds(500))),
-            second);
-        release.Set();
-        CreateOutcome[] outcomes = await Task.WhenAll(first, second);
+        Task<CreateOutcome>? second = null;
+        Exception? observationFailure = null;
+        bool duplicateRejectedBeforeWinnerCompleted = false;
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            second = Task.Run(() => CaptureCreate(secondFactory, duplicateRequest));
+            _ = await second.WaitAsync(TimeSpan.FromSeconds(5));
+            duplicateRejectedBeforeWinnerCompleted = second.IsCompleted;
+        }
+        catch (Exception exception)
+        {
+            observationFailure = exception;
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        var pending = second is null ? new[] { first } : new[] { first, second };
+        CreateOutcome[] outcomes = await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(5));
         foreach (IGraphTokenSource source in outcomes
             .Where(outcome => outcome.Source is not null)
             .Select(outcome => outcome.Source!))
         {
             source.Dispose();
+        }
+
+        if (observationFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                .Capture(observationFailure)
+                .Throw();
         }
 
         Assert.True(duplicateRejectedBeforeWinnerCompleted);
@@ -405,27 +426,52 @@ public sealed class OwnershipTests
         Assert.True(callerOwned.HasPrivateKey);
     }
 
-    [Fact]
-    public async Task DisposalWaitsForActiveAcquisitionBeforeDisposingOwnedMaterial()
+    [Theory]
+    [InlineData(GraphAuthMode.Certificate)]
+    [InlineData(GraphAuthMode.ClientSecret)]
+    public async Task DisposalCancelsAndDrainsActiveAcquisitionBeforeOwnedMaterial(
+        GraphAuthMode mode)
     {
         var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
         using X509Certificate2 certificate = CertificateFixture.Create();
+        using SecureString secret = GraphTokenSourceTests.SecureStringFixture.Create("fixture-secret");
         using var entered = new ManualResetEventSlim(false);
-        using var release = new ManualResetEventSlim(false);
+        using var emergencyRelease = new ManualResetEventSlim(false);
         var order = new List<string>();
-        var client = new GraphTokenSourceTests.FakeTokenClient((_, _) =>
+        var client = new GraphTokenSourceTests.FakeTokenClient((_, cancellation) =>
         {
-            entered.Set();
-            release.Wait();
             lock (order)
             {
-                order.Add("acquire-complete");
+                order.Add("acquire-entered");
             }
+            entered.Set();
 
-            return GraphTokenSourceTests.Result("token", InitialNow, InitialNow.AddHours(1));
+            try
+            {
+                int completed = WaitHandle.WaitAny(
+                    new[] { cancellation.WaitHandle, emergencyRelease.WaitHandle });
+                if (completed == 1)
+                {
+                    throw new OperationCanceledException(
+                        "Task 7 fixture emergency release ended a blocked acquisition.");
+                }
+                lock (order)
+                {
+                    order.Add("cancellation-observed");
+                }
+                cancellation.ThrowIfCancellationRequested();
+                throw new InvalidOperationException("Task 7 acquisition resumed without cancellation.");
+            }
+            finally
+            {
+                lock (order)
+                {
+                    order.Add("acquire-exited");
+                }
+            }
         });
         var source = new GraphTokenSource(
-            CertificateRequest(certificate, ownsMaterial: true),
+            OwnedRequest(mode, certificate, secret),
             client,
             clock.GetUtcNow,
             material =>
@@ -437,16 +483,56 @@ public sealed class OwnershipTests
 
                 material.Dispose();
             });
-        Task<GraphTokenResult> acquire = Task.Run(() =>
-            source.Acquire(false, CancellationToken.None));
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        Task<GraphTokenResult>? acquire = null;
+        Task? dispose = null;
+        try
+        {
+            acquire = Task.Run(() =>
+                source.Acquire(false, CancellationToken.None));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
 
-        Task dispose = Task.Run(source.Dispose);
-        Assert.NotSame(dispose, await Task.WhenAny(dispose, Task.Delay(100)));
-        release.Set();
-        await Task.WhenAll(acquire, dispose);
+            dispose = Task.Run(source.Dispose);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await acquire.WaitAsync(TimeSpan.FromSeconds(5)));
+            await dispose.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(new[] { "acquire-complete", "material-disposed" }, order);
+            Assert.Equal(
+                new[]
+                {
+                    "acquire-entered",
+                    "cancellation-observed",
+                    "acquire-exited",
+                    "material-disposed"
+                },
+                order);
+            Assert.Equal(1, client.AcquireCount);
+            Assert.Equal(1, client.DisposeCount);
+        }
+        finally
+        {
+            emergencyRelease.Set();
+            dispose ??= Task.Run(source.Dispose);
+            await ObserveBoundedAsync(acquire);
+            await ObserveBoundedAsync(dispose);
+        }
+
+        static async Task ObserveBoundedAsync(Task? task)
+        {
+            if (task is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch
+            {
+                // The owning assertions above validate the normal outcome. This
+                // cleanup observer only prevents a failed mutation from leaking.
+            }
+        }
     }
 
     [Fact]

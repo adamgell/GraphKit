@@ -2751,6 +2751,29 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
     It 'matches the literal ABI-v1 public surface without extra exported types or members' {
         { Assert-GraphKitAuthAbiV1Surface -ContractsPath $script:contractsPath } |
             Should -Not -Throw
+
+        $inspectionContext = [Runtime.Loader.AssemblyLoadContext]::new(
+            'GraphKit.Task7.DeadFieldInspection.' + [guid]::NewGuid().ToString('N'),
+            $true)
+        $inspectionAssembly = $null
+        $hostType = $null
+        try {
+            $inspectionAssembly = $inspectionContext.LoadFromAssemblyPath(
+                (Resolve-Path -LiteralPath $script:contractsPath).ProviderPath)
+            $hostType = $inspectionAssembly.GetType(
+                'GraphKit.Auth.GraphAuthHost', $true, $false)
+            $privateInstance = [Reflection.BindingFlags]'Instance,NonPublic'
+            $hostType.GetField('_drained', $privateInstance) | Should -BeNullOrEmpty `
+                -Because 'the unused private drained marker must not survive Task 7'
+            $hostType.GetField('_shutdownCompleted', $privateInstance) | Should -BeNullOrEmpty `
+                -Because 'the unused private shutdown-completed marker must not survive Task 7'
+        }
+        finally {
+            $hostType = $null
+            $inspectionAssembly = $null
+            $inspectionContext.Unload()
+            $inspectionContext = $null
+        }
     }
 }
 

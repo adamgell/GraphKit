@@ -25,8 +25,6 @@ public sealed class GraphAuthHost : IDisposable
     private readonly HashSet<GraphTokenSourceProxy> _sources = [];
     private readonly List<GraphAuthException> _sourceDisposalFailures = [];
     private readonly CancellationTokenSource _shutdown = new();
-    private readonly ManualResetEventSlim _drained = new(initialState: true);
-    private readonly ManualResetEventSlim _shutdownCompleted = new(initialState: false);
     private readonly TaskCompletionSource<GraphAuthException?> _finalizationCompletion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TimeSpan _shutdownTimeout;
@@ -331,11 +329,7 @@ public sealed class GraphAuthHost : IDisposable
     internal GraphAuthOperationLease EnterOperation(CancellationToken callerCancellation)
     {
         ThrowIfStopping();
-        int active = Interlocked.Increment(ref _activeOperations);
-        if (active == 1)
-        {
-            _drained.Reset();
-        }
+        Interlocked.Increment(ref _activeOperations);
 
         if (Volatile.Read(ref _state) != Running)
         {
@@ -640,7 +634,6 @@ public sealed class GraphAuthHost : IDisposable
     {
         if (Interlocked.Decrement(ref _activeOperations) == 0)
         {
-            _drained.Set();
             if (Volatile.Read(ref _state) == SourcesDisposedAwaitingDrain)
             {
                 TryFinalizeUnload();
@@ -690,7 +683,6 @@ public sealed class GraphAuthHost : IDisposable
         }
         finally
         {
-            _shutdownCompleted.Set();
             _finalizationCompletion.TrySetResult(failure);
         }
     }

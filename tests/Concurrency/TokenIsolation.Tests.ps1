@@ -7,11 +7,11 @@
     retargets every other. A per-context token source is only an improvement if it
     actually keeps contexts apart.
 
-    Note on structure: token sources are PowerShell classes defined inside the module, so
-    an instance cannot be marshalled into a bare runspace - the concurrent test therefore
-    imports the module and constructs its source INSIDE each child, sharing only a plain
-    ConcurrentDictionary. Properties that are not about concurrency are asserted directly,
-    because a real runspace adds nothing but flakiness to them.
+    Note on structure: this file retains direct per-instance coverage for the legacy
+    PowerShell-class sources. Task 7's GraphKitAuthRunspace.Tests.ps1 separately proves that
+    one exact compiled parent source crosses real thread runspaces by reference. These legacy
+    fixtures stay module-scoped because their compatibility boundary intentionally rejects
+    cross-runspace acquisition.
 #>
 
 BeforeAll {
@@ -34,7 +34,7 @@ BeforeAll {
     # acquisitions and returns a token naming its tenant, so a token reaching the wrong
     # context is immediately identifiable rather than merely "a token".
     $script:SourceFactoryScript = {
-        param([string] $Tenant, $Counter, [int] $DelayMs = 0, $ForceRefreshFlags)
+        param([string] $Tenant, $Counter, $ForceRefreshFlags)
 
         # State is carried on the objects themselves ($this) rather than in closures:
         # ScriptMethod bodies do not reliably see variables captured by GetNewClosure at
@@ -43,7 +43,6 @@ BeforeAll {
             $app = [pscustomobject] @{
                 Tenant            = $Tenant
                 Counter           = $Counter
-                DelayMs           = $DelayMs
                 ForceRefreshFlags = $ForceRefreshFlags
             }
             $app | Add-Member -MemberType ScriptMethod -Name AcquireTokenForClient -Value {
@@ -51,7 +50,6 @@ BeforeAll {
                 $builder = [pscustomobject] @{
                     Tenant            = $this.Tenant
                     Counter           = $this.Counter
-                    DelayMs           = $this.DelayMs
                     ForceRefreshFlags = $this.ForceRefreshFlags
                 }
                 $builder | Add-Member -MemberType ScriptMethod -Name WithForceRefresh -Value {
@@ -62,8 +60,6 @@ BeforeAll {
                 $builder | Add-Member -MemberType ScriptMethod -Name ExecuteAsync -Value {
                     param($Cancellation)
                     $null = $this.Counter.AddOrUpdate($this.Tenant, 1, [Func[string, int, int]] { param($k, $v) $v + 1 })
-                    if ($this.DelayMs -gt 0) { Start-Sleep -Milliseconds $this.DelayMs }
-
                     $auth = [pscustomobject] @{
                         AccessToken = "TOKEN-FOR-$($this.Tenant)"
                         ExpiresOn   = [System.DateTimeOffset]::UtcNow.AddHours(1)
@@ -89,12 +85,11 @@ BeforeAll {
         param(
             [string] $Tenant,
             $Counter,
-            [int] $DelayMs = 0,
             $ForceRefreshFlags = ([System.Collections.Concurrent.ConcurrentQueue[bool]]::new())
         )
-        InModuleScope GraphKit -Parameters @{ T = $Tenant; C = $Counter; D = $DelayMs; Q = $ForceRefreshFlags; F = $script:SourceFactoryScript } {
-            param($T, $C, $D, $Q, $F)
-            & $F $T $C $D $Q
+        InModuleScope GraphKit -Parameters @{ T = $Tenant; C = $Counter; Q = $ForceRefreshFlags; F = $script:SourceFactoryScript } {
+            param($T, $C, $Q, $F)
+            & $F $T $C $Q
         }
     }
 

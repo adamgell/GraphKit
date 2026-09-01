@@ -181,19 +181,43 @@ namespace GraphKit.Tests
 {
     public sealed class ConcurrentApplicationHarness
     {
+        public const string ContractMarker = "GraphKit.Task7.ConcurrentApplicationHarness/1";
         private static int _factoryCalls;
+        private static int _disposed;
+        private static ManualResetEventSlim _entered = new(false);
+        private static ManualResetEventSlim _release = new(false);
 
         public static int FactoryCalls { get { return Volatile.Read(ref _factoryCalls); } }
+        public static bool WaitUntilEntered(int millisecondsTimeout) => _entered.Wait(millisecondsTimeout);
+        public static void Release() => _release.Set();
 
         public static void Reset()
         {
+            Interlocked.Exchange(ref _factoryCalls, 0);
+            Interlocked.Exchange(ref _disposed, 0);
+            ManualResetEventSlim oldEntered = Interlocked.Exchange(
+                ref _entered, new ManualResetEventSlim(false));
+            ManualResetEventSlim oldRelease = Interlocked.Exchange(
+                ref _release, new ManualResetEventSlim(false));
+            oldEntered.Dispose();
+            oldRelease.Dispose();
+        }
+
+        public static void ResetAndDispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            _release.Set();
+            _entered.Dispose();
+            _release.Dispose();
             Interlocked.Exchange(ref _factoryCalls, 0);
         }
 
         public static ConcurrentConfidentialApplication Create()
         {
             Interlocked.Increment(ref _factoryCalls);
-            Thread.Sleep(400);
+            _entered.Set();
+            _release.Wait();
             return new ConcurrentConfidentialApplication();
         }
     }
@@ -233,6 +257,22 @@ namespace GraphKit.Tests
 '@
     }
 
+    $concurrentHarnessType = 'GraphKit.Tests.ConcurrentApplicationHarness' -as [type]
+    $concurrentHarnessMarker = if ($null -ne $concurrentHarnessType) {
+        $concurrentHarnessType.GetField('ContractMarker')
+    }
+    else {
+        $null
+    }
+    if ($null -eq $concurrentHarnessMarker -or
+        [string] $concurrentHarnessMarker.GetRawConstantValue() -cne
+            'GraphKit.Task7.ConcurrentApplicationHarness/1') {
+        throw (
+            'The process-global ConcurrentApplicationHarness contract is stale. ' +
+            'Run this test file in a fresh PowerShell process.'
+        )
+    }
+
     function New-ConcurrentHarnessSource {
         InModuleScope GraphKit {
             # ScriptBlock.Create keeps the fake itself runspace-neutral; the
@@ -250,6 +290,75 @@ namespace GraphKit.Tests
             )
         }
     }
+
+    function Get-Task7OuterFlightState {
+        param([Parameter(Mandatory)] [string] $Key)
+
+        return InModuleScope GraphKit -Parameters @{ Key = $Key } {
+            param($Key)
+            $flight = [GraphTokenFlight] $null
+            $exists = [GraphTokenFlightRegistry]::Flights.TryGetValue($Key, [ref] $flight)
+            [pscustomobject] @{
+                Exists = $exists
+                Flight = [object] $flight
+                WaiterCount = if ($exists) {
+                    [int] (Get-GraphTokenFlightWaiterCount -Flight $flight)
+                }
+                else {
+                    -1
+                }
+                RegistryCount = [GraphTokenFlightRegistry]::Flights.Count
+                IsCompleted = $exists -and $flight.Completion.Task.IsCompleted
+            }
+        }
+    }
+
+    function Wait-Task7OuterFollowerCount {
+        param(
+            [Parameter(Mandatory)] [string] $Key,
+            [Parameter(Mandatory)] [int] $ExpectedCount
+        )
+
+        $deadline = [Environment]::TickCount64 + 5000
+        $spin = [Threading.SpinWait]::new()
+        while ([Environment]::TickCount64 -lt $deadline) {
+            $state = Get-Task7OuterFlightState -Key $Key
+            if ($state.Exists -and $state.WaiterCount -eq $ExpectedCount) {
+                return $true
+            }
+            $spin.SpinOnce()
+        }
+        return $false
+    }
+
+    function Get-Task7ExactFlightWaiterCount {
+        param([Parameter(Mandatory)] [object] $Flight)
+
+        return InModuleScope GraphKit -Parameters @{ Flight = $Flight } {
+            param($Flight)
+            [int] (Get-GraphTokenFlightWaiterCount -Flight $Flight)
+        }
+    }
+
+    function Receive-Task7BoundedJobs {
+        param(
+            [Parameter(Mandatory)] [object[]] $Jobs,
+            [Parameter(Mandatory)] [int] $ExpectedCount
+        )
+
+        $completed = @($Jobs | Wait-Job -Timeout 10)
+        if ($completed.Count -ne $ExpectedCount) {
+            throw "Task 7 expected $ExpectedCount completed jobs but observed $($completed.Count)."
+        }
+        return @($Jobs | Receive-Job -ErrorAction Stop)
+    }
+}
+
+AfterAll {
+    if ($null -ne ('GraphKit.Tests.ConcurrentApplicationHarness' -as [type])) {
+        [GraphKit.Tests.ConcurrentApplicationHarness]::ResetAndDispose()
+    }
+    Remove-Module GraphKit -Force -ErrorAction SilentlyContinue
 }
 
 Describe 'GraphTokenSource' {
@@ -359,8 +468,7 @@ Describe 'GraphTokenSource' {
                 $go.Set()
                 $completed = @(Wait-Job -Job $jobs -Timeout 10)
                 $completed.Count | Should -Be 2 -Because 'cross-runspace containment must fail, never hang'
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
-                $jobs = $null
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 2
 
                 [GraphKit.Tests.ConcurrentApplicationHarness]::FactoryCalls | Should -Be 0
                 $results.Count | Should -Be 2
@@ -369,9 +477,11 @@ Describe 'GraphTokenSource' {
                     Should -Be 0
             }
             finally {
+                [GraphKit.Tests.ConcurrentApplicationHarness]::Release()
                 $go.Set()
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $null = @($jobs | Wait-Job -Timeout 10)
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationReady', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ApplicationGo', $null)
@@ -418,11 +528,14 @@ Describe 'GraphTokenSource' {
 
                 $completed = Wait-Job -Job $job -Timeout 5
                 $completed | Should -Not -BeNullOrEmpty -Because 'preflight must run before waiting on a shared flight'
-                $message = $job | Receive-Job -Wait
+                $message = $job | Receive-Job -ErrorAction Stop
 
                 $message | Should -Match 'bound to the runspace.*GraphKit\.Auth'
                 [GraphKit.Tests.ConcurrentApplicationHarness]::FactoryCalls | Should -Be 0
                 $seed.Flight.Completion.Task.IsCompleted | Should -BeFalse
+                $seed.Flight.PSObject.Properties['WaiterCount'] |
+                    Should -Not -BeNullOrEmpty
+                Get-Task7ExactFlightWaiterCount -Flight $seed.Flight | Should -Be 0
 
                 InModuleScope GraphKit -Parameters @{ FlightKey = $seed.Key; Flight = $seed.Flight } {
                     param($FlightKey, $Flight)
@@ -432,6 +545,7 @@ Describe 'GraphTokenSource' {
                 }
             }
             finally {
+                [GraphKit.Tests.ConcurrentApplicationHarness]::Release()
                 $null = $seed.Flight.Completion.TrySetResult($null)
                 InModuleScope GraphKit -Parameters @{ FlightKey = $seed.Key; Flight = $seed.Flight } {
                     param($FlightKey, $Flight)
@@ -443,6 +557,7 @@ Describe 'GraphTokenSource' {
                     }
                 }
                 if ($null -ne $job) {
+                    $null = @($job | Wait-Job -Timeout 10)
                     $job | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
             }
@@ -922,6 +1037,7 @@ Describe 'GraphTokenSource' {
                     $message | Should -BeLike '*canceled*'
                     $state.calls | Should -Be 0
                     [GraphTokenFlightRegistry]::Flights.ContainsKey($key) | Should -BeTrue
+                    Get-GraphTokenFlightWaiterCount -Flight $flight | Should -Be 0
                 }
                 finally {
                     if ($null -ne $flight.PSObject.Properties['Completion']) {
@@ -1076,11 +1192,16 @@ Describe 'GraphTokenSource' {
 
         It 'collapses N concurrent same-tuple acquires to a single acquisition' {
             $key = 'tuple-key'
-
+            $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
             $ready = [System.Threading.CountdownEvent]::new(8)
             $go = [System.Threading.ManualResetEventSlim]::new($false)
+            $entered = [System.Threading.ManualResetEventSlim]::new($false)
+            $release = [System.Threading.ManualResetEventSlim]::new($false)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryCalls', $calls)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Ready', $ready)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Go', $go)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryEntered', $entered)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryRelease', $release)
 
             $jobs = $null
             try {
@@ -1094,35 +1215,67 @@ Describe 'GraphTokenSource' {
                         $null = $go.Wait()
                         & (Get-Module GraphKit) {
                             Invoke-GraphTokenSingleFlight -Key $key -AcquireScript {
-                                Start-Sleep -Milliseconds 400
+                                $calls = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryCalls')
+                                $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryEntered')
+                                $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryRelease')
+                                $calls.Enqueue('acquire')
+                                $entered.Set()
+                                $null = $release.Wait()
                                 [pscustomobject]@{ Token = [guid]::NewGuid().ToString() }
                             }
                         }
                     } -ArgumentList $key, $script:BuiltManifest
                 }
 
-                $null = $ready.Wait(15000)
+                $ready.Wait(15000) | Should -BeTrue
                 $go.Set()
+                $entered.Wait(5000) | Should -BeTrue
+                $followerObserved = Wait-Task7OuterFollowerCount -Key $key -ExpectedCount 7
+                $beforeRelease = Get-Task7OuterFlightState -Key $key
+                $release.Set()
+                $followerObserved | Should -BeTrue
+                $beforeRelease.Exists | Should -BeTrue
+                $beforeRelease.WaiterCount | Should -Be 7
 
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 8
+                $calls.Count | Should -Be 1
                 @($results.Token | Sort-Object -Unique).Count | Should -Be 1
+                Get-Task7ExactFlightWaiterCount -Flight $beforeRelease.Flight | Should -Be 0
+                (Get-Task7OuterFlightState -Key $key).Exists | Should -BeFalse
             }
             finally {
+                $release.Set()
+                $go.Set()
+                if ($null -ne $jobs) {
+                    $null = @($jobs | Wait-Job -Timeout 10)
+                }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Ready', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Go', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryCalls', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryEntered', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OrdinaryRelease', $null)
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
+                $ready.Dispose()
+                $go.Dispose()
+                $entered.Dispose()
+                $release.Dispose()
             }
         }
 
         It 'surfaces an acquisition failure to every concurrent waiter' {
             $key = 'failure-key'
-
+            $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
             $ready = [System.Threading.CountdownEvent]::new(8)
             $go = [System.Threading.ManualResetEventSlim]::new($false)
-            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Ready', $ready)
-            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Go', $go)
+            $entered = [System.Threading.ManualResetEventSlim]::new($false)
+            $release = [System.Threading.ManualResetEventSlim]::new($false)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureCalls', $calls)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureReady', $ready)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureGo', $go)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureEntered', $entered)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureRelease', $release)
 
             $jobs = $null
             try {
@@ -1130,13 +1283,21 @@ Describe 'GraphTokenSource' {
                     Start-ThreadJob -ThrottleLimit 8 -ScriptBlock {
                         param($key, $manifest)
                         Import-Module $manifest
-                        $ready = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.Ready')
-                        $go = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.Go')
+                        $ready = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureReady')
+                        $go = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureGo')
                         $null = $ready.Signal()
                         $null = $go.Wait()
                         try {
                             $null = & (Get-Module GraphKit) {
-                                Invoke-GraphTokenSingleFlight -Key $key -AcquireScript { throw 'acquisition failed' }
+                                Invoke-GraphTokenSingleFlight -Key $key -AcquireScript {
+                                    $calls = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureCalls')
+                                    $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureEntered')
+                                    $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureRelease')
+                                    $calls.Enqueue('acquire')
+                                    $entered.Set()
+                                    $null = $release.Wait()
+                                    throw 'acquisition failed'
+                                }
                             }
                             'ok'
                         }
@@ -1146,19 +1307,40 @@ Describe 'GraphTokenSource' {
                     } -ArgumentList $key, $script:BuiltManifest
                 }
 
-                $null = $ready.Wait(15000)
+                $ready.Wait(15000) | Should -BeTrue
                 $go.Set()
+                $entered.Wait(5000) | Should -BeTrue
+                $followerObserved = Wait-Task7OuterFollowerCount -Key $key -ExpectedCount 7
+                $beforeRelease = Get-Task7OuterFlightState -Key $key
+                $release.Set()
+                $followerObserved | Should -BeTrue
+                $beforeRelease.WaiterCount | Should -Be 7
 
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 8
+                $calls.Count | Should -Be 1
                 @($results | Where-Object { $_ -ne 'err' }).Count | Should -Be 0
                 $results.Count | Should -Be 8
+                Get-Task7ExactFlightWaiterCount -Flight $beforeRelease.Flight | Should -Be 0
+                (Get-Task7OuterFlightState -Key $key).Exists | Should -BeFalse
             }
             finally {
-                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Ready', $null)
-                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.Go', $null)
+                $release.Set()
+                $go.Set()
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $null = @($jobs | Wait-Job -Timeout 10)
                 }
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureCalls', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureReady', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureGo', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureEntered', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.FailureRelease', $null)
+                if ($null -ne $jobs) {
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+                }
+                $ready.Dispose()
+                $go.Dispose()
+                $entered.Dispose()
+                $release.Dispose()
             }
         }
 
@@ -1167,9 +1349,13 @@ Describe 'GraphTokenSource' {
             $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
             $ready = [System.Threading.CountdownEvent]::new(8)
             $go = [System.Threading.ManualResetEventSlim]::new($false)
+            $entered = [System.Threading.ManualResetEventSlim]::new($false)
+            $release = [System.Threading.ManualResetEventSlim]::new($false)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceCalls', $calls)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceReady', $ready)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceGo', $go)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceEntered', $entered)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceRelease', $release)
 
             $jobs = $null
             try {
@@ -1189,8 +1375,11 @@ Describe 'GraphTokenSource' {
                                     -CancellationToken ([System.Threading.CancellationToken]::None) `
                                     -AcquireScript {
                                         $queue = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProviderOceCalls')
+                                        $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProviderOceEntered')
+                                        $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProviderOceRelease')
                                         $queue.Enqueue('acquire')
-                                        Start-Sleep -Milliseconds 800
+                                        $entered.Set()
+                                        $null = $release.Wait()
                                         throw [System.OperationCanceledException]::new('provider timed out internally')
                                     }
                             } $Key
@@ -1204,22 +1393,38 @@ Describe 'GraphTokenSource' {
 
                 $ready.Wait(15000) | Should -BeTrue
                 $go.Set()
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
-                $jobs = $null
+                $entered.Wait(5000) | Should -BeTrue
+                $followerObserved = Wait-Task7OuterFollowerCount -Key $key -ExpectedCount 7
+                $beforeRelease = Get-Task7OuterFlightState -Key $key
+                $release.Set()
+                $followerObserved | Should -BeTrue
+                $beforeRelease.WaiterCount | Should -Be 7
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 8
 
                 $calls.Count | Should -Be 1
                 $results.Count | Should -Be 8
                 @($results | Where-Object { $_ -notlike '*provider timed out internally*' }).Count | Should -Be 0
+                Get-Task7ExactFlightWaiterCount -Flight $beforeRelease.Flight | Should -Be 0
+                (Get-Task7OuterFlightState -Key $key).Exists | Should -BeFalse
             }
             finally {
+                $release.Set()
+                $go.Set()
+                if ($null -ne $jobs) {
+                    $null = @($jobs | Wait-Job -Timeout 10)
+                }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceCalls', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceReady', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceGo', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceEntered', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProviderOceRelease', $null)
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 $ready.Dispose()
                 $go.Dispose()
+                $entered.Dispose()
+                $release.Dispose()
             }
         }
 
@@ -1302,13 +1507,15 @@ Describe 'GraphTokenSource' {
 
                 $waitersReady.Wait(15000) | Should -BeTrue
                 $waitersGo.Set()
-                Start-Sleep -Milliseconds 200
+                $oldFollowersObserved = Wait-Task7OuterFollowerCount -Key $key -ExpectedCount 7
+                $oldStateBeforeCancel = Get-Task7OuterFlightState -Key $key
                 $leaderCts.Cancel()
 
                 $replacementStarted.Wait(15000) | Should -BeTrue
-                $leaderResult = @($leaderJob | Receive-Job -Wait)
-                Remove-Job -Job $leaderJob -Force -ErrorAction SilentlyContinue
-                $leaderJob = $null
+                $replacementFollowersObserved = Wait-Task7OuterFollowerCount `
+                    -Key $key -ExpectedCount 6
+                $replacementStateBeforeRelease = Get-Task7OuterFlightState -Key $key
+                $leaderResult = Receive-Task7BoundedJobs -Jobs @($leaderJob) -ExpectedCount 1
                 $leaderResult | Should -Contain 'leader-cancelled'
 
                 # The old leader's finally block has now run while the replacement
@@ -1322,13 +1529,18 @@ Describe 'GraphTokenSource' {
                 }
 
                 $releaseReplacement.Set()
-                $waiterResults = @($waiterJobs | Receive-Job -Wait)
-                Remove-Job -Job $waiterJobs -Force -ErrorAction SilentlyContinue
-                $waiterJobs = $null
+                $waiterResults = Receive-Task7BoundedJobs -Jobs $waiterJobs -ExpectedCount 7
+                $oldFollowersObserved | Should -BeTrue
+                $oldStateBeforeCancel.WaiterCount | Should -Be 7
+                $replacementFollowersObserved | Should -BeTrue
+                $replacementStateBeforeRelease.WaiterCount | Should -Be 6
                 $waiterResults.Count | Should -Be 7
                 @($waiterResults | Where-Object { $_ -ne 'replacement-result' }).Count | Should -Be 0
                 @($calls | Where-Object { $_ -eq 'leader' }).Count | Should -Be 1
                 @($calls | Where-Object { $_ -eq 'replacement' }).Count | Should -Be 1
+                Get-Task7ExactFlightWaiterCount -Flight $oldStateBeforeCancel.Flight | Should -Be 0
+                Get-Task7ExactFlightWaiterCount -Flight $replacementStateBeforeRelease.Flight |
+                    Should -Be 0
                 InModuleScope GraphKit -Parameters @{ K = $key } {
                     param($K)
                     [GraphTokenFlightRegistry]::Flights.ContainsKey($K) | Should -BeFalse
@@ -1346,11 +1558,13 @@ Describe 'GraphTokenSource' {
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ReleaseReplacement', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.CancelledLeaderCalls', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.OldLeaderFlight', $null)
-                if ($null -ne $leaderJob -and $leaderJob.State -ne 'Completed') {
+                if ($null -ne $leaderJob) {
+                    $null = @($leaderJob | Wait-Job -Timeout 10)
                     $leaderJob | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 if ($null -ne $waiterJobs) {
-                    $waiterJobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $null = @($waiterJobs | Wait-Job -Timeout 10)
+                    $waiterJobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 $leaderCts.Dispose()
                 $leaderStarted.Dispose()
@@ -1366,9 +1580,13 @@ Describe 'GraphTokenSource' {
             $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
             $ready = [System.Threading.CountdownEvent]::new(8)
             $go = [System.Threading.ManualResetEventSlim]::new($false)
+            $entered = [System.Threading.ManualResetEventSlim]::new($false)
+            $release = [System.Threading.ManualResetEventSlim]::new($false)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightCalls', $calls)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightReady', $ready)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightGo', $go)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightEntered', $entered)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightRelease', $release)
 
             $jobs = $null
             try {
@@ -1385,8 +1603,11 @@ Describe 'GraphTokenSource' {
                             param($AcquisitionKey)
                             $provider = {
                                 $queue = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProductionSingleFlightCalls')
+                                $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProductionSingleFlightEntered')
+                                $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ProductionSingleFlightRelease')
                                 $queue.Enqueue('acquire')
-                                Start-Sleep -Milliseconds 400
+                                $entered.Set()
+                                $null = $release.Wait()
                                 return @{
                                     Token        = 'runtime-single-flight-token'
                                     ExpiresOnUtc = [System.DateTimeOffset]::UtcNow.AddHours(1)
@@ -1417,14 +1638,26 @@ Describe 'GraphTokenSource' {
                     } -ArgumentList $key, $script:BuiltManifest
                 }
 
-                $null = $ready.Wait(15000)
+                $ready.Wait(15000) | Should -BeTrue
                 $go.Set()
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
+                $entered.Wait(5000) | Should -BeTrue
+                $flightKey = InModuleScope GraphKit -Parameters @{ K = $key } {
+                    param($K)
+                    Get-GraphTokenFlightKey -AcquisitionKey $K -ForceRefresh:$false
+                }
+                $followerObserved = Wait-Task7OuterFollowerCount `
+                    -Key $flightKey -ExpectedCount 7
+                $beforeRelease = Get-Task7OuterFlightState -Key $flightKey
+                $release.Set()
+                $followerObserved | Should -BeTrue
+                $beforeRelease.WaiterCount | Should -Be 7
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 8
 
                 $calls.Count | Should -Be 1
                 $results.Count | Should -Be 8
                 @($results | Where-Object { $_ -notlike 'proof-sentinel:*' }).Count | Should -Be 0
                 @($results | Sort-Object -Unique).Count | Should -Be 1
+                Get-Task7ExactFlightWaiterCount -Flight $beforeRelease.Flight | Should -Be 0
                 InModuleScope GraphKit -Parameters @{ K = $key } {
                     param($K)
                     $flightKey = Get-GraphTokenFlightKey -AcquisitionKey $K -ForceRefresh:$false
@@ -1432,14 +1665,23 @@ Describe 'GraphTokenSource' {
                 }
             }
             finally {
+                $release.Set()
+                $go.Set()
+                if ($null -ne $jobs) {
+                    $null = @($jobs | Wait-Job -Timeout 10)
+                }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightCalls', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightReady', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightGo', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightEntered', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ProductionSingleFlightRelease', $null)
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 $ready.Dispose()
                 $go.Dispose()
+                $entered.Dispose()
+                $release.Dispose()
             }
         }
     }
@@ -1823,9 +2065,13 @@ Describe 'GraphTokenSource' {
             $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
             $ready = [System.Threading.CountdownEvent]::new(6)
             $go = [System.Threading.ManualResetEventSlim]::new($false)
+            $entered = [System.Threading.CountdownEvent]::new(2)
+            $release = [System.Threading.ManualResetEventSlim]::new($false)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeCalls', $calls)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeReady', $ready)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeGo', $go)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeEntered', $entered)
+            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeRelease', $release)
 
             $jobs = $null
             try {
@@ -1846,8 +2092,11 @@ Describe 'GraphTokenSource' {
                                 -AcquisitionKey $AcquisitionKey -ForceRefresh:$ForceRefresh
                             Invoke-GraphTokenSingleFlight -Key $flightKey -AcquireScript {
                                 $queue = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ModeCalls')
+                                $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ModeEntered')
+                                $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ModeRelease')
                                 $queue.Enqueue($mode)
-                                Start-Sleep -Milliseconds 500
+                                $null = $entered.Signal()
+                                $null = $release.Wait()
                                 $mode
                             }.GetNewClosure()
                         } $Key $Force
@@ -1856,23 +2105,58 @@ Describe 'GraphTokenSource' {
 
                 $ready.Wait(15000) | Should -BeTrue
                 $go.Set()
-                $results = @($jobs | Receive-Job -Wait -AutoRemoveJob)
-                $jobs = $null
+                $entered.Wait(5000) | Should -BeTrue
+                $flightKeys = InModuleScope GraphKit -Parameters @{ K = $key } {
+                    param($K)
+                    [pscustomobject] @{
+                        Ordinary = Get-GraphTokenFlightKey `
+                            -AcquisitionKey $K -ForceRefresh:$false
+                        Forced = Get-GraphTokenFlightKey `
+                            -AcquisitionKey $K -ForceRefresh:$true
+                    }
+                }
+                $ordinaryFollowersObserved = Wait-Task7OuterFollowerCount `
+                    -Key $flightKeys.Ordinary -ExpectedCount 2
+                $forcedFollowersObserved = Wait-Task7OuterFollowerCount `
+                    -Key $flightKeys.Forced -ExpectedCount 2
+                $ordinaryBeforeRelease = Get-Task7OuterFlightState -Key $flightKeys.Ordinary
+                $forcedBeforeRelease = Get-Task7OuterFlightState -Key $flightKeys.Forced
+                $release.Set()
+                $ordinaryFollowersObserved | Should -BeTrue
+                $forcedFollowersObserved | Should -BeTrue
+                $ordinaryBeforeRelease.WaiterCount | Should -Be 2
+                $forcedBeforeRelease.WaiterCount | Should -Be 2
+                $ordinaryBeforeRelease.RegistryCount | Should -Be 2
+                $forcedBeforeRelease.RegistryCount | Should -Be 2
+                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 6
 
                 @($calls | Where-Object { $_ -eq 'ordinary' }).Count | Should -Be 1
                 @($calls | Where-Object { $_ -eq 'refresh' }).Count | Should -Be 1
                 @($results | Where-Object { $_ -eq 'ordinary' }).Count | Should -Be 3
                 @($results | Where-Object { $_ -eq 'refresh' }).Count | Should -Be 3
+                Get-Task7ExactFlightWaiterCount -Flight $ordinaryBeforeRelease.Flight | Should -Be 0
+                Get-Task7ExactFlightWaiterCount -Flight $forcedBeforeRelease.Flight | Should -Be 0
+                (Get-Task7OuterFlightState -Key $flightKeys.Ordinary).Exists | Should -BeFalse
+                (Get-Task7OuterFlightState -Key $flightKeys.Forced).Exists | Should -BeFalse
             }
             finally {
+                $release.Set()
+                $go.Set()
+                if ($null -ne $jobs) {
+                    $null = @($jobs | Wait-Job -Timeout 10)
+                }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeCalls', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeReady', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeGo', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeEntered', $null)
+                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeRelease', $null)
                 if ($null -ne $jobs) {
-                    $jobs | Where-Object { $_.State -ne 'Completed' } | Remove-Job -Force -ErrorAction SilentlyContinue
+                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
                 }
                 $ready.Dispose()
                 $go.Dispose()
+                $entered.Dispose()
+                $release.Dispose()
             }
         }
     }

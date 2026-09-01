@@ -581,45 +581,397 @@ git add source/Private/TokenSources/New-GraphAuthTokenSource.ps1 source/Private/
 git commit -m "feat: use compiled token sources for built-in auth"
 ```
 
+
 ### Task 7: Prove deterministic parity and genuine cross-runspace use
+
+**Approved base:** exact independently approved clean Task 6 commit
+`d16ca572f3746a596456dc8421d4b821f8bcc583`. At dispatch, require
+`git rev-parse HEAD` to equal that SHA and `git status --short` to be empty. The stale tracked
+Task 7 plan section is a known exception on this sealed base; replacing it is the first tracked
+Task 7 edit and remains part of the one Task 7 implementation commit.
 
 **Files:**
 
+- Modify: `docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md`
+- Create: `tests/Fixtures/GraphKitAuthParityCases.json`
+- Create: `src/GraphKit.Auth/GraphKit.Auth.Tests/GraphTokenSourceParityTests.cs`
 - Create: `tests/Unit/Auth/GraphKitAuthParity.Tests.ps1`
 - Create: `tests/Concurrency/GraphKitAuthRunspace.Tests.ps1`
+- Modify: `src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj`
+- Modify: `src/GraphKit.Auth/GraphKit.Auth.Tests/OwnershipTests.cs`
+- Modify: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs`
+- Modify: `source/Private/TokenSources/GraphTokenSource.ps1`
+- Modify: `tests/Unit/TokenSources/GraphTokenSource.Tests.ps1`
 - Modify: `tests/Concurrency/TokenIsolation.Tests.ps1`
 - Modify: `tests/Adapter/GraphModuleLifecycleSender.Tests.ps1`
 - Modify: `tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1`
+- Modify: `tests/Unit/Auth/GraphKitAuth.Tests.ps1`
 
-- [ ] **Step 1: Add shared legacy/compiled contract cases**
+Do not change public command signatures, the frozen CLR ABI, runtime package closure,
+dependency/import guard, package identity policy, or Task 8+ implementation files. Do not contact
+Graph, a real vault/credential, tenant, IMDS, or Azure; do not push, publish, or use Pester
+parallelism. A locked-cache miss that would require network access stops for controller authority.
 
-Run the same case table against both implementations: ordinary cache hit, expiry refresh, forced
-refresh, acquisition failure, cancellation, fixed-bearer force refusal, fingerprint equality,
-generation mismatch, adoption, and disposal. Compare behavior and public result properties, not
-concrete implementation type.
+#### Controller rulings
 
-- [ ] **Step 2: Add real runspace acceptance**
+Parity covers normalized behavior common to legacy and compiled sources using one strict checked-in
+matrix with independently authored literal expectations for each runner. Disposal, reference
+clearing, owned-material drain, host shutdown, and ALC unload are compiled-only successor guarantees
+because legacy PowerShell sources are not `IDisposable`; never retrofit legacy disposal for symmetry.
 
-Create one compiled source/context in the parent. Pass that exact object reference to two thread
-runspaces, release them with event gates, and require bounded completion. Cover distinct tenants,
-same-key single-flight, force-refresh isolation, and fixed bearer. No child may recreate a context.
+Parent-created contexts and sources enter child thread runspaces only through a unique AppDomain
+holder. Child `ArgumentList` carries primitive manifest paths, holder keys, and flags. A required
+child module import may automatically create that module instance's ordinary module-scoped host,
+but Step 5 children never construct a host, context, source, profile, or vault and use only the exact
+parent context/source recovered from the holder; their automatic import host is unused and cleaned.
+Step 6's separate owning lifecycle job may create the synthetic public fixed-bearer context solely
+to prove module removal, later-use refusal, and ALC collection. Every child module is removed and its
+cleanup observed before the parent ALC collection assertion.
 
-- [ ] **Step 3: Add unload/lifecycle acceptance**
+The real fixed-bearer runspace gate uses public `Get-GraphContext` against a temporary raw schema-1
+profile containing a clearly synthetic inline `Credential.Token`. It does not use
+`Register-GraphTenant`, SecretManagement, a vault, `-MsalFactory`, or private source construction;
+this test fixture is not a supported operator workflow for real bearer tokens.
 
-Dispose sources, remove the module, clear strong references, perform bounded GC/finalizer cycles,
-and assert the host's ALC weak reference is dead. A deliberately active acquisition must cancel and
-drain before owned certificate/secret disposal.
+Add private bounded waiter-count instrumentation to `GraphTokenFlight` as the outer-flight
+happens-before gate. Do not alter keys, results, removal races, cancellation replacement, public
+commands, or the frozen CLR ABI.
 
-- [ ] **Step 4: Run focused concurrency files serially**
+Prove lifecycle by composition without production marker hooks: provider xUnit owns source/material
+drain; retained Task 3 gates own host/proxy shutdown and unload; module tests own actual registration
+plus generic test-probe LIFO; packaged fixed bearer owns exact runspace crossing, use-after-removal,
+and ALC collection.
 
-Expected: all pass without Pester parallelism, sleeps, or unbounded waits.
+Tests for behavior already delivered by Tasks 3-6, including compiled runspace neutrality, may
+characterize green on the clean base only when a reversible semantic mutation makes the intended
+named case fail and the source is restored byte-for-byte. New Task 7 waiter instrumentation and
+dead-host-field removal require genuine base failures; any lifecycle behavior absent on the base
+does too. The new runspace harness itself is not a production red: mutation-prove that it rejects
+source reconstruction, legacy cross-runspace use, lost `ReferenceEquals`, and leaked child module
+hosts. Discovery/setup errors, stale output, skips, NotRun, timing, and external state are invalid
+reds.
 
-- [ ] **Step 5: Commit**
+Five count authorities remain separate. Task 7 records and asserts exact post-discovery equality for
+.NET, focused Pester, Task 6 owning, expanded regression, and whole Pester. The existing build check
+accepting at least 48 .NET tests is not Task 7 count authority; durable global ratchet
+synchronization remains Task 9 scope.
+
+- [ ] **Step 1: Replace the tracked plan section and record exact clean baselines**
+
+Verify exact HEAD and clean status, then replace the complete tracked Task 7 section with this final
+controller contract before authoring tests. Do not create an intervening documentation commit.
+
+Record these exact clean Task 6 baselines:
+
+```text
+.NET GraphKit.Auth:             48
+Task 7 focused Pester:          95
+Task 6 owning Pester:          246
+Task 6 expanded regression:    440
+Whole repository Pester:     1,180
+```
+
+The focused baseline is the sum of the five existing Task 7 files on clean Task 6:
+`TokenIsolation` 8, `GraphTokenSource` 48, `GraphModuleLifecycleSender` 2,
+`GraphModuleLifecycle` 13, and `GraphKitAuth` 24. The two new files contribute zero at base.
+
+- [ ] **Step 2: Add the strict shared 16-row matrix and test-only discovery**
+
+Create `GraphKitAuthParityCases.json` with exact top-level fields `schemaVersion`, `rowCount`, and
+`rows`; require schema `1` and `rowCount` `16`. Every row has exactly `id`, `runners`, `scenario`,
+`authMode`, `callLayerByRunner`, `input`, and `expectedByRunner`. Every row runs once in both
+`xunit-compiled` and `pester-legacy`.
+
+| Row ID | Auth mode | xUnit layer | Pester layer |
+| --- | --- | --- | --- |
+| `construction-certificate` | Certificate | construction only | construction only |
+| `construction-client-secret` | ClientSecret | construction only | construction only |
+| `construction-managed-identity` | user-assigned ManagedIdentity | construction only | construction only |
+| `construction-bearer-token` | BearerToken | construction only | construction only |
+| `ordinary-cache-hit` | Certificate | direct source | direct source |
+| `expired-result-refresh` | ClientSecret | direct source | direct source |
+| `ordinary-forced-ordinary` | ManagedIdentity | direct source | direct source |
+| `acquisition-failure-fanout-retry` | Certificate | compiled internal source flight | legacy production outer keyed flight |
+| `caller-cancellation-no-cache` | ClientSecret | direct source | direct source |
+| `fixed-bearer-cache-force-refusal` | BearerToken | direct source | direct source |
+| `fingerprint-certificate` | Certificate | direct source | direct source |
+| `fingerprint-client-secret` | ClientSecret | direct source | direct source |
+| `fingerprint-managed-identity` | ManagedIdentity | direct source | direct source |
+| `fingerprint-bearer-token` | BearerToken | direct source | direct source |
+| `adoption-generation-mismatch` | Certificate | direct source | direct source |
+| `adoption-valid` | ManagedIdentity | direct source | direct source |
+
+Each `expectedByRunner` record is independently and literally authored for its runner with one
+closed field set: source contract/metadata, token sequence, expiries, token types, ordered scopes,
+tenant proof, fingerprint, generation, received-time rule, application/provider acquisition counts,
+force flags, reference identity, normalized failure kind, cache state, and final flight-registry
+count. Null and empty values remain explicit. Neither runner derives expectations from production
+code, matrix input, or the other runner.
+
+Compare token, expiry, type, ordered scopes, tenant proof, fingerprint, generation, and source
+metadata ordinally. Check reference identity separately. Normalize only `AcquisitionFailure`,
+`Canceled`, `RefreshRefused`, `GenerationMismatch`, and `Disposed`. Legacy `ReceivedOnUtc` is
+wall-clock: require non-default, monotonic, and no later than valid expiry. Compiled acquisition time
+uses the injected clock; adopted literal results retain their supplied time in both runners.
+
+Construction expects zero token acquisitions. Compiled Certificate, ClientSecret, and
+ManagedIdentity create exactly one application/client during factory construction; legacy
+`-MsalFactory` remains uninvoked until acquisition. BearerToken creates none.
+
+Use these exact fingerprint inputs and literal lowercase SHA-256 values:
+
+```text
+task7-fingerprint-certificate
+245d574cc6b41262c018a65535f9937601045f29abff3df9d112e491048948b6
+task7-fingerprint-client-secret
+b4ec6c20d74417b5be0b54ce83bc39a9f0b2e990ec173e6ee9373491a65de55e
+task7-fingerprint-managed-identity
+6973fa751d466a0429077804c84708dc98188047d415ca992a583a6bf7744866
+task7-fingerprint-bearer-token
+04fa2face75f1b6e4df7e9270266abec23741a9e91c7fad9b12b1c8585c30bca
+```
+
+Both loaders independently reject these nine permanent malformed cases:
+
+```text
+unsupported-schema-version
+incorrect-row-count
+duplicate-row-id
+missing-required-row-id
+unknown-property
+missing-required-property
+duplicate-json-property
+invalid-runner-call-layer
+missing-runner-expectation
+```
+
+They also reject unknown or wrong-typed fields, invalid ID/runner sets, and duplicate JSON
+properties before executing any semantic row. Mutation cases must be individually discoverable in
+both runners rather than hidden in a setup failure.
+
+Link the exact repository fixture into the .NET test output:
+
+```xml
+<None Include="../../../tests/Fixtures/GraphKitAuthParityCases.json"
+      Link="Fixtures/GraphKitAuthParityCases.json"
+      CopyToOutputDirectory="PreserveNewest"
+      CopyToPublishDirectory="Never" />
+```
+
+xUnit loads only `AppContext.BaseDirectory/Fixtures/GraphKitAuthParityCases.json`; Pester loads only
+`<repo>/tests/Fixtures/GraphKitAuthParityCases.json`. No current-directory or alternate fallback is
+allowed. Each reports the same matrix SHA-256 and proves no row was filtered.
+
+After all test-only files/changes discover successfully and before any production edit, record a
+literal per-file and per-theory inventory. Let `D`, `F`, `O`, `E`, and `W` be net new .NET,
+Task 7 focused, Task 6 owning, expanded-regression, and whole-repository discoveries. Assert exact
+equality, never a minimum:
+
+```text
+.NET exact total              = 48 + D
+Task 7 focused exact total    = 95 + F
+Task 6 owning exact total     = 246 + O
+Expanded exact total          = 440 + E
+Whole Pester exact total      = 1,180 + W
+```
+
+The planned .NET ledger is `+16` semantic rows, `+9` loader-mutation cases, `+2`
+Certificate/ClientSecret drain-theory cases, and `-1` superseded single-mode fact: planned net
+`D = 26`, exact .NET total `74`. Any discovery difference stops the task for inventory
+reconciliation before production work. Additional reviewed cases must be itemized into `D`.
+
+Run the test-only base phase. Characterization-green Task 3-6 families, including the new harness
+over already runspace-neutral compiled sources, require reversible mutation proof; genuinely absent
+Task 7 waiter/dead-field/lifecycle behavior must fail for the intended reason. Restore every
+mutation byte-for-byte and repack before proceeding.
+
+- [ ] **Step 3: Make compiled-source drain deterministic for both owned modes**
+
+Replace the existing single-mode, delay-based active-acquisition disposal fact with a
+Certificate/ClientSecret theory. The fake client signals entry, waits on the supplied cancellation
+token, records cancellation, exits, and only then may material cleanup record disposal. Require:
+
+```text
+acquire-entered -> cancellation-observed -> acquire-exited -> material-disposed
+```
+
+Require one client and one material disposal, bounded event/task completion, and no sleep, finite
+`Task.Delay`, or `CancelAfter` as ordering evidence.
+
+- [ ] **Step 4: Add exact outer-flight waiter instrumentation**
+
+Add private thread-safe follower entry/departure counts to `GraphTokenFlight`. Increment only after
+a follower obtains the exact registry flight and before it awaits; decrement in `finally`. Expose
+only minimal in-module observation to tests.
+
+Remove duration-based scheduling assumptions from the Task 7 file set. Leaders/providers wait on
+explicit gates. Tests require exact bounded waiter counts before release, failure, cancellation,
+disposal, or replacement. Cancellation-aware infinite waits used only to model work until
+cancellation are allowed; elapsed duration is never evidence.
+
+Cover ordinary collapse, provider-failure fanout, leader-cancellation replacement,
+production-sender collapse, ordinary/forced partitioning, concurrent credential reuse,
+active-source disposal, and exact empty-registry cleanup.
+
+- [ ] **Step 5: Prove exact parent-source use across thread runspaces**
+
+Use `Start-ThreadJob` with a GUID AppDomain holder containing the parent context/source,
+ready/go/release gates, a `ConcurrentQueue<object>` of child-observed sources, counters, and results.
+Children retrieve and enqueue the actual parent source; the parent requires `ReferenceEquals` for
+every child.
+
+Every case is bounded: child ready uses `Wait(5000)`; provider work waits on a
+cancellation-aware gate; the parent uses `Wait-Job -Timeout 10` and `Receive-Job` without `-Wait`.
+`finally` releases/cancels gates, removes modules/jobs, clears AppDomain data and references, and
+disposes synchronization objects. No unbounded wait, sleep, delay, `Receive-Job -Wait`, child
+`Get-GraphContext`, request reconstruction, profile/vault access, or explicit host/source creation.
+
+Each child retains its exact imported `ModuleInfo`, removes it in `finally`, requires that module's
+lifecycle `CleanupDone.Wait(5000)`, clears child module/host references, and reports cleanup before
+the parent removes the job. The import-created child host is allowed but never used as the parent
+source under test.
+
+Required cases:
+
+1. A real compiled fixed-bearer context created through public `Get-GraphContext` against a temporary
+   raw schema-1 store whose only material is
+   `Credential.Token = 'task7-synthetic-fixed-bearer-token'`. Use a fixed synthetic TenantId,
+   `ClientId = $null`, no selector, no `-MsalFactory`, vault, or private constructor. Two children
+   prove exact source identity, stable same result reference/token, and force refusal. Delete the
+   store in `finally`.
+2. Distinct controlled tenant/source/key fixtures released together show no token, fingerprint,
+   proof, generation, or adoption crossover and perform no network call.
+3. Two sources with one key show exact follower count, one acquisition, one adoption, identical
+   result reference/properties, and empty registry.
+4. One ordinary and one forced flight for one tuple are simultaneously resident, receive exact
+   force flags, make two calls, never join, and do not contaminate unrelated cache state.
+5. A legacy `GraphTokenSourceBase` rejects cross-runspace before entering or waiting on a flight;
+   label this compatibility containment.
+
+A controlled C# sender fixture may implement the default-context interface for observations, but
+cannot replace the real public fixed-bearer case or production-source xUnit matrix.
+
+- [ ] **Step 6: Prove lifecycle by composition and collect the packaged ALC**
+
+Remove unused private `_drained`, `_shutdownCompleted`, and their dead Reset/Set calls from
+`GraphAuthHost`. Assert those fields absent while the literal public ABI and retained Task 3
+shutdown, reentrant cancellation, sanitized failure, clearing, and weak-reference gates stay green.
+
+Do not add production marker hooks. Prove:
+
+- provider xUnit: Certificate and ClientSecret cancellation/drain/material order;
+- retained Task 3: host/proxy shutdown and unload;
+- actual module registration by reference as `[real host, real source1, real source2]`;
+- generic module cleanup with test-only marker disposables registered as `[host, source1, source2]`
+  and disposed exactly once as `[source2, source1, host]`; and
+- sender/module integration: cancellation and source drain precede host cleanup,
+  `CleanupDone.Wait(5000)` succeeds, active operations are zero, owned resources are empty, and no
+  duplicate disposal occurs.
+
+In an isolated bounded thread job, import the package and create the real synthetic fixed-bearer
+context. Capture the source, lifecycle state, and host `LoadContextWeakReference`. Finish/clean all
+child modules/jobs, remove the owning module, require cleanup complete, zero active operations, and
+an empty owned-resource collection.
+
+While retaining the exact source, call `Acquire` and require `ObjectDisposedException`. Only then
+clear source, context, module, host, state, holder, queues, closures, AppDomain data, and every other
+strong reference. Run a finite GC/finalizer loop and require the provider ALC weak reference dead.
+
+- [ ] **Step 7: Run exact focused and complete gates**
+
+Pack before any Pester import. Run locked .NET restore/build/test and parse TRX to require exactly
+`48 + D` passed cases and every other outcome zero. The build's existing `>=48` check is not this
+authority.
+
+Run repository-pinned Pester 6.1.0 serially over:
+
+```text
+tests/Unit/Auth/GraphKitAuthParity.Tests.ps1
+tests/Concurrency/GraphKitAuthRunspace.Tests.ps1
+tests/Concurrency/TokenIsolation.Tests.ps1
+tests/Unit/TokenSources/GraphTokenSource.Tests.ps1
+tests/Adapter/GraphModuleLifecycleSender.Tests.ps1
+tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1
+tests/Unit/Auth/GraphKitAuth.Tests.ps1
+```
+
+Require exact `95 + F` with zero failure, skip, NotRun, inconclusive, failed blocks, or failed
+containers. Repeat the frozen Task 6 owning and expanded projections at exact `246 + O` and
+`440 + E`.
+
+The exact Task 6 owning projection is these seven files, with no implicit glob or helper-owned
+addition:
+
+```text
+tests/Unit/Auth/GraphKitAuth.Tests.ps1
+tests/Unit/Auth/Get-GraphVaultCredential.Tests.ps1
+tests/Unit/Profiles/Get-GraphContext.Tests.ps1
+tests/Unit/Profiles/Register-GraphTenant.Tests.ps1
+tests/Unit/Profiles/Test-GraphTenant.Tests.ps1
+tests/Unit/TokenSources/GraphTokenSource.Tests.ps1
+tests/Adapter/Send-GraphHttpRequest.Tests.ps1
+```
+
+The exact expanded projection is those seven plus these eight files, for 15 total:
+
+```text
+tests/Unit/Auth/SecretManagementBoundary.Tests.ps1
+tests/Adapter/GraphModuleLifecycleSender.Tests.ps1
+tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1
+tests/QA/GraphKitAuthPackage.tests.ps1
+tests/QA/BuiltModule.tests.ps1
+tests/QA/ReleaseProof.tests.ps1
+tests/Unit/Profiles/Import-GraphLegacyProfile.Tests.ps1
+tests/Unit/Profiles/Use-GraphTenant.Tests.ps1
+```
+
+Record per-file counts for both projections before and after Task 7 so `O` and `E` are reproducible.
+
+Run `./build.ps1 -Tasks test`. Before commit, the inner Pester result must equal `1,180 + W`; the
+outer tested-release recorder may refuse dirty authority and must be the only outer failure. After
+commit, repeat clean and require the whole workflow, proof record, standalone no-rebuild verifier,
+generated-output cleanup, and clean status green.
+
+Reject the task if scheduler duration is used as ordering evidence, a child reconstructs a source,
+an automatic child host remains alive, generated output is tracked, public ABI changes, or external
+access occurs.
+
+- [ ] **Step 8: Commit, repeat on exact clean SHA, and report**
+
+Commit only the reviewed file set:
 
 ```bash
-git add tests/Unit/Auth/GraphKitAuthParity.Tests.ps1 tests/Concurrency/GraphKitAuthRunspace.Tests.ps1 tests/Concurrency/TokenIsolation.Tests.ps1 tests/Adapter/GraphModuleLifecycleSender.Tests.ps1 tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1
+git add docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md \
+  tests/Fixtures/GraphKitAuthParityCases.json \
+  src/GraphKit.Auth/GraphKit.Auth.Tests/GraphTokenSourceParityTests.cs \
+  src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj \
+  src/GraphKit.Auth/GraphKit.Auth.Tests/OwnershipTests.cs \
+  src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs \
+  source/Private/TokenSources/GraphTokenSource.ps1 \
+  tests/Unit/Auth/GraphKitAuthParity.Tests.ps1 \
+  tests/Concurrency/GraphKitAuthRunspace.Tests.ps1 \
+  tests/Unit/TokenSources/GraphTokenSource.Tests.ps1 \
+  tests/Concurrency/TokenIsolation.Tests.ps1 \
+  tests/Adapter/GraphModuleLifecycleSender.Tests.ps1 \
+  tests/Unit/Transport/GraphModuleLifecycle.Tests.ps1 \
+  tests/Unit/Auth/GraphKitAuth.Tests.ps1
 git commit -m "test: prove GraphKit Auth parity and runspace isolation"
 ```
+
+Repeat pack, exact TRX total, focused/owning/expanded Pester equality, complete test, release-proof
+verification, generated-output checks, and clean status on the exact clean commit because the
+prerelease identity changes with SHA.
+
+Write `.superpowers/sdd/2026-08-30-r8-graphkit-auth/task-7-report.md` outside the commit. Report the
+matrix schema and 16 IDs, independent compiled/legacy results, D/F/O/E/W inventories and totals,
+object-identity queue evidence, acquisition/adoption/waiter counts, ordinary/forced partitioning,
+tenant isolation, certificate/secret phase order, actual registration order, probe LIFO order,
+cleanup state, use-after-removal result, ALC result, ABI result, package/source identities, and
+evidence limits.
+
+Task 7 makes no live MSAL, Graph, vault, tenant, IMDS, Azure, remote CI, merge, publication, or
+service-behavior claim.
+
 
 ### Task 8: Prove protected live parity before transitive cutover
 
