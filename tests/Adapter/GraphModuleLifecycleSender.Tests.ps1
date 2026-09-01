@@ -12,7 +12,10 @@ BeforeAll {
         Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,7 +23,7 @@ namespace GraphKit.Tests
 {
     public sealed class LifecycleBlockingHandler : HttpMessageHandler
     {
-        public const string ContractMarker = "GraphKit.Task7.LifecycleSenderFixture/1";
+        public const string ContractMarker = "GraphKit.Task8.LifecycleSenderFixture/2";
         private int _disposeCount;
         private int _sendCount;
 
@@ -47,6 +50,75 @@ namespace GraphKit.Tests
             finally
             {
                 Exited.TrySetResult(true);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Interlocked.Increment(ref _disposeCount);
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public sealed class LifecycleCompletionCancellingHandler : HttpMessageHandler
+    {
+        private int _disposeCount;
+        private int _sendCount;
+
+        public int DisposeCount { get { return _disposeCount; } }
+        public int SendCount { get { return _sendCount; } }
+        public CancellationToken SeenToken { get; private set; }
+        public CancellationTokenSource CompletionCancellation { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _sendCount);
+            SeenToken = cancellationToken;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new CompletionCancellingContent(CompletionCancellation)
+            });
+        }
+
+        private sealed class CompletionCancellingContent : HttpContent
+        {
+            private static readonly byte[] Body = Encoding.UTF8.GetBytes("{\"value\":[]}");
+            private readonly CancellationTokenSource _cancellation;
+
+            public CompletionCancellingContent(CancellationTokenSource cancellation)
+            {
+                _cancellation = cancellation;
+            }
+
+            protected override Task SerializeToStreamAsync(Stream stream, TransportContext context)
+            {
+                return SerializeAndCancel(stream);
+            }
+
+            protected override Task SerializeToStreamAsync(
+                Stream stream,
+                TransportContext context,
+                CancellationToken cancellationToken)
+            {
+                return SerializeAndCancel(stream);
+            }
+
+            private Task SerializeAndCancel(Stream stream)
+            {
+                stream.Write(Body, 0, Body.Length);
+                _cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            protected override bool TryComputeLength(out long length)
+            {
+                length = Body.Length;
+                return true;
             }
         }
 
@@ -101,7 +173,7 @@ namespace GraphKit.Tests
     }
     if ($null -eq $handlerMarker -or
         [string] $handlerMarker.GetRawConstantValue() -cne
-            'GraphKit.Task7.LifecycleSenderFixture/1') {
+            'GraphKit.Task8.LifecycleSenderFixture/2') {
         throw (
             'The process-global lifecycle sender fixture is stale. ' +
             'Run this file in a fresh PowerShell process.'
@@ -151,6 +223,107 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
                 param($State)
                 Stop-GraphModule -State $State
             }
+        }
+    }
+
+    It 'marks module cancellation raised during token acquisition for retry classification' {
+        $state = InModuleScope GraphKit {
+            New-GraphModuleLifecycleState
+        }
+        $source = [pscustomobject] @{
+            LifecycleState = $state
+        }
+        $source | Add-Member -MemberType ScriptMethod -Name Acquire -Value {
+            param([bool] $ForceRefresh, [System.Threading.CancellationToken] $CancellationToken)
+            $this.LifecycleState.ShutdownCts.Cancel()
+            $CancellationToken.ThrowIfCancellationRequested()
+        }
+
+        try {
+            $failure = $null
+            try {
+                InModuleScope GraphKit -Parameters @{ State = $state; Source = $source } {
+                    param($State, $Source)
+                    Send-GraphHttpRequest -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') `
+                        -Method GET -CredentialPolicy GraphBearer `
+                        -ExpectedAuthority ([uri] 'https://graph.microsoft.com') `
+                        -TokenSource $Source -LifecycleState $State
+                }
+            }
+            catch {
+                $failure = $_.Exception
+            }
+
+            $isCancellation = $false
+            $isMarked = $false
+            $candidate = $failure
+            while ($null -ne $candidate) {
+                if ($candidate -is [System.OperationCanceledException]) {
+                    $isCancellation = $true
+                }
+                if ($candidate.Data['GraphKit.OperationCancellation'] -eq $true) {
+                    $isMarked = $true
+                }
+                $candidate = $candidate.InnerException
+            }
+
+            $failure | Should -Not -BeNullOrEmpty
+            $isCancellation | Should -BeTrue
+            $isMarked | Should -BeTrue
+            $state.ShutdownCts.IsCancellationRequested | Should -BeTrue
+            $state.ActiveOperations | Should -Be 0
+            $state.Drained.IsSet | Should -BeTrue
+        }
+        finally {
+            InModuleScope GraphKit -Parameters @{ State = $state } {
+                param($State)
+                Stop-GraphModule -State $State
+            }
+        }
+    }
+
+    It 'normalizes a clean response that races module shutdown before it can become success' {
+        $state = InModuleScope GraphKit {
+            New-GraphModuleLifecycleState
+        }
+        $handler = [GraphKit.Tests.LifecycleCompletionCancellingHandler]::new()
+        $handler.CompletionCancellation = $state.ShutdownCts
+        $client = [System.Net.Http.HttpClient]::new($handler, $false)
+        $factory = {
+            param([int] $ConnectTimeoutSeconds)
+            [pscustomobject] @{
+                Client          = $client
+                OwnedByGraphKit = $false
+            }
+        }.GetNewClosure()
+
+        try {
+            $result = InModuleScope GraphKit -Parameters @{
+                State = $state
+                Factory = $factory
+            } {
+                param($State, $Factory)
+                Send-GraphHttpRequest -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') `
+                    -Method GET -CredentialPolicy None -LifecycleState $State `
+                    -HttpClientFactory $Factory
+            }
+
+            $handler.SendCount | Should -Be 1
+            $state.ShutdownCts.IsCancellationRequested | Should -BeTrue
+            $result.ResponseReceived | Should -BeTrue
+            $result.StatusCode | Should -Be 200
+            $result.TransportException | Should -Not -BeNullOrEmpty
+            $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
+            $state.ActiveOperations | Should -Be 0
+            $state.Drained.IsSet | Should -BeTrue
+            $handler.DisposeCount | Should -Be 0
+        }
+        finally {
+            InModuleScope GraphKit -Parameters @{ State = $state } {
+                param($State)
+                Stop-GraphModule -State $State
+            }
+            $client.Dispose()
         }
     }
 
@@ -236,6 +409,7 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
             $handler.SeenToken.IsCancellationRequested | Should -BeTrue
             $handler.Exited.Task.IsCompleted | Should -BeTrue
             $result.TransportException | Should -Not -BeNullOrEmpty
+            $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
             $state.CleanupDone.Wait(5000) | Should -BeTrue
             $state.ActiveOperations | Should -Be 0
             $state.CleanupComplete | Should -BeTrue

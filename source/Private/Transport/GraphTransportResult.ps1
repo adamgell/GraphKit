@@ -15,6 +15,8 @@
       RequestId          The response `request-id` header, when present.
       TransportException The exception for transport-level failures
                          (timeout, reset, cancellation); $null on a clean response.
+                         Caller/module cancellation carries the internal boolean
+                         marker GraphKit.OperationCancellation in Exception.Data.
       ResponseReceived   $true when HTTP response headers were actually received.
       VerifiedTenantId   Tenant proven for the exact bearer placed on the request;
                          never populated from an unverified provider claim.

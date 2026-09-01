@@ -68,7 +68,7 @@ Describe 'The mutating-operation dry-run gate' {
                 [PSCustomObject]@{
                     ProfileId    = 'gate-probe'
                     GraphBaseUri = [uri] 'https://graph.microsoft.com'
-                    TokenSource  = $null
+                    TokenSource  = [PSCustomObject]@{ AuthMode = 'Certificate' }
                     TenantId     = [guid]::Empty
                 }
             }
@@ -161,7 +161,7 @@ Describe 'Bodyless actions' {
         $script:ctx = InModuleScope GraphKit {
             [PSCustomObject]@{
                 ProfileId = 'bodyless-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
-                TokenSource = $null; TenantId = [guid]::Empty
+                TokenSource = [PSCustomObject]@{ AuthMode = 'Certificate' }; TenantId = [guid]::Empty
             }
         }
     }
@@ -236,7 +236,7 @@ Describe 'High-impact confirmation' {
         $script:hiCtx = InModuleScope GraphKit {
             [PSCustomObject]@{
                 ProfileId = 'impact-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
-                TokenSource = $null; TenantId = [guid]::Empty
+                TokenSource = [PSCustomObject]@{ AuthMode = 'Certificate' }; TenantId = [guid]::Empty
             }
         }
         $script:catalog = @(Get-GraphOperation -List)
@@ -340,4 +340,3 @@ Describe 'High-impact confirmation' {
         }
     }
 }
-

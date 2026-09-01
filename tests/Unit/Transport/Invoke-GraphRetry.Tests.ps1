@@ -220,6 +220,28 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $r.Telemetry[0].DelaySource | Should -Be 'RetryAfterDelta'
             }
 
+            It 'never replays an accepted 202 when its response body fails' {
+                $accepted = New-TestTransportResult -StatusCode 202
+                $accepted.TransportException = [System.IO.IOException]::new('accepted response body closed early')
+                $script:results.Enqueue($accepted)
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @('replay-must-not-run') }))
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor -ReplayPolicy Safe), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method POST -Headers @{} -Body @{} `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Succeeded'
+                $r.Certainty | Should -BeExactly 'Known'
+                $script:sendCount | Should -Be 1
+                ($null -eq $r.Data) | Should -BeTrue
+                $r.Telemetry | Should -HaveCount 1
+                $r.Telemetry[0].StatusCode | Should -Be 202
+                $r.Telemetry[0].AttemptOutcome | Should -BeExactly 'Succeeded'
+            }
+
             It 'does not replay an ambiguous POST and surfaces Failed + Indeterminate' {
                 $script:results.Enqueue((New-TestTransportResult -StatusCode 503))
 
@@ -268,6 +290,73 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $r.Outcome | Should -Be 'Failed'
                 $r.Certainty | Should -Be 'Known'
                 $script:sendCount | Should -Be 2
+            }
+
+            It 'retries a safe read when a 200 response body fails and returns only the complete retry body' {
+                $bodyFailure = New-TestTransportResult -StatusCode 200 -Body @{ value = @('partial-must-not-escape') }
+                $bodyFailure.TransportException = [System.IO.IOException]::new('response body closed early')
+                $script:results.Enqueue($bodyFailure)
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @('complete') }))
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor -ReplayPolicy Safe), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Succeeded'
+                $r.Certainty | Should -BeExactly 'Known'
+                @($r.Data.value) | Should -Be @('complete')
+                $script:sendCount | Should -Be 2
+                $r.Telemetry | Should -HaveCount 2
+                $r.Telemetry[0].AttemptCertainty | Should -BeExactly 'Ambiguous'
+                $r.Telemetry[0].AttemptOutcome | Should -BeExactly 'Retrying'
+            }
+
+            It 'retries an unmarked timeout cancellation exception when no operation token is signalled' {
+                $timeout = New-TestTransportResult -StatusCode 0 -ResponseReceived $false
+                $timeout.TransportException = [System.Threading.Tasks.TaskCanceledException]::new('header phase timed out')
+                $script:results.Enqueue($timeout)
+                $script:results.Enqueue((New-TestTransportResult -StatusCode 200 -Body @{ value = @('complete') }))
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor -ReplayPolicy Safe), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Succeeded'
+                @($r.Data.value) | Should -Be @('complete')
+                $script:sendCount | Should -Be 2
+                $r.Telemetry | Should -HaveCount 2
+                $r.Telemetry[0].AttemptCertainty | Should -BeExactly 'Ambiguous'
+                $r.Telemetry[0].AttemptOutcome | Should -BeExactly 'Retrying'
+            }
+
+            It 'does not call a NeverReplay write successful when its 200 response body fails' {
+                $bodyFailure = New-TestTransportResult -StatusCode 200 -Body @{ value = @('partial-must-not-escape') }
+                $bodyFailure.TransportException = [System.IO.IOException]::new('response body closed early')
+                $script:results.Enqueue($bodyFailure)
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor -ReplayPolicy NeverReplay), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method POST -Headers @{} -Body @{} `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Failed'
+                $r.Certainty | Should -BeExactly 'Indeterminate'
+                @($r.Data).Count | Should -Be 0
+                $script:sendCount | Should -Be 1
+                $r.Telemetry | Should -HaveCount 1
+                $r.Telemetry[0].AttemptCertainty | Should -BeExactly 'Ambiguous'
+                Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 1 -Exactly `
+                    -ParameterFilter { -not $Success }
+                Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 0 -Exactly `
+                    -ParameterFilter { $Success }
             }
         }
 
@@ -483,6 +572,75 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 finally {
                     $cts.Dispose()
                     $script:cancelDuringSendSource = $null
+                }
+            }
+
+            It 'turns a normalized operation cancellation into a no-data Cancelled envelope' {
+                $failure = [System.OperationCanceledException]::new('module lifetime ended during the send')
+                $failure.Data['GraphKit.OperationCancellation'] = $true
+                $transportResult = New-TestTransportResult -StatusCode 200 -Body @{ value = @('must-not-escape') }
+                $transportResult.TransportException = $failure
+                $script:results.Enqueue($transportResult)
+
+                $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), (New-TestInjections) {
+                    param($Context, $Descriptor, $Injections)
+                    Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                        -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                        -CancellationToken ([System.Threading.CancellationToken]::None) -Injections $Injections
+                }
+
+                $r.Outcome | Should -BeExactly 'Cancelled'
+                $r.Certainty | Should -BeExactly 'Indeterminate'
+                @($r.Data).Count | Should -Be 0 -Because 'a successful-looking body must not escape a marked cancellation'
+                @($r.Telemetry).Count | Should -Be 0 -Because 'cancellation must win before success telemetry is recorded'
+                $script:sendCount | Should -Be 1
+                $script:completeCalls | Should -Be 1
+                Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 1 -Exactly `
+                    -ParameterFilter { -not $Success }
+                Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 0 -Exactly `
+                    -ParameterFilter { $Success }
+            }
+
+            It 'rejects a clean success when the caller is cancelled immediately before the sender returns' {
+                $cts = [System.Threading.CancellationTokenSource]::new()
+                $capture = [pscustomobject] @{ SendCount = 0 }
+                $injections = New-TestInjections
+                $injections.Send = {
+                    param($Uri, $Method, $Headers, $Body, $CancellationToken)
+                    $capture.SendCount++
+                    $cts.Cancel()
+                    return [pscustomobject] @{
+                        StatusCode         = 200
+                        Headers            = @{}
+                        Body               = @{ value = @('must-not-escape') }
+                        RequestId          = $null
+                        TransportException = $null
+                        ResponseReceived   = $true
+                    }
+                }.GetNewClosure()
+
+                try {
+                    $r = InModuleScope GraphKit -ArgumentList (New-TestContext), (New-TestDescriptor), $injections, $cts.Token {
+                        param($Context, $Descriptor, $Injections, $CancellationToken)
+                        Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
+                            -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') -Method GET -Headers @{} -Body $null `
+                            -CancellationToken $CancellationToken -Injections $Injections
+                    }
+
+                    $r.Outcome | Should -BeExactly 'Cancelled'
+                    $r.Certainty | Should -BeExactly 'Indeterminate'
+                    $cts.IsCancellationRequested | Should -BeTrue
+                    @($r.Data).Count | Should -Be 0 -Because 'a clean response returned after cancellation must not become operation data'
+                    @($r.Telemetry).Count | Should -Be 0 -Because 'cancellation must win before success telemetry is recorded'
+                    $capture.SendCount | Should -Be 1
+                    $script:completeCalls | Should -Be 1
+                    Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 1 -Exactly `
+                        -ParameterFilter { -not $Success }
+                    Should-Invoke Complete-GraphThrottleGate -ModuleName GraphKit -Times 0 -Exactly `
+                        -ParameterFilter { $Success }
+                }
+                finally {
+                    $cts.Dispose()
                 }
             }
         }

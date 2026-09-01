@@ -208,6 +208,7 @@ Describe 'Real sender: timeouts and cancellation' {
         }
 
         $result.TransportException | Should -Not -BeNullOrEmpty -Because 'the body phase must time out on its own budget'
+        $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -Not -BeTrue
     }
 
     It 'aborts an in-flight request when the caller cancels' {
@@ -221,6 +222,7 @@ Describe 'Real sender: timeouts and cancellation' {
         }
 
         $result.TransportException | Should -Not -BeNullOrEmpty -Because 'a cancelled token must actually abort the request'
+        $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
     }
 }
 

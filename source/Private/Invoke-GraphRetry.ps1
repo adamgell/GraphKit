@@ -1,10 +1,10 @@
 <#
     The retry engine: one GraphKit attempt loop that owns replay decisions.
 
-    Consumes the normalized GraphTransportResult contract, never PowerShell or
-    HttpClient exception internals. Send, UtcNow, Delay, and Jitter are injectable,
-    so the full matrix and every deadline/cancellation path is testable with
-    virtual time (a five-minute scenario runs in milliseconds).
+    Consumes the normalized GraphTransportResult contract, never provider-specific
+    PowerShell or HttpClient exception shapes. Send, UtcNow, Delay, and Jitter are
+    injectable, so the full matrix and every deadline/cancellation path is testable
+    with virtual time (a five-minute scenario runs in milliseconds).
 
     Returns exactly one GraphKit.OperationResult envelope and never throws for
     transport-level outcomes. The only hard errors are credential-boundary
@@ -25,10 +25,22 @@ $script:GraphKnownTransientErrorCodes = @(
 function Get-GraphAttemptCertainty {
     param(
         [int] $StatusCode,
-        [bool] $ResponseReceived
+        [bool] $ResponseReceived,
+
+        [AllowNull()]
+        [object] $TransportException
     )
 
     if ($ResponseReceived) {
+        # Accepted means the service owns the work. Replaying a 202 can duplicate
+        # an asynchronous operation even when its optional response body failed.
+        if ($StatusCode -eq 202) { return 'Succeeded' }
+
+        # Headers alone do not make a 2xx usable. A timeout/reset while reading
+        # its body leaves a normalized transport failure and incomplete data.
+        if ($StatusCode -ge 200 -and $StatusCode -lt 300 -and $null -ne $TransportException) {
+            return 'Ambiguous'
+        }
         if ($StatusCode -ge 200 -and $StatusCode -lt 300) { return 'Succeeded' }
         if ($StatusCode -eq 408) { return 'Ambiguous' }
         if ($StatusCode -ge 500 -and $StatusCode -le 599) { return 'Ambiguous' }
@@ -384,6 +396,28 @@ function Invoke-GraphRetry {
             # ---- One attempt = exactly one send ----
             $result = & $send @sendParams
 
+            # Sender cancellation is normalized like every other transport
+            # outcome. Consume only GraphKit's boolean marker; do not infer
+            # cancellation from provider-specific exception messages or types.
+            $candidate = $result.TransportException
+            $isOperationCancellation = $false
+            while ($null -ne $candidate) {
+                if ($candidate -is [System.Exception] -and
+                    $candidate.Data['GraphKit.OperationCancellation'] -eq $true) {
+                    $isOperationCancellation = $true
+                    break
+                }
+                $candidate = $candidate.InnerException
+            }
+            if ($isOperationCancellation) {
+                throw $result.TransportException
+            }
+
+            # A handler may ignore cancellation and still return a clean-looking
+            # response. Recheck immediately, before body/provenance/telemetry can
+            # be accepted as a successful operation result.
+            $CancellationToken.ThrowIfCancellationRequested()
+
             if ($forceRefreshPending) {
                 $forceRefreshPending = $false
                 $forceRefreshUsed = $true
@@ -408,7 +442,8 @@ function Invoke-GraphRetry {
             # ---- Runtime certainty, then release admission ----
             # Complete-GraphThrottleGate's -Success switch drives additive-increase
             # (AIMD restore); without it a qualified throttle never recovers.
-            $certainty = Get-GraphAttemptCertainty -StatusCode $result.StatusCode -ResponseReceived $result.ResponseReceived
+            $certainty = Get-GraphAttemptCertainty -StatusCode $result.StatusCode `
+                -ResponseReceived $result.ResponseReceived -TransportException $result.TransportException
             $lastAttemptCertainty = $certainty
 
             if ($null -ne $admission) { Complete-GraphThrottleGate -Admission $admission -Success:($certainty -eq 'Succeeded') }
@@ -428,10 +463,15 @@ function Invoke-GraphRetry {
             # because the caller token happened to be signalled at the same time.
             $candidate = $sendFailure
             $isCancellationFailure = $false
+            $isOperationCancellation = $false
             $isTenantBindingDeadline = $false
             while ($null -ne $candidate) {
                 if ($candidate -is [System.OperationCanceledException]) {
                     $isCancellationFailure = $true
+                }
+                if ($candidate -is [System.Exception] -and
+                    $candidate.Data['GraphKit.OperationCancellation'] -eq $true) {
+                    $isOperationCancellation = $true
                 }
                 if ($candidate -is [System.TimeoutException] -and
                     $candidate.Data['GraphKit.TenantBindingDeadlineExpired'] -eq $true) {
@@ -443,8 +483,9 @@ function Invoke-GraphRetry {
             # Caller cancellation wins at a simultaneous proof-deadline boundary.
             # The sender normally preserves OCE causality, but a marked deadline
             # can be thrown in the narrow race after the proof checked its token.
-            if ($CancellationToken.IsCancellationRequested -and
-                ($isCancellationFailure -or $isTenantBindingDeadline)) {
+            if ($isOperationCancellation -or
+                ($CancellationToken.IsCancellationRequested -and
+                    ($isCancellationFailure -or $isTenantBindingDeadline))) {
                 $outcome = 'Cancelled'
                 $certaintyFinal = 'Indeterminate'
                 break

@@ -873,6 +873,88 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
             }
         }
 
+        It 'gives module cancellation precedence when the proof deadline expires in the same boundary check' {
+            $authority = [uri] 'https://graph.microsoft.com'
+            $state = InModuleScope GraphKit {
+                New-GraphModuleLifecycleState
+            }
+            $handler = [GraphKit.Tests.TenantDeadlineIgnoringHandler]::new()
+            $client = [System.Net.Http.HttpClient]::new($handler, $false)
+            $tokenSource = New-TestTokenSource -Fingerprint 'fp-target-module-cancel' -Generation 'g-target-module-cancel' `
+                -VerifiedTenantId $script:TenantId.ToString()
+            $capture = [pscustomobject] @{ FactoryCalls = 0 }
+            $elapsedProvider = {
+                if ($handler.SendCount -gt 0) {
+                    $state.ShutdownCts.Cancel()
+                    return [TimeSpan]::FromSeconds(5)
+                }
+                return [TimeSpan]::Zero
+            }.GetNewClosure()
+            $bindingContext = [pscustomobject] @{
+                Cloud             = 'Global'
+                ClientId          = [guid] '00000000-0000-0000-0000-000000000010'
+                RemainingDeadline = [TimeSpan]::FromSeconds(5)
+                Elapsed           = $elapsedProvider
+            }
+            $factory = {
+                param($ConnectTimeoutSeconds)
+                $capture.FactoryCalls++
+                return [pscustomobject] @{
+                    Client          = $client
+                    OwnedByGraphKit = $false
+                }
+            }.GetNewClosure()
+
+            try {
+                $result = InModuleScope GraphKit -ArgumentList $authority, $tokenSource, $factory, $bindingContext, $script:TenantId, $state {
+                    param($Authority, $TokenSource, $Factory, $BindingContext, $TenantId, $State)
+                    $key = Get-GraphTenantBindingKey -Fingerprint 'fp-target-module-cancel' `
+                        -Generation 'g-target-module-cancel' -TenantId $TenantId
+                    $script:GraphTenantBindingCache[$key] = $true
+                    try {
+                        Send-GraphHttpRequest -Uri ([uri] "$($Authority.AbsoluteUri.TrimEnd('/'))/v1.0/test") `
+                            -Method GET -CredentialPolicy GraphBearer -ExpectedAuthority $Authority `
+                            -TokenSource $TokenSource -TargetTenantId $TenantId -VerifyTenantBinding `
+                            -TenantBindingContext $BindingContext -HttpClientFactory $Factory `
+                            -LifecycleState $State
+                    }
+                    finally {
+                        $null = $script:GraphTenantBindingCache.Remove($key)
+                    }
+                }
+
+                $isDeadline = $false
+                $candidate = $result.TransportException
+                while ($null -ne $candidate) {
+                    if ($candidate -is [System.TimeoutException] -and
+                        $candidate.Data['GraphKit.TenantBindingDeadlineExpired'] -eq $true) {
+                        $isDeadline = $true
+                    }
+                    $candidate = $candidate.InnerException
+                }
+
+                $state.ShutdownCts.IsCancellationRequested | Should -BeTrue
+                $result.ResponseReceived | Should -BeTrue
+                $result.StatusCode | Should -Be 200
+                $result.TransportException | Should -Not -BeNullOrEmpty
+                $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
+                $isDeadline | Should -BeTrue
+                $tokenSource.AcquireFlags | Should -Be @($false)
+                $capture.FactoryCalls | Should -Be 1
+                $handler.SendCount | Should -Be 1
+                $state.ActiveOperations | Should -Be 0
+                $state.Drained.IsSet | Should -BeTrue
+            }
+            finally {
+                InModuleScope GraphKit -Parameters @{ State = $state } {
+                    param($State)
+                    Stop-GraphModule -State $State
+                }
+                $client.Dispose()
+                $handler.Dispose()
+            }
+        }
+
         It 'preserves caller cancellation raised after a successful target body completes' {
             $authority = [uri] 'https://graph.microsoft.com'
             $cts = [System.Threading.CancellationTokenSource]::new()
@@ -898,23 +980,17 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
             }.GetNewClosure()
 
             try {
-                $failure = InModuleScope GraphKit -ArgumentList $authority, $tokenSource, $factory, $bindingContext, $script:TenantId, $cts.Token {
+                $result = InModuleScope GraphKit -ArgumentList $authority, $tokenSource, $factory, $bindingContext, $script:TenantId, $cts.Token {
                     param($Authority, $TokenSource, $Factory, $BindingContext, $TenantId, $CancellationToken)
                     $state = New-GraphModuleLifecycleState
                     $key = Get-GraphTenantBindingKey -Fingerprint 'fp-target-cancel' -Generation 'g-target-cancel' -TenantId $TenantId
                     $script:GraphTenantBindingCache[$key] = $true
                     try {
-                        try {
-                            Send-GraphHttpRequest -Uri ([uri] "$($Authority.AbsoluteUri.TrimEnd('/'))/v1.0/test") `
-                                -Method GET -CredentialPolicy GraphBearer -ExpectedAuthority $Authority `
-                                -TokenSource $TokenSource -TargetTenantId $TenantId -VerifyTenantBinding `
-                                -TenantBindingContext $BindingContext -HttpClientFactory $Factory `
-                                -LifecycleState $state -CancellationToken $CancellationToken
-                            return $null
-                        }
-                        catch {
-                            return $_.Exception
-                        }
+                        Send-GraphHttpRequest -Uri ([uri] "$($Authority.AbsoluteUri.TrimEnd('/'))/v1.0/test") `
+                            -Method GET -CredentialPolicy GraphBearer -ExpectedAuthority $Authority `
+                            -TokenSource $TokenSource -TargetTenantId $TenantId -VerifyTenantBinding `
+                            -TenantBindingContext $BindingContext -HttpClientFactory $Factory `
+                            -LifecycleState $state -CancellationToken $CancellationToken
                     }
                     finally {
                         $null = $script:GraphTenantBindingCache.Remove($key)
@@ -924,7 +1000,7 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
 
                 $isCancellation = $false
                 $isDeadline = $false
-                $candidate = $failure
+                $candidate = $result.TransportException
                 while ($null -ne $candidate) {
                     if ($candidate -is [System.OperationCanceledException]) {
                         $isCancellation = $true
@@ -940,6 +1016,10 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
                 $capture.FactoryCalls | Should -Be 1
                 $handler.SendCount | Should -Be 1
                 $cts.IsCancellationRequested | Should -BeTrue
+                $result.ResponseReceived | Should -BeTrue
+                $result.StatusCode | Should -Be 200
+                $result.TransportException | Should -Not -BeNullOrEmpty
+                $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
                 $isCancellation | Should -BeTrue
                 $isDeadline | Should -BeFalse
             }

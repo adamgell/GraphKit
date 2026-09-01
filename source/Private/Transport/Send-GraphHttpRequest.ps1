@@ -10,7 +10,9 @@
     This function NEVER throws for transport or HTTP outcomes (timeouts, connection
     resets, 3xx/4xx/5xx statuses): it normalizes them into a GraphTransportResult.
     The only hard errors are credential-boundary violations, which throw before any
-    token is acquired or any bytes leave the process.
+    token is acquired or any bytes leave the process. Operation-control cancellation
+    and tenant-proof deadlines can propagate with GraphKit-owned markers so the retry
+    owner can return the correct non-success envelope.
 
     Split timeouts: the connection phase is bounded by the handler ConnectTimeout;
     the header phase and body phase are bounded by linked CancellationTokenSources
@@ -183,6 +185,7 @@ function Send-GraphHttpRequest {
 
     $leaseAcquired = $false
     $lifetimeCts = $null
+    $effectiveCancellationToken = [System.Threading.CancellationToken]::None
     $phaseCts = $null
     $tenantBindingDeadlineCts = $null
     $request = $null
@@ -617,11 +620,14 @@ function Send-GraphHttpRequest {
 
         $result.Body = ConvertFrom-GraphResponseBody -Bytes $bodyBytes -Headers $result.Headers
 
-        # A handler is not trusted to honour cancellation, and completion can race
-        # the deadline signal. Success is authoritative only while the inherited
-        # operation budget still remains after the entire response body is read.
+        # A handler is not trusted to honour caller or module cancellation, and
+        # completion can race either signal. Recheck the linked operation token
+        # for every request before a clean response can leave the sender.
+        $effectiveCancellationToken.ThrowIfCancellationRequested()
+
+        # Tenant-bound operations additionally inherit the proof deadline. Success
+        # is authoritative only while that budget remains after the entire body.
         if ($VerifyTenantBinding) {
-            $effectiveCancellationToken.ThrowIfCancellationRequested()
             $remainingAfterBody = [TimeSpan] (& $getTenantBindingRemaining)
             if (($null -ne $tenantBindingDeadlineCts -and $tenantBindingDeadlineCts.IsCancellationRequested) -or
                 $remainingAfterBody -le [TimeSpan]::Zero) {
@@ -645,14 +651,12 @@ function Send-GraphHttpRequest {
             $candidate = $candidate.InnerException
         }
 
-        # Cancellation observed at either final boundary is operation control, not
-        # a transport result. Let Invoke-GraphRetry preserve its Cancelled envelope
-        # and release admission; normalizing this OCE could turn a completed 2xx
-        # response into a false success.
-        if ($isCancellationFailure -and $effectiveCancellationToken.IsCancellationRequested) {
-            throw
-        }
-        if ($isTenantBindingDeadline) {
+        # Preserve the normalized sender boundary even for caller/module
+        # cancellation. Invoke-GraphRetry consumes the GraphKit-owned marker below
+        # before it considers status, body, telemetry or admission success.
+        $isOperationCancellation = $effectiveCancellationToken.IsCancellationRequested -and
+            ($isCancellationFailure -or $isTenantBindingDeadline)
+        if ($isTenantBindingDeadline -and -not $isOperationCancellation) {
             throw
         }
 
@@ -673,6 +677,9 @@ function Send-GraphHttpRequest {
         if ($null -ne $ex -and $null -ne $ex.InnerException) {
             $ex = $ex.InnerException
         }
+        if ($isOperationCancellation -and $null -ne $ex) {
+            $ex.Data['GraphKit.OperationCancellation'] = $true
+        }
         $result.TransportException = $ex
         # Preserve ResponseReceived/StatusCode when the failure happened while
         # reading the body (response headers WERE received). Only a failure before
@@ -682,6 +689,33 @@ function Send-GraphHttpRequest {
         }
     }
     return $result
+    }
+    catch {
+        # Cancellation can also surface before the physical-send normalization
+        # block: token acquisition, tenant proof and their boundary checks all
+        # receive the same linked caller/module token. Mark only causal OCEs or a
+        # simultaneous tenant deadline; never relabel an unrelated credential
+        # failure merely because shutdown was signalled at the same time.
+        $failure = $_.Exception
+        $candidate = $failure
+        $isCancellationFailure = $false
+        $isTenantBindingDeadline = $false
+        while ($null -ne $candidate) {
+            if ($candidate -is [System.OperationCanceledException]) {
+                $isCancellationFailure = $true
+            }
+            if ($candidate -is [System.TimeoutException] -and
+                $candidate.Data['GraphKit.TenantBindingDeadlineExpired'] -eq $true) {
+                $isTenantBindingDeadline = $true
+            }
+            $candidate = $candidate.InnerException
+        }
+
+        if ($effectiveCancellationToken.IsCancellationRequested -and
+            ($isCancellationFailure -or $isTenantBindingDeadline)) {
+            $failure.Data['GraphKit.OperationCancellation'] = $true
+        }
+        throw
     }
     finally {
         # The lease is released last. Stop-GraphModule cannot dispose a cached

@@ -402,6 +402,7 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         $r.ResponseReceived | Should -BeFalse
         $r.StatusCode | Should -Be 0
         $r.TransportException | Should -Not -BeNullOrEmpty
+        $r.TransportException.Data['GraphKit.OperationCancellation'] | Should -Not -BeTrue
     }
 
     It 'fires the header timeout independently' {
@@ -422,6 +423,7 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         $r.ResponseReceived | Should -BeFalse
         $r.StatusCode | Should -Be 0
         $r.TransportException | Should -Not -BeNullOrEmpty
+        $r.TransportException.Data['GraphKit.OperationCancellation'] | Should -Not -BeTrue
     }
 
     It 'fires the body timeout independently of the header phase' {
@@ -448,6 +450,7 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
         $r.ResponseReceived | Should -BeTrue
         $r.StatusCode | Should -Be 200
         $r.TransportException | Should -Not -BeNullOrEmpty
+        $r.TransportException.Data['GraphKit.OperationCancellation'] | Should -Not -BeTrue
     }
 
     It 'a cancelled token aborts an in-flight request' {
@@ -473,6 +476,7 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
 
         $r.ResponseReceived | Should -BeFalse
         $r.TransportException | Should -Not -BeNullOrEmpty
+        $r.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
         $sw.Elapsed.TotalSeconds | Should -BeLessThan 5
     }
 
