@@ -284,7 +284,6 @@ Describe 'Composed retry and sender token identity' {
         $tokenSource = New-RotatingTokenSource
         $script:deadlineProofEntered = 0
         $script:deadlineProofSawCancellation = $false
-        $script:deadlineOuterBudget = [TimeSpan]::Zero
 
         Mock Confirm-GraphTenantBinding -ModuleName GraphKit {
             param($Context, $TokenResult, [System.Threading.CancellationToken] $CancellationToken, $RemainingDeadline)
@@ -299,6 +298,7 @@ Describe 'Composed retry and sender token identity' {
             param($Context, $Descriptor, $Authority)
 
             $script:deadlineClock = [datetime] '2026-09-01T12:00:00Z'
+            $script:deadlineOuterBudget = [TimeSpan]::Zero
             $send = {
                 param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy,
                       $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority,
@@ -328,16 +328,17 @@ Describe 'Composed retry and sender token identity' {
                     Jitter = { 0.0 }
                 }
             [pscustomobject] @{
-                Result   = $result
-                InFlight = (Get-GraphThrottleCoordinator).GetInFlight([string] $scope.LeafKey)
+                Result      = $result
+                InFlight    = (Get-GraphThrottleCoordinator).GetInFlight([string] $scope.LeafKey)
+                OuterBudget = $script:deadlineOuterBudget
             }
         }
 
         $capture.Result.Outcome | Should -BeExactly 'DeadlineExpired'
         $capture.Result.Certainty | Should -BeExactly 'Indeterminate'
         $capture.InFlight | Should -Be 0
-        $script:deadlineOuterBudget | Should -BeGreaterThan ([TimeSpan]::Zero)
-        $script:deadlineOuterBudget | Should -BeLessOrEqual ([TimeSpan]::FromSeconds(5))
+        $capture.OuterBudget | Should -BeGreaterThan ([TimeSpan]::Zero)
+        $capture.OuterBudget | Should -BeLessOrEqual ([TimeSpan]::FromSeconds(5))
         $script:deadlineProofEntered | Should -Be 0
         $script:deadlineProofSawCancellation | Should -BeFalse
         $tokenSource.AcquireFlags | Should -HaveCount 0
@@ -349,13 +350,14 @@ Describe 'Composed retry and sender token identity' {
         $cts = [System.Threading.CancellationTokenSource]::new()
         $tokenSource = New-RotatingTokenSource
         $tokenSource | Add-Member -MemberType NoteProperty -Name CancellationSource -Value $cts
-        $script:cancelledVerifiedGetClock = [datetime] '2026-09-01T12:00:00Z'
+        $clockCapture = [pscustomobject] @{ UtcNow = [datetime] '2026-09-01T12:00:00Z' }
+        $tokenSource | Add-Member -MemberType NoteProperty -Name ClockCapture -Value $clockCapture
         $tokenSource | Add-Member -MemberType ScriptMethod -Name Acquire -Force -Value {
             param([bool] $forceRefresh, $cancellationToken)
 
             $this.AcquireFlags.Add($forceRefresh)
             $this.CancellationSource.Cancel()
-            $script:cancelledVerifiedGetClock = $script:cancelledVerifiedGetClock.AddSeconds(5)
+            $this.ClockCapture.UtcNow = $this.ClockCapture.UtcNow.AddSeconds(5)
             return [pscustomobject] @{
                 AccessToken           = 'cancelled-verified-get-token'
                 ExpiresOnUtc          = [System.DateTimeOffset]::UtcNow.AddHours(1)
@@ -378,15 +380,16 @@ Describe 'Composed retry and sender token identity' {
         try {
             $capture = InModuleScope GraphKit -ArgumentList `
                 (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), `
-                (New-TokenPipelineDescriptor -IdentityRequirement Verified), $authority, $cts.Token {
-                param($Context, $Descriptor, $Authority, $CancellationToken)
+                (New-TokenPipelineDescriptor -IdentityRequirement Verified), $authority, $cts.Token, $clockCapture {
+                param($Context, $Descriptor, $Authority, $CancellationToken, $ClockCapture)
 
+                $utcNow = { $ClockCapture.UtcNow }.GetNewClosure()
                 $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
                 $result = Invoke-GraphRetry -Context $Context -Descriptor $Descriptor `
                     -Uri ([uri]::new($Authority, 'resource')) -Method GET -Headers @{} -Body $null `
                     -DeadlineSeconds 5 -CancellationToken $CancellationToken `
                     -Injections @{
-                        UtcNow = { $script:cancelledVerifiedGetClock }
+                        UtcNow = $utcNow
                         Delay  = { param($Seconds) }
                         Jitter = { 0.0 }
                     }

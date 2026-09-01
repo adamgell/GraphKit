@@ -359,7 +359,10 @@ Describe 'Confirm-GraphTenantBinding' {
                     Descriptor      = $Descriptor
                     Context         = $Context
                     DeadlineSeconds = $DeadlineSeconds
-                    Scope           = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+                    Scope           = & (Get-Module GraphKit) {
+                        param($ProofContext, $ProofDescriptor)
+                        New-GraphThrottleScope -Context $ProofContext -Descriptor $ProofDescriptor
+                    } $Context $Descriptor
                 }
                 return [pscustomobject] @{
                     Outcome = 'Succeeded'
@@ -392,12 +395,15 @@ Describe 'Confirm-GraphTenantBinding' {
         It 'forwards the caller cancellation token into the proof retry pipeline' {
             $cache = @{}
             $script:proofCancellationToken = [System.Threading.CancellationToken]::None
+            $script:proofCancellationWasRequestedAtEntry = $null
             $cts = [System.Threading.CancellationTokenSource]::new()
-            $cts.Cancel()
+            $script:proofCancellationSource = $cts
 
             Mock Invoke-GraphRetry -ModuleName GraphKit {
                 param($Context, $Descriptor, $Uri, $Method, $Headers, $Body, $CancellationToken)
+                $script:proofCancellationWasRequestedAtEntry = $CancellationToken.IsCancellationRequested
                 $script:proofCancellationToken = $CancellationToken
+                $script:proofCancellationSource.Cancel()
                 return [pscustomobject] @{
                     Outcome = 'Cancelled'
                     Data    = $null
@@ -416,6 +422,8 @@ Describe 'Confirm-GraphTenantBinding' {
                 }
             }
 
+            $script:proofCancellationWasRequestedAtEntry | Should -BeFalse
+            $script:proofCancellationToken.Equals($cts.Token) | Should -BeTrue
             $script:proofCancellationToken.IsCancellationRequested | Should -BeTrue
             $failure | Should -Not -BeNullOrEmpty
             $isCancellation = $false
@@ -733,9 +741,12 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
                 param($Context, $TokenResult)
                 $capture.ProverCalls++
                 $TokenResult.VerifiedTenantId = [string] $Context.TenantId
-                $key = Get-GraphTenantBindingKey -Fingerprint $TokenResult.TokenFingerprint `
-                    -Generation $TokenResult.CredentialGeneration -TenantId $Context.TenantId
-                $script:GraphTenantBindingCache[$key] = $true
+                & (Get-Module GraphKit) {
+                    param($ProofTokenResult, $ProofContext)
+                    $key = Get-GraphTenantBindingKey -Fingerprint $ProofTokenResult.TokenFingerprint `
+                        -Generation $ProofTokenResult.CredentialGeneration -TenantId $ProofContext.TenantId
+                    $script:GraphTenantBindingCache[$key] = $true
+                } $TokenResult $Context
                 $elapsed.Elapsed = [TimeSpan]::FromSeconds(5)
             }.GetNewClosure()
             $factory = {
