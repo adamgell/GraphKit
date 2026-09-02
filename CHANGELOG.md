@@ -5,6 +5,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The compiled `GraphKit.Auth` authentication boundary. A dependency-free
+  `GraphKit.Auth.Contracts.dll` owns the GraphKit ABI-v1 DTOs, interfaces, strict loader,
+  proxies, and host lifetime and loads in the default `AssemblyLoadContext`. `GraphKit.Auth.dll`
+  and its locked `Microsoft.Identity.Client` 4.82.1 closure load in one named collectible
+  context per module import, so no MSAL type crosses the boundary. The built-in certificate,
+  client-secret, managed-identity, and fixed-bearer modes now construct runspace-neutral
+  compiled sources, while `Get-GraphContext -TokenProvider` and `-MsalFactory` remain the
+  caller-owned legacy same-runspace compatibility seams.
+
 ### Fixed
 
 - The real retry/sender path now acquires exactly one bearer per physical attempt. Tenant proof,

@@ -10,6 +10,17 @@
 
 ---
 
+## Status (2026-09-01)
+
+Deterministic implementation is complete and green: Tasks 1-7 (prerelease identity, ABI and
+package boundary, dependency-free contract assembly, isolated provider, build/package/CI
+wiring, built-in cutover, and deterministic parity/runspace proof) plus Task 8 Steps 0-3
+(deterministic prerequisites and the digest-bound protected runner, frozen at clean commit
+`beceb22`). The remaining checkboxes are approval-gated and out of scope for deterministic
+completion: Task 8 Steps 4-6 (protected live parity evidence), Task 9 (transitive MSAL removal,
+sequenced after live parity), and Task 10 (exact-SHA CI and publication).
+
+
 ## File map
 
 New compiled source:
@@ -68,7 +79,7 @@ Existing files to modify:
 - Test: `tests/QA/PackageIdentity.tests.ps1`
 - Test: `tests/QA/ReleaseProof.tests.ps1`
 
-- [ ] **Step 1: Write failing successor-version tests**
+- [x] **Step 1: Write failing successor-version tests**
 
 Add assertions that source declares base `0.4.0`, the train is `r8`, the built/package version is
 `0.4.0-r8.g<12 hex>` for a clean tree, and the proof records the exact full version and 40-hex
@@ -81,7 +92,7 @@ $proof.source.revision | Should -Match '^[0-9a-f]{40}$'
 $proof.module.version | Should -Be ([string] $metadata.version)
 ```
 
-- [ ] **Step 2: Run the focused tests and verify red**
+- [x] **Step 2: Run the focused tests and verify red**
 
 Run:
 
@@ -92,7 +103,7 @@ Invoke-Pester ./tests/QA/PackageIdentity.tests.ps1,./tests/QA/ReleaseProof.tests
 
 Expected: failures naming stable `0.3.0`, missing source revision, and prerelease package discovery.
 
-- [ ] **Step 3: Implement deterministic version generation**
+- [x] **Step 3: Implement deterministic version generation**
 
 `Get-GraphKitTrainVersion.ps1` returns one string and nothing else:
 
@@ -115,11 +126,11 @@ Set `$env:ModuleVersion` in `build.ps1` before Sampler resolves build metadata. 
 semantic version and source state in proof schema v2. Resolve the built directory from base
 `ModuleVersion` while resolving the package from full PSData prerelease/version metadata.
 
-- [ ] **Step 4: Run identity/proof tests and verify green**
+- [x] **Step 4: Run identity/proof tests and verify green**
 
 Expected: every new identity fixture passes; no package named `GraphKit.0.3.0.nupkg` is produced.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add build.ps1 source/GraphKit.psd1 scripts/Get-GraphKitTrainVersion.ps1 scripts/New-GraphKitTestedReleaseProof.ps1 scripts/Test-GraphKitReleaseProof.ps1 tests/QA/PackageIdentity.tests.ps1 tests/QA/ReleaseProof.tests.ps1
@@ -134,7 +145,7 @@ git commit -m "build: establish the GraphKit R8 prerelease identity"
 - Create: `tests/QA/GraphKitAuthPackage.tests.ps1`
 - Modify: `tests/QA/PackageDependencies.tests.ps1`
 
-- [ ] **Step 1: Write the missing-artifact and ABI tests**
+- [x] **Step 1: Write the missing-artifact and ABI tests**
 
 The tests require these exact package paths:
 
@@ -157,11 +168,11 @@ Load the contracts assembly and assert:
 Reflect over every public type/member signature and fail when the declaring assembly or full type
 name contains `Microsoft.Identity.Client`.
 
-- [ ] **Step 2: Run the two files and verify red**
+- [x] **Step 2: Run the two files and verify red**
 
 Expected: missing assembly/package path failures only.
 
-- [ ] **Step 3: Commit tests only**
+- [x] **Step 3: Commit tests only**
 
 ```bash
 git add tests/Unit/Auth/GraphKitAuth.Tests.ps1 tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/PackageDependencies.tests.ps1
@@ -180,7 +191,7 @@ git commit -m "test: define the GraphKit Auth package boundary"
 - Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthLoadContext.cs`
 - Create: `src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs`
 
-- [ ] **Step 1: Pin the SDK and deterministic defaults**
+- [x] **Step 1: Pin the SDK and deterministic defaults**
 
 `global.json`:
 
@@ -199,7 +210,7 @@ git commit -m "test: define the GraphKit Auth package boundary"
 `ContinuousIntegrationBuild=true`, `DebugType=None`, and
 `RestorePackagesWithLockFile=true`.
 
-- [ ] **Step 2: Implement ABI-v1 DTOs and interfaces**
+- [x] **Step 2: Implement ABI-v1 DTOs and interfaces**
 
 Use sealed mutable-result/plain-constructor types, not records and not PowerShell types. Validate
 null/empty strings, absolute HTTPS authorities/resources, GUID presence by auth mode, credential
@@ -221,7 +232,7 @@ public sealed class GraphTokenResult
 }
 ```
 
-- [ ] **Step 3: Implement strict loader and proxy lifetime**
+- [x] **Step 3: Implement strict loader and proxy lifetime**
 
 `GraphAuthLoadContext.Load` returns the default contracts assembly for the exact matching contract
 name and uses `AssemblyDependencyResolver` for every isolated dependency. It rejects a second
@@ -233,7 +244,7 @@ process.
 `GraphTokenSourceProxy` uses `Interlocked` state, forwards contract members, clears the inner source
 on dispose, and tells the host exactly once. It never catches and relabels provider exceptions.
 
-- [ ] **Step 4: Build the contracts project**
+- [x] **Step 4: Build the contracts project**
 
 Run:
 
@@ -243,7 +254,7 @@ dotnet build src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphKit.Auth.Contracts.c
 
 Expected: zero warnings and errors; no `Microsoft.Identity.Client` in `project.assets.json`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add global.json src/GraphKit.Auth
@@ -263,7 +274,7 @@ git commit -m "feat: define the GraphKit Auth ABI"
 - Create: `src/GraphKit.Auth/GraphKit.Auth.Tests/OwnershipTests.cs`
 - Create: `src/GraphKit.Auth/GraphKit.Auth.sln`
 
-- [ ] **Step 1: Write failing .NET source-contract tests**
+- [x] **Step 1: Write failing .NET source-contract tests**
 
 Use an internal fake acquisition client to prove cache reuse, adaptive refresh, forced-refresh
 replacement, cancellation, failed-acquisition fanout, generation rejection, fixed-bearer refusal,
@@ -280,7 +291,7 @@ public void ForcedRefreshReplacesAnOlderCachedResult()
 }
 ```
 
-- [ ] **Step 2: Run .NET tests and verify red**
+- [x] **Step 2: Run .NET tests and verify red**
 
 Run:
 
@@ -290,7 +301,7 @@ dotnet test src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj -c 
 
 Expected: missing provider/source types.
 
-- [ ] **Step 3: Implement the minimal complete provider**
+- [x] **Step 3: Implement the minimal complete provider**
 
 `GraphKit.Auth.csproj` pins:
 
@@ -312,7 +323,7 @@ generation on every result/adoption, and never parses a JWT. Fixed bearer return
 isolated provider and converted to a GraphKit-owned `GraphAuthException` without preserving an
 MSAL `InnerException` or `Data` value.
 
-- [ ] **Step 4: Lock restore and run tests green**
+- [x] **Step 4: Lock restore and run tests green**
 
 Run:
 
@@ -324,7 +335,7 @@ dotnet test src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj -c 
 
 Expected: all tests pass, zero warnings, committed lock files name exact MSAL 4.82.1.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/GraphKit.Auth
@@ -383,7 +394,7 @@ containment, native identity and link count, stable-handle hashing, and platform
 evidence. Do not modify `GraphKit.SourceCapture.cs` or embed a large native implementation in the
 Invoke-Build task. The helper is build-time/private and changes no public or runtime ABI.
 
-- [ ] **Step 1: Record the approved baseline and write genuine failing tests**
+- [x] **Step 1: Record the approved baseline and write genuine failing tests**
 
 Record the approved boundary before implementation: 48 .NET tests; 23 focused
 `GraphKitAuth.Tests.ps1` cases; 8 package cases; and 31 combined cases with 26 passed and exactly
@@ -404,7 +415,7 @@ Extend release-proof mutations for exact duplicates, portable case, NFC, separat
 and ZIP external attributes encoding symlinks, reparse points, or non-regular files. Negative
 fixtures must not contact Graph, read a vault, acquire a token, or require external state.
 
-- [ ] **Step 2: Implement one locked build lineage and fresh sealed staging**
+- [x] **Step 2: Implement one locked build lineage and fresh sealed staging**
 
 `Build_GraphKitAuth` asserts `dotnet --version` is exactly `10.0.400`, restores the solution once
 with `--locked-mode`, builds the complete Release solution with `--no-restore`, runs the Release test
@@ -476,7 +487,7 @@ restores Git environment, and proves fingerprint/status restoration before relea
 finalization runs with no exclusion active. This is test-fixture projection from the authorized
 stage, not another build or another package source.
 
-- [ ] **Step 3: Copy only a freshly reverified stage into the built module**
+- [x] **Step 3: Copy only a freshly reverified stage into the built module**
 
 Immediately before copy, repeat the full sealed-stage verification. Create
 `Assemblies/GraphKit.Auth` fresh and copy the five literal names individually with create-new
@@ -498,7 +509,7 @@ Prepare_GraphKitAuth_Clean
   -> package_graphkit_r8_nupkg
 ```
 
-- [ ] **Step 4: Reverify before import and harden canonical proof**
+- [x] **Step 4: Reverify before import and harden canonical proof**
 
 The release-proof verifier must match packed runtime bytes to the sealed manifest and reject
 duplicates, portable-case and NFC-equivalent collisions, backslashes, absolute/drive paths,
@@ -511,7 +522,7 @@ PowerShell 7.4 CI is the future .NET 8 runtime/import evidence; local xUnit on t
 net8 project to installed .NET 10. Record the distinction and do not claim observed .NET 8 evidence
 until the exact-SHA PowerShell 7.4 row passes.
 
-- [ ] **Step 5: Enforce exact-event-source CI and run all gates**
+- [x] **Step 5: Enforce exact-event-source CI and run all gates**
 
 CI retains all six Windows/Ubuntu/macOS by PowerShell `7.4.19`/`7.6.5` rows and triggers on pushes
 to `main` and `codex/**`, pull requests, and manual dispatch. Checkout selects PR head repository
@@ -529,7 +540,7 @@ against the already-tested package. Require clean status, `git diff --check`, un
 exact five-file closure, no generated files tracked, all seven literal generated roots absent, and
 no blanket ignore rule. Retain ignored package, proof, and stage evidence.
 
-- [ ] **Step 6: Commit and report**
+- [x] **Step 6: Commit and report**
 
 ```bash
 git add .build/GraphKitAuth.tasks.ps1 scripts/private/GraphKit.AuthStageCapture.cs build.yaml source/GraphKit.psd1 .github/workflows/ci.yml docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md scripts/Test-GraphKitReleaseProof.ps1 tests/QA/GraphKitAuthPackage.tests.ps1 tests/QA/BuiltModule.tests.ps1 tests/QA/ReleaseProof.tests.ps1
@@ -554,18 +565,18 @@ push, PR, publication, tenant, vault, token acquisition, Azure, merge, or galler
 - Test: `tests/Unit/Profiles/Get-GraphContext.Tests.ps1`
 - Test: `tests/Adapter/Send-GraphHttpRequest.Tests.ps1`
 
-- [ ] **Step 1: Write failing bridge/ownership tests**
+- [x] **Step 1: Write failing bridge/ownership tests**
 
 Assert that production certificate, client-secret, managed-identity, and bearer contexts return an
 object implementing `GraphKit.Auth.IGraphTokenSource`; `-TokenProvider` and `-MsalFactory` return the
 legacy same-runspace source. Assert that persisted PFX bytes are read once, unsupported vault
 version metadata fails before vault access, and failed host creation disposes owned material.
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run the three focused Pester files. Expected: built-in contexts still return PowerShell classes.
 
-- [ ] **Step 3: Implement the bridge**
+- [x] **Step 3: Implement the bridge**
 
 `New-GraphAuthTokenSource` constructs a `GraphTokenRequest` and transfers material only
 after generation verification. Production `New-GraphTokenSource` selects it when `-MsalFactory` is
@@ -574,7 +585,7 @@ absent. Register the host before any source and register each compiled source as
 In the sender, adopt shared results for either legacy `GraphTokenSourceBase` or compiled
 `IGraphTokenSource`. Apply the creation-runspace preflight only to the legacy base class.
 
-- [ ] **Step 4: Run focused tests green and commit**
+- [x] **Step 4: Run focused tests green and commit**
 
 ```bash
 git add source/Private/TokenSources/New-GraphAuthTokenSource.ps1 source/Private/Initialize-GraphModuleLifecycle.ps1 source/Private/TokenSources/GraphTokenSource.ps1 source/Private/Transport/Send-GraphHttpRequest.ps1 source/Public/Get-GraphContext.ps1 tests/Unit/Auth/GraphKitAuth.Tests.ps1 tests/Unit/Profiles/Get-GraphContext.Tests.ps1 tests/Adapter/Send-GraphHttpRequest.Tests.ps1
@@ -656,7 +667,7 @@ Five count authorities remain separate. Task 7 records and asserts exact post-di
 accepting at least 48 .NET tests is not Task 7 count authority; durable global ratchet
 synchronization remains Task 9 scope.
 
-- [ ] **Step 1: Replace the tracked plan section and record exact clean baselines**
+- [x] **Step 1: Replace the tracked plan section and record exact clean baselines**
 
 Verify exact HEAD and clean status, then replace the complete tracked Task 7 section with this final
 controller contract before authoring tests. Do not create an intervening documentation commit.
@@ -675,7 +686,7 @@ The focused baseline is the sum of the five existing Task 7 files on clean Task 
 `TokenIsolation` 8, `GraphTokenSource` 48, `GraphModuleLifecycleSender` 2,
 `GraphModuleLifecycle` 13, and `GraphKitAuth` 24. The two new files contribute zero at base.
 
-- [ ] **Step 2: Add the strict shared 16-row matrix and test-only discovery**
+- [x] **Step 2: Add the strict shared 16-row matrix and test-only discovery**
 
 Create `GraphKitAuthParityCases.json` with exact top-level fields `schemaVersion`, `rowCount`, and
 `rows`; require schema `1` and `rowCount` `16`. Every row has exactly `id`, `runners`, `scenario`,
@@ -785,7 +796,7 @@ over already runspace-neutral compiled sources, require reversible mutation proo
 Task 7 waiter/dead-field/lifecycle behavior must fail for the intended reason. Restore every
 mutation byte-for-byte and repack before proceeding.
 
-- [ ] **Step 3: Make compiled-source drain deterministic for both owned modes**
+- [x] **Step 3: Make compiled-source drain deterministic for both owned modes**
 
 Replace the existing single-mode, delay-based active-acquisition disposal fact with a
 Certificate/ClientSecret theory. The fake client signals entry, waits on the supplied cancellation
@@ -798,7 +809,7 @@ acquire-entered -> cancellation-observed -> acquire-exited -> material-disposed
 Require one client and one material disposal, bounded event/task completion, and no sleep, finite
 `Task.Delay`, or `CancelAfter` as ordering evidence.
 
-- [ ] **Step 4: Add exact outer-flight waiter instrumentation**
+- [x] **Step 4: Add exact outer-flight waiter instrumentation**
 
 Add private thread-safe follower entry/departure counts to `GraphTokenFlight`. Increment only after
 a follower obtains the exact registry flight and before it awaits; decrement in `finally`. Expose
@@ -813,7 +824,7 @@ Cover ordinary collapse, provider-failure fanout, leader-cancellation replacemen
 production-sender collapse, ordinary/forced partitioning, concurrent credential reuse,
 active-source disposal, and exact empty-registry cleanup.
 
-- [ ] **Step 5: Prove exact parent-source use across thread runspaces**
+- [x] **Step 5: Prove exact parent-source use across thread runspaces**
 
 Use `Start-ThreadJob` with a GUID AppDomain holder containing the parent context/source,
 ready/go/release gates, a `ConcurrentQueue<object>` of child-observed sources, counters, and results.
@@ -851,7 +862,7 @@ Required cases:
 A controlled C# sender fixture may implement the default-context interface for observations, but
 cannot replace the real public fixed-bearer case or production-source xUnit matrix.
 
-- [ ] **Step 6: Prove lifecycle by composition and collect the packaged ALC**
+- [x] **Step 6: Prove lifecycle by composition and collect the packaged ALC**
 
 Remove unused private `_drained`, `_shutdownCompleted`, and their dead Reset/Set calls from
 `GraphAuthHost`. Assert those fields absent while the literal public ABI and retained Task 3
@@ -877,7 +888,7 @@ While retaining the exact source, call `Acquire` and require `ObjectDisposedExce
 clear source, context, module, host, state, holder, queues, closures, AppDomain data, and every other
 strong reference. Run a finite GC/finalizer loop and require the provider ALC weak reference dead.
 
-- [ ] **Step 7: Run exact focused and complete gates**
+- [x] **Step 7: Run exact focused and complete gates**
 
 Pack before any Pester import. Run locked .NET restore/build/test and parse TRX to require exactly
 `48 + D` passed cases and every other outcome zero. The build's existing `>=48` check is not this
@@ -936,7 +947,7 @@ Reject the task if scheduler duration is used as ordering evidence, a child reco
 an automatic child host remains alive, generated output is tracked, public ABI changes, or external
 access occurs.
 
-- [ ] **Step 8: Commit, repeat on exact clean SHA, and report**
+- [x] **Step 8: Commit, repeat on exact clean SHA, and report**
 
 Commit only the reviewed file set:
 
@@ -1010,7 +1021,7 @@ resources, use external network access, or push, open/merge a PR, merge, or publ
 separate explicit authority. The ignored controller record
 `.superpowers/sdd/2026-08-30-r8-graphkit-auth/progress.md` remains outside every commit.
 
-- [ ] **Step 0: Close deterministic prerequisites exposed by the parity red phase**
+- [x] **Step 0: Close deterministic prerequisites exposed by the parity red phase**
 
 The protected BearerToken read is not a valid parity proof unless the descriptor catalog and every
 descriptor-backed public entry point actually allow that mode. Normalize `SupportedAuthModes` to
@@ -1147,7 +1158,7 @@ tests/Unit/Throttle/ThrottleGate.Tests.ps1
 tests/Unit/Transport/Invoke-GraphRetry.Tests.ps1
 ```
 
-- [ ] **Step 1: Write and test a digest-bound protected runner**
+- [x] **Step 1: Write and test a digest-bound protected runner**
 
 The runner requires the exact package path and SHA-256, installs into an isolated module path, and
 accepts one auth mode per invocation. Dry-run tests prove certificate, client-secret,
@@ -1155,13 +1166,13 @@ managed-identity, and fixed-bearer routing without reading a credential, calling
 permission, or creating Azure resources. Real mode emits only redacted counts, auth mode, adapter
 diagnostics, package digest, and success/failure state.
 
-- [ ] **Step 2: Commit deterministic prerequisites and runner in sequence**
+- [x] **Step 2: Commit deterministic prerequisites and runner in sequence**
 
 First commit the reviewed prerequisite set above and repeat its focused and complete local gates on
 that exact clean SHA. Then commit only `scripts/Invoke-GraphKitAuthParity.ps1` and
 `tests/QA/GraphKitAuthLiveParity.tests.ps1`. No observed-evidence file belongs in either commit.
 
-- [ ] **Step 3: Pack/test and freeze the exact clean runner commit**
+- [x] **Step 3: Pack/test and freeze the exact clean runner commit**
 
 Run the complete local gates with the transitive dependency still present but production contexts
 already using the isolated provider. Pack, test, run canonical proof and the standalone no-rebuild

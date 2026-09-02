@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 
-**Status:** Approved by the active end-to-end product-program goal
+**Status:** Approved by the active end-to-end product-program goal. Deterministic implementation is complete and green; protected live parity, exact-SHA CI, and publication remain approval-gated.
 
 **Scope:** GraphKit R8 only
 
@@ -33,7 +33,7 @@ from the exact source used to build it:
 A development build from a dirty tree adds a deterministic dirty-tree suffix:
 
 ```text
-0.4.0-r8.g<12-lowercase-hex-commit>.d<12-lowercase-hex-diff-hash>
+0.4.0-r8.g<12-lowercase-hex-commit>.d<12-lowercase-hex-source-state-hash>
 ```
 
 Only a clean-tree package may become release authority or cross a repository/machine boundary.
