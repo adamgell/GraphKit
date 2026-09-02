@@ -5,6 +5,14 @@
 **Scope:** GraphKit and TenantPulse, including the recorded deferred end state  
 **Delivery model:** Vertical release trains
 
+> **Scope amendment, 2026-09-01:** the owner confirmed that there are no installed users,
+> legacy consumers, customer-tenant consumers, or repoint targets. R9 therefore has a split
+> disposition: reusable app-registration provisioning and actual-grant verification remain
+> applicable product work; adopter migration, customer repointing, rollback-window operation,
+> legacy-layer retirement, and destructive directory cleanup are **NotApplicable**. Those actions
+> must not be executed to manufacture program-completion evidence. A future identified adopter
+> reopens the applicable cutover gates before that adopter can be claimed supported.
+
 ## Summary
 
 GraphKit and TenantPulse form one product system with two deliberately separate responsibilities.
@@ -16,9 +24,9 @@ The program completes three scopes back to back:
 1. Complete the TenantPulse catalog and its consumer-facing coverage.
 2. Complete the current GraphKit and TenantPulse product contracts, including privacy, scale,
    reliability, and verification debt.
-3. Deliver the recorded deferred end state, including `GraphKit.Auth`, app-registration
-   provisioning, the IntuneHealthAutomation phase-6 cutover, and a separate Azure Resource
-   Manager provider for `TP.INT.0010`.
+3. Deliver the applicable deferred end state: `GraphKit.Auth`, reusable app-registration
+   provisioning, and a separate Azure Resource Manager provider for `TP.INT.0010`. The scope
+   amendment above supersedes the adopter-specific IntuneHealthAutomation phase-6 cutover.
 
 Work ships as vertical release trains. A train adds producer support in GraphKit when needed,
 proves that support, consumes it in TenantPulse, proves the resulting behavior, and leaves both
@@ -45,7 +53,10 @@ per-train requirement.
 - Never read, stage, commit, quote, inventory, or hand off `.env` contents. GraphKit's current
   `.env` ignore gap is an R0 source-hygiene defect.
 
-## Current baseline
+## Baseline at approval, 2026-08-19
+
+The dated bullets below preserve what was known when this design was approved. The 2026-09-01 scope
+amendment supersedes their R9 adopter-repoint, legacy-retirement, and destructive-cleanup posture.
 
 ### GraphKit
 
@@ -445,15 +456,20 @@ not satisfy this milestone.
 
 ### R9: Provisioning and IntuneHealthAutomation phase 6
 
-- Convert the proven standalone certificate app-registration flow into
-  `New-GraphAppRegistration` without removing the script before all callers migrate.
-- Preserve role-grant verification that checks what the service actually granted.
-- Package and install exact GraphKit dependencies on target hosts.
-- Run same-session read-only customer repoint verification only after explicit approval.
-- Keep a rollback window and previous pin until the new path is proven.
-- Retire the legacy authentication layer only after approved customer verification.
-- Purge deleted directory objects and rotate or revoke credentials only as explicit operator
-  actions.
+**Current split disposition:**
+
+- **Applicable product work:** convert the proven standalone certificate app-registration flow
+  into reusable `New-GraphAppRegistration`; preserve verification of the roles the service actually
+  granted; cover the supported contract deterministically and with safe, explicitly authorized
+  Ivy24 proof. Clean-machine exact-package verification remains R11 work and does not require an
+  adopted target host.
+- **NotApplicable while the owner-confirmed no-adopter state holds:** migration of existing callers,
+  installation or cutover on adopted hosts, customer-tenant repoint verification, rollback-window
+  operation, legacy-authentication retirement, and deleted-directory purge. Do not perform any of
+  these merely to produce completion evidence.
+- If a future adopter is identified, reopen the relevant exact-package installation, read-only
+  repoint, rollback, and retirement gates before claiming that adopter supported. Destructive
+  cleanup remains a separately authorized operator action, never a proof-only gate.
 
 ### R10: ARM provider and TP.INT.0010
 
@@ -561,10 +577,11 @@ The program is complete when all of these statements are true:
   closed.
 - `GraphKit.Auth` replaces transitive MSAL delivery without changing TenantPulse's public contract.
 - The separate ARM provider supports `TP.INT.0010` without entering the Graph operation catalog.
-- IntuneHealthAutomation's approved customer cutover and legacy authentication retirement are
-  complete.
-- Approved destructive operator cleanup is complete. If required approval is withheld, the
-  program remains `Blocked`; an executable runbook does not make it `Complete`.
+- Reusable R9 app-registration provisioning and actual-grant verification are complete and proven.
+- Adopter-specific cutover, rollback, and legacy-authentication retirement remain **NotApplicable**
+  while the owner-confirmed no-adopter state holds. Any future adopter reopens those gates before
+  support can be claimed.
+- Destructive directory cleanup is neither required nor permitted as program-completion proof.
 - Deterministic, CI, live, customer, and publication claims remain separately evidenced.
 
 ## Explicit non-goals
