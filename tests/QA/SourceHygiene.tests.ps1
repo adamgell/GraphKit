@@ -10,6 +10,47 @@ BeforeAll {
     $script:sourceFiles = @(
         Get-ChildItem -Path (Join-Path $script:repoRoot 'source') -Recurse -File -Include '*.ps1', '*.psd1', '*.psm1', '*.ps1xml'
     )
+    . (Join-Path $script:repoRoot 'scripts/private/Test-GraphKitPackagePrivacy.ps1')
+}
+
+Describe 'GraphKit.Auth authored CSharp privacy' {
+
+    It 'passes the reusable strict source privacy scan for every authored CSharp file' {
+        $authSourceRoot = Join-Path $script:repoRoot 'src/GraphKit.Auth'
+        $expectedSourceFiles = @(
+            Get-ChildItem -LiteralPath $authSourceRoot -Recurse -File -Force |
+                Where-Object {
+                    $_.Extension -ieq '.cs' -and
+                    $_.FullName -notmatch '[\\/](?:bin|obj)[\\/]'
+                }
+        )
+        $result = Test-GraphKitAuthSourcePrivacy `
+            -SourceRoot $authSourceRoot `
+            -ModuleGuid ([guid] (Import-PowerShellDataFile (Join-Path $script:repoRoot 'source/GraphKit.psd1')).GUID)
+
+        $result.Passed | Should -BeTrue
+        $expectedSourceFiles.Count | Should -BeGreaterThan 0
+        $result.SourceFilesScanned | Should -Be $expectedSourceFiles.Count
+        @($result.Findings).Count | Should -Be 0
+    }
+
+    It 'fails closed when an authored CSharp file is not strict UTF-8' {
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('graphkit-auth-source-privacy-' + [guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+            [System.IO.File]::WriteAllBytes(
+                (Join-Path $fixtureRoot 'Invalid.cs'),
+                [byte[]] @(0x63, 0x6c, 0x61, 0x73, 0x73, 0x20, 0xc3, 0x28)
+            )
+
+            {
+                Test-GraphKitAuthSourcePrivacy -SourceRoot $fixtureRoot -ModuleGuid ([guid]::Empty)
+            } | Should -Throw '*strict UTF-8*'
+        }
+        finally {
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'Source hygiene' {

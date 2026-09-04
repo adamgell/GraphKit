@@ -200,6 +200,20 @@ if ($packageExists) {
         Write-Host ("        {0}: {1} [entry sha256:{2}; value redacted sha256:{3}]" -f `
             $finding.Encoding, $finding.Category, $entryEvidence, $valueEvidence) -ForegroundColor Yellow
     }
+
+    # Authored C# is a separate privacy surface: compile/link can omit constants, comments,
+    # and paths, so absence from the package DLLs is not evidence that public source is clean.
+    $authSourcePrivacyResult = Test-GraphKitAuthSourcePrivacy `
+        -SourceRoot (Join-Path $repoRoot 'src/GraphKit.Auth') `
+        -ModuleGuid ([guid] $manifest.GUID)
+    Test-Gate 'authored GraphKit.Auth source carries no identifiers that must stay private' `
+        $authSourcePrivacyResult.Passed "$(@($authSourcePrivacyResult.Findings).Count) finding(s)"
+    foreach ($finding in @($authSourcePrivacyResult.Findings | Select-Object -First 12)) {
+        $entryEvidence = $finding.EntrySha256.Substring(0, 12)
+        $valueEvidence = $finding.EvidenceSha256.Substring(0, 12)
+        Write-Host ("        {0}: {1} [source sha256:{2}; value redacted sha256:{3}]" -f `
+            $finding.Encoding, $finding.Category, $entryEvidence, $valueEvidence) -ForegroundColor Yellow
+    }
 }
 
 # --- the version is not already on the gallery -------------------------------------------

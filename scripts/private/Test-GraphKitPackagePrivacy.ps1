@@ -19,6 +19,12 @@ function Test-GraphKitPackagePrivacyPlaceholderGuid {
         [string] $Value
     )
 
+    # Sequential all-zero namespace values are conventional deterministic test ids, including
+    # ...0002 and ...0099. They cannot be RFC 4122 identifiers because the version field is zero.
+    if ($Value -match '^00000000-0000-0000-0000-[0-9]{12}$') {
+        return $true
+    }
+
     foreach ($segment in @($Value -split '-')) {
         if (@($segment.ToCharArray() | Select-Object -Unique).Count -gt 1) {
             return $false
@@ -170,6 +176,122 @@ function ConvertFrom-GraphKitPackagePrintableAscii {
     return $text.ToString()
 }
 
+function Get-GraphKitPackagePrivacyAllowedGuidSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [guid] $ModuleGuid
+    )
+
+    $allowedGuids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($allowedGuid in @(
+        '00000000-0000-0000-0000-000000000000',
+        '00000000-0000-0000-0000-000000000001',
+        '00000003-0000-0000-c000-000000000000',
+        $ModuleGuid.ToString('D')
+    )) {
+        $null = $allowedGuids.Add($allowedGuid)
+    }
+    return ,$allowedGuids
+}
+
+function Test-GraphKitAuthSourcePrivacy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $SourceRoot,
+
+        [Parameter(Mandatory)]
+        [guid] $ModuleGuid
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
+        throw 'GraphKit.Auth privacy scan requires the authored source directory.'
+    }
+
+    try {
+        $resolvedSourceRoot = (Resolve-Path -LiteralPath $SourceRoot -ErrorAction Stop).ProviderPath
+        $sourceCandidates = @(Get-ChildItem -LiteralPath $resolvedSourceRoot -Recurse -File -Force -ErrorAction Stop)
+    }
+    catch {
+        throw 'GraphKit.Auth privacy scan could not enumerate the authored source directory.'
+    }
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid $ModuleGuid
+    $sourcePathKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $normalizedSourcePathKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $maximumSourceFileBytes = 32MB
+    $maximumSourceBytes = 128MB
+    [long] $scannedBytes = 0
+    [int] $sourceFilesScanned = 0
+
+    foreach ($sourceFile in $sourceCandidates) {
+        $relativePath = [System.IO.Path]::GetRelativePath($resolvedSourceRoot, $sourceFile.FullName).Replace('\', '/')
+        $segments = @($relativePath -split '/')
+        if (@($segments | Where-Object { $_ -ieq 'bin' -or $_ -ieq 'obj' }).Count -gt 0 -or
+            [System.IO.Path]::GetExtension($sourceFile.Name) -ine '.cs') {
+            continue
+        }
+
+        $sourcePathDigest = Get-GraphKitPackagePrivacyDigest -Value $relativePath
+        $normalizedPath = $relativePath.Normalize([System.Text.NormalizationForm]::FormC)
+        if ($relativePath -cne $normalizedPath -or
+            -not $sourcePathKeys.Add($relativePath) -or
+            -not $normalizedSourcePathKeys.Add($normalizedPath)) {
+            throw "GraphKit.Auth privacy scan rejected an ambiguous source path (source sha256: $sourcePathDigest)."
+        }
+
+        [long] $declaredLength = $sourceFile.Length
+        if ($declaredLength -lt 0 -or $declaredLength -gt $maximumSourceFileBytes) {
+            throw "GraphKit.Auth privacy scan rejected an oversized source file (source sha256: $sourcePathDigest)."
+        }
+        $scannedBytes += $declaredLength
+        if ($scannedBytes -gt $maximumSourceBytes) {
+            throw 'GraphKit.Auth privacy scan rejected a source tree whose bytes exceed the fixed bound.'
+        }
+
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($sourceFile.FullName)
+        }
+        catch {
+            throw "GraphKit.Auth privacy scan failed closed while reading source (source sha256: $sourcePathDigest)."
+        }
+        if ($bytes.LongLength -ne $declaredLength) {
+            throw "GraphKit.Auth privacy scan rejected source whose byte count changed while reading (source sha256: $sourcePathDigest)."
+        }
+
+        try {
+            $text = $strictUtf8.GetString($bytes)
+        }
+        catch {
+            throw "GraphKit.Auth privacy scan rejected authored CSharp that is not strict UTF-8 (source sha256: $sourcePathDigest)."
+        }
+        if ($text.Length -gt 0 -and $text[0] -eq [char] 0xfeff) {
+            $text = $text.Substring(1)
+        }
+
+        Test-GraphKitPackagePrivacyText -Text $relativePath -EntryName $relativePath -Encoding 'source-path' `
+            -AllowedGuids $allowedGuids -Findings $findings -FindingKeys $findingKeys
+        Test-GraphKitPackagePrivacyText -Text $text -EntryName $relativePath -Encoding 'source-strict-utf8' `
+            -AllowedGuids $allowedGuids -Findings $findings -FindingKeys $findingKeys
+        $sourceFilesScanned++
+    }
+
+    if ($sourceFilesScanned -eq 0) {
+        throw 'GraphKit.Auth privacy scan found no authored CSharp files and failed closed.'
+    }
+
+    return [pscustomobject] [ordered] @{
+        Passed = $findings.Count -eq 0
+        Findings = @($findings)
+        SourceFilesScanned = $sourceFilesScanned
+        BytesScanned = $scannedBytes
+    }
+}
+
 function Test-GraphKitPackagePrivacy {
     [CmdletBinding()]
     param(
@@ -186,15 +308,7 @@ function Test-GraphKitPackagePrivacy {
 
     $findings = [System.Collections.Generic.List[object]]::new()
     $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    $allowedGuids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($allowedGuid in @(
-        '00000000-0000-0000-0000-000000000000',
-        '00000000-0000-0000-0000-000000000001',
-        '00000003-0000-0000-c000-000000000000',
-        $ModuleGuid.ToString('D')
-    )) {
-        $null = $allowedGuids.Add($allowedGuid)
-    }
+    $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid $ModuleGuid
 
     $textExtensions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($textExtension in @(

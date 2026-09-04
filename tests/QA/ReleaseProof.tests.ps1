@@ -164,8 +164,13 @@ BeforeAll {
         $gateDir = Join-Path $fixtureRoot 'tests/QA'
         $scriptsDir = Join-Path $fixtureRoot 'scripts'
         $privateScriptsDir = Join-Path $scriptsDir 'private'
+        $authSourceDir = Join-Path $fixtureRoot 'src/GraphKit.Auth/GraphKit.Auth'
         $buildDir = Join-Path $fixtureRoot '.build'
-        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir, $privateScriptsDir, $buildDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $moduleDir, $resultsDir, $gateDir, $scriptsDir, $privateScriptsDir, $authSourceDir, $buildDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $authSourceDir 'Fixture.cs') -NoNewline -Encoding utf8NoBOM -Value @'
+namespace GraphKit.Auth;
+internal static class Fixture { internal const string Value = "public fixture"; }
+'@
 
         Copy-Item -LiteralPath (Join-Path $script:repoRoot 'tests/QA/Assert-GateResult.ps1') `
             -Destination (Join-Path $gateDir 'Assert-GateResult.ps1')
@@ -193,7 +198,7 @@ BeforeAll {
                 -Destination (Join-Path $privateScriptsDir 'GraphKit.SourceCapture.cs')
             Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') -Value "output/`nLICENSE`n" -NoNewline -Encoding utf8NoBOM
             & git -C $fixtureRoot init --quiet
-            & git -C $fixtureRoot add .gitignore scripts tests
+            & git -C $fixtureRoot add .gitignore scripts src tests
             & git -C $fixtureRoot -c user.name='GraphKit Fixture' -c user.email='fixture@example.invalid' commit --quiet -m 'fixture source'
             $revision = (& git -C $fixtureRoot rev-parse HEAD).Trim().ToLowerInvariant()
             $version = (& (Join-Path $scriptsDir 'Get-GraphKitTrainVersion.ps1') -RepositoryRoot $fixtureRoot).Trim()
@@ -387,6 +392,7 @@ $requiredAssembliesLine    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.
             Version = $version
             BaseVersion = $baseVersion
             ModuleDir = $moduleDir
+            AuthSourceDir = $authSourceDir
             PackagePath = $packagePath
             ProofPath = $proofPath
             NUnitPath = $nunitPath
@@ -1233,6 +1239,36 @@ internal static class Fixture {
         $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
 
         $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'GUID that is not a well-known or package id'
+        $result.Output | Should -Match 'certificate thumbprint'
+        $result.Output | Should -Match 'local user path'
+        $result.Output | Should -Match 'internal project name'
+        foreach ($sentinel in @($privateGuid, $thumbprint, $localPath, $internalProject)) {
+            $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
+        }
+    }
+
+    It 'gallery preflight rejects private authored GraphKit.Auth source that compilation omitted without disclosing it' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $privateGuid = '0b7fc557-6600-4ca6-bd64-de8e4f0eb285'
+        $thumbprint = 'fedcba9876543210fedcba9876543210fedcba98'
+        $localPath = '/Users/GraphKitPrivacySource/private-build'
+        $internalProject = 'IntuneHealthAutomation'
+        Set-Content -LiteralPath (Join-Path $script:fixture.AuthSourceDir 'PrivateFixture.cs') `
+            -NoNewline -Encoding utf8NoBOM -Value @"
+namespace GraphKit.Auth;
+internal static class PrivateFixture {
+    private const string TenantId = "$privateGuid";
+    private const string CertificateThumbprint = "$thumbprint";
+    private const string SourcePath = "$localPath";
+    private const string Project = "$internalProject";
+}
+"@
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'authored GraphKit.Auth source carries no identifiers that must stay private'
         $result.Output | Should -Match 'GUID that is not a well-known or package id'
         $result.Output | Should -Match 'certificate thumbprint'
         $result.Output | Should -Match 'local user path'
