@@ -1217,6 +1217,20 @@ Describe 'Both publisher paths consume the canonical proof verifier' {
         $result.ExitCode | Should -Not -Be 0 -Because $result.Output
         $result.Output | Should -Match 'strict UTF-8'
         $result.Output | Should -Not -Match ([char] 0xfffd)
+
+        . (Join-Path $script:repoRoot 'scripts/private/Test-GraphKitPackagePrivacy.ps1')
+        $understatedStream = [IO.MemoryStream]::new([byte[]](1..64), $false)
+        try {
+            {
+                Read-GraphKitPackagePrivacyEntryBytesBounded `
+                    -EntryStream $understatedStream -DeclaredLength 1
+            } | Should -Throw -ExpectedMessage '*declared byte count*'
+            $understatedStream.Position | Should -BeLessOrEqual 2 `
+                -Because 'an understated ZIP entry must be rejected after at most one excess byte'
+        }
+        finally {
+            $understatedStream.Dispose()
+        }
     }
 
     It 'gallery preflight applies every privacy category to authored CSharp without disclosing matched values' {
@@ -1323,9 +1337,12 @@ internal static class PrivateFixture {
             $publisher | Should -Match 'VerifiedPackagePath' -Because $relativePath
         }
         $privatePublisher = Get-Content -LiteralPath (Join-Path $script:repoRoot 'scripts/Publish-GraphKitPackage.ps1') -Raw
+        $galleryPublisher = Get-Content -LiteralPath (Join-Path $script:repoRoot 'scripts/Publish-GraphKitToGallery.ps1') -Raw
         $privatePublisher | Should -Not -Match '--clobber:'
         $privatePublisher | Should -Match '\$proofUploadArguments \+= ''--clobber'''
         $privatePublisher | Should -Match '\$packageUploadArguments \+= ''--clobber'''
+        $galleryPublisher | Should -Match 'Get-Command\s+-Name\s+Test-GraphKitAuthSourcePrivacy' `
+            -Because 'gallery publication must fail closed if its dot-sourced source scanner is unavailable'
         $proofCopy = $privatePublisher.IndexOf(
             'Copy-Item -LiteralPath $verifiedProofSnapshot.FullName -Destination $proofTarget',
             [StringComparison]::Ordinal)

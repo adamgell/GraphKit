@@ -583,6 +583,7 @@ public static class GraphKitAuthRuntimeHarness
         var stopped = RunPreProviderRejection(payloadRoot, clearFactory: false);
         var missingFactory = RunPreProviderRejection(payloadRoot, clearFactory: true);
         var postProvider = RunPostProviderFailure(payloadRoot, markerRoot);
+        var blockedFactoryShutdown = RunBlockedFactoryShutdown(payloadRoot);
         var sanitized = RunSanitizedCleanupFailure(payloadRoot);
         var weakKeys = RunWeakKeyProof(payloadRoot);
         return JsonSerializer.Serialize(new
@@ -593,6 +594,7 @@ public static class GraphKitAuthRuntimeHarness
             StoppedHost = stopped,
             MissingFactory = missingFactory,
             PostProviderFailure = postProvider,
+            BlockedFactoryShutdown = blockedFactoryShutdown,
             SanitizedCleanupFailure = sanitized,
             WeakKeys = weakKeys
         });
@@ -784,6 +786,70 @@ public static class GraphKitAuthRuntimeHarness
             Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_FACTORY_CLEANUP_MARKER", null);
             Environment.SetEnvironmentVariable("GRAPHKIT_AUTH_TEST_SOURCE_CONSTRUCTION_FAILURE", null);
             material.DisposeWithoutCounting();
+        }
+    }
+
+    private static object RunBlockedFactoryShutdown(string payloadRoot)
+    {
+        GraphAuthHost host = NewHost(payloadRoot);
+        var barrier = new BarrierFactory(GetFactory(host));
+        SetFactory(host, barrier);
+        GraphTokenRequest request = new(
+            "Global",
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            new Uri("https://login.microsoftonline.com"),
+            new Uri("https://graph.microsoft.com"),
+            null,
+            GraphAuthMode.BearerToken,
+            new FixedBearerCredential("blocked-factory-fixture"),
+            "blocked-factory-generation");
+        IGraphTokenSource? source = null;
+        Exception? createFailure = null;
+        Task? create = null;
+        Task? dispose = null;
+        try
+        {
+            create = Task.Factory.StartNew(
+                () =>
+                {
+                    try { source = host.CreateSource(request); }
+                    catch (Exception exception) { createFailure = exception; }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            if (!barrier.Entered.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The blocked construction factory did not start.");
+            }
+
+            dispose = Task.Factory.StartNew(
+                host.Dispose,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            bool disposeCompletedWhileFactoryBlocked = dispose.Wait(TimeSpan.FromSeconds(1));
+            barrier.Release.Set();
+            if (!Task.WaitAll(new[] { create, dispose }, TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("Blocked construction shutdown did not finish after release.");
+            }
+
+            return new
+            {
+                DisposeCompletedWhileFactoryBlocked = disposeCompletedWhileFactoryBlocked,
+                SourceRegistered = source is not null,
+                CreateFailureType = createFailure?.GetType().FullName,
+                FactoryEntryCount = barrier.EntryCount
+            };
+        }
+        finally
+        {
+            barrier.Release.Set();
+            try { source?.Dispose(); } catch { }
+            try { create?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            try { dispose?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            try { host.Dispose(); } catch { }
         }
     }
 
@@ -3201,6 +3267,12 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
         $result.Data.PostProviderFailure.RepeatedFailureCode | Should -BeExactly 'credential_material_consumed'
         $result.Data.PostProviderFailure.FactoryEntryCount | Should -Be 1
         $result.Data.PostProviderFailure.ProviderCleanupCount | Should -Be 1
+
+        $result.Data.BlockedFactoryShutdown.DisposeCompletedWhileFactoryBlocked | Should -BeTrue `
+            -Because 'host shutdown must begin independently of an unbounded provider constructor'
+        $result.Data.BlockedFactoryShutdown.SourceRegistered | Should -BeFalse
+        $result.Data.BlockedFactoryShutdown.CreateFailureType | Should -BeExactly 'System.ObjectDisposedException'
+        $result.Data.BlockedFactoryShutdown.FactoryEntryCount | Should -Be 1
 
         $result.Data.SanitizedCleanupFailure.FailureType | Should -BeExactly 'GraphKit.Auth.GraphAuthException'
         $result.Data.SanitizedCleanupFailure.FailureCode | Should -BeExactly 'credential_material_cleanup_failed'

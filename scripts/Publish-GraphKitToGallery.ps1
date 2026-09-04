@@ -191,6 +191,13 @@ if ($packageExists) {
         throw 'The fail-closed package privacy scanner is unavailable.'
     }
     . $privacyScannerPath
+    $authSourcePrivacyCommand = Get-Command -Name Test-GraphKitAuthSourcePrivacy `
+        -CommandType Function -ErrorAction SilentlyContinue
+    if ($null -eq $authSourcePrivacyCommand -or
+        [IO.Path]::GetFullPath([string] $authSourcePrivacyCommand.ScriptBlock.File) -cne
+            [IO.Path]::GetFullPath($privacyScannerPath)) {
+        throw 'The fail-closed authored-source privacy scanner is unavailable.'
+    }
     $privacyResult = Test-GraphKitPackagePrivacy -PackagePath $PackagePath -ModuleGuid ([guid] $manifest.GUID)
 
     Test-Gate 'package carries no identifiers that must stay private' $privacyResult.Passed "$(@($privacyResult.Findings).Count) finding(s)"

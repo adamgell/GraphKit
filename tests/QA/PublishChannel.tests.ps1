@@ -142,5 +142,17 @@ Describe 'Publish-GraphKitPackage refusals' {
         $r.Output | Should -BeLike '*only allowed with -WhatIf*'
         Test-Path -LiteralPath $channel | Should -BeFalse
         Test-Path -LiteralPath $pinPath | Should -BeFalse
+
+        $dryRun = Invoke-Publish @{
+            PackagePath = $pkg
+            Channel = 'GitHubRelease'
+            Destination = 'example/graphkit'
+            SkipTestProof = $true
+            WhatIf = $true
+            PinPath = (Join-Path $TestDrive 'github-dry-run-pin.json')
+        }
+        $dryRun.ExitCode | Should -Be 0 -Because $dryRun.Output
+        $dryRun.Output | Should -BeLike '*NONE - WhatIf-only unverified dry run*'
+        $dryRun.Output | Should -Not -BeLike '*releases/download/v9.9.9/*'
     }
 }

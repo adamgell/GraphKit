@@ -129,52 +129,58 @@ public sealed class GraphAuthHost : IDisposable
         bool providerFactoryInvoked = false;
         try
         {
+            IGraphTokenSourceFactory factory;
             lock (_gate)
             {
                 ThrowIfStopping();
-                IGraphTokenSourceFactory factory = _factory ??
+                factory = _factory ??
                     throw new ObjectDisposedException(nameof(GraphAuthHost));
-                IGraphTokenSource? source;
-                try
-                {
-                    providerFactoryInvoked = true;
-                    source = factory.Create(request);
-                }
-                catch (Exception exception)
-                {
-                    throw ProviderBoundaryFailure.Recreate(
-                        exception,
-                        CancellationToken.None,
-                        "provider_construction_failed",
-                        "Provider");
-                }
+            }
 
-                if (source is null)
-                {
-                    throw new InvalidOperationException(
-                        "The GraphKit.Auth provider factory returned a null token source.");
-                }
+            IGraphTokenSource? source;
+            try
+            {
+                providerFactoryInvoked = true;
+                source = factory.Create(request);
+            }
+            catch (Exception exception)
+            {
+                throw ProviderBoundaryFailure.Recreate(
+                    exception,
+                    CancellationToken.None,
+                    "provider_construction_failed",
+                    "Provider");
+            }
 
-                try
+            if (source is null)
+            {
+                throw new InvalidOperationException(
+                    "The GraphKit.Auth provider factory returned a null token source.");
+            }
+
+            try
+            {
+                lock (_gate)
                 {
+                    ThrowIfStopping();
                     ValidateProviderSource(source);
                     GraphTokenSourceProxy proxy = new(this, source);
                     _sources.Add(proxy);
                     return proxy;
                 }
+            }
+            catch
+            {
+                try
+                {
+                    source.Dispose();
+                }
                 catch
                 {
-                    try
-                    {
-                        source.Dispose();
-                    }
-                    catch
-                    {
-                        throw CreateProviderDisposalFailure();
-                    }
-
-                    throw;
+                    throw CreateProviderDisposalFailure();
                 }
+
+                throw;
             }
         }
         catch

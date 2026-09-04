@@ -304,6 +304,46 @@ function Test-GraphKitAuthSourcePrivacy {
     }
 }
 
+function Read-GraphKitPackagePrivacyEntryBytesBounded {
+    [CmdletBinding()]
+    [OutputType([byte[]])]
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.Stream] $EntryStream,
+
+        [Parameter(Mandatory)]
+        [long] $DeclaredLength
+    )
+
+    $maximumEntryBytes = 32MB
+    if ($DeclaredLength -lt 0 -or $DeclaredLength -gt $maximumEntryBytes) {
+        throw 'Package privacy scan rejected an entry whose declared byte count is outside the fixed bound.'
+    }
+
+    $memory = [System.IO.MemoryStream]::new()
+    try {
+        $buffer = [byte[]]::new(81920)
+        [long] $remainingWithSentinel = $DeclaredLength + 1
+        while ($remainingWithSentinel -gt 0) {
+            $requested = [int] [Math]::Min([long] $buffer.Length, $remainingWithSentinel)
+            $read = $EntryStream.Read($buffer, 0, $requested)
+            if ($read -le 0) {
+                break
+            }
+            $memory.Write($buffer, 0, $read)
+            $remainingWithSentinel -= $read
+        }
+
+        if ($memory.Length -ne $DeclaredLength) {
+            throw 'Package privacy scan rejected an entry whose actual byte count differs from its declared byte count.'
+        }
+        return ,$memory.ToArray()
+    }
+    finally {
+        $memory.Dispose()
+    }
+}
+
 function Test-GraphKitPackagePrivacy {
     [CmdletBinding()]
     param(
@@ -371,20 +411,15 @@ function Test-GraphKitPackagePrivacy {
             }
 
             $entryStream = $entry.Open()
-            $memory = [System.IO.MemoryStream]::new()
             try {
-                $entryStream.CopyTo($memory)
-                $bytes = $memory.ToArray()
+                $bytes = Read-GraphKitPackagePrivacyEntryBytesBounded `
+                    -EntryStream $entryStream -DeclaredLength ([long] $entry.Length)
             }
             catch {
                 throw "Package privacy scan failed closed while reading an entry (entry sha256: $entryDigest)."
             }
             finally {
-                $memory.Dispose()
                 $entryStream.Dispose()
-            }
-            if ($bytes.LongLength -ne $entry.Length) {
-                throw "Package privacy scan rejected an entry whose byte count changed while reading (entry sha256: $entryDigest)."
             }
 
             if ($extension -ine '.dll') {

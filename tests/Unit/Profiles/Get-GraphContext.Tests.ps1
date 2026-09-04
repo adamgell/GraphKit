@@ -257,6 +257,17 @@ Describe 'Get-GraphContext' {
             $legacy.TokenSource.GetType().Name | Should -BeExactly 'ConfidentialClientTokenSource'
             $compiled.TokenSource.Dispose()
             { $null = $compiledCertificate.GetCertHash() } | Should -Not -Throw -Because 'caller-owned injected material survives source disposal'
+
+            foreach ($nonApplicationProfile in @('mi-system', 'bearer')) {
+                {
+                    Get-GraphContext -ProfileId $nonApplicationProfile -StorePath $script:storePath `
+                        -Certificate $compiledCertificate
+                } | Should -Throw -ExpectedMessage '*injected certificate*application ClientId*'
+                {
+                    Get-GraphContext -ProfileId $nonApplicationProfile -StorePath $script:storePath `
+                        -Certificate $compiledCertificate -MsalFactory { throw 'must not be invoked' }
+                } | Should -Throw -ExpectedMessage '*injected certificate*application ClientId*'
+            }
         }
         finally {
             $compiledCertificate.Dispose()

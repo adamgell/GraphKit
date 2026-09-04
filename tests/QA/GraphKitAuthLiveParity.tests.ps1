@@ -1702,6 +1702,35 @@ Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
         $functionNames | Should -Contain 'Get-GraphKitAuthParityPublicAbiSha256'
 
         $runnerText = [IO.File]::ReadAllText($script:runnerPath)
+        $normalizedRunnerText = $runnerText.Replace("`r`n", "`n")
+        $embeddedStartToken = "`$helperGzipBase64 = @'`n"
+        $embeddedStart = $normalizedRunnerText.IndexOf(
+            $embeddedStartToken, [StringComparison]::Ordinal)
+        $embeddedStart | Should -BeGreaterOrEqual 0
+        $embeddedStart += $embeddedStartToken.Length
+        $embeddedEnd = $normalizedRunnerText.IndexOf(
+            "`n'@", $embeddedStart, [StringComparison]::Ordinal)
+        $embeddedEnd | Should -BeGreaterThan $embeddedStart
+        $compressedHelper = [Convert]::FromBase64String(
+            ($normalizedRunnerText.Substring($embeddedStart, $embeddedEnd - $embeddedStart) -replace '\s', ''))
+        $compressedStream = [IO.MemoryStream]::new($compressedHelper, $false)
+        try {
+            $gzip = [IO.Compression.GZipStream]::new(
+                $compressedStream, [IO.Compression.CompressionMode]::Decompress, $false)
+            try {
+                $reader = [IO.StreamReader]::new(
+                    $gzip, [Text.UTF8Encoding]::new($false, $true), $true, 4096, $false)
+                try { $embeddedHelper = $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            }
+            finally { $gzip.Dispose() }
+        }
+        finally { $compressedStream.Dispose() }
+        $trackedHelperPath = Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs'
+        $trackedHelper = [IO.File]::ReadAllText($trackedHelperPath)
+        $embeddedHelper | Should -BeExactly $trackedHelper `
+            -Because 'the self-contained protected runner helper must be generated from the reviewed tracked source'
+
         $stateAssignmentIndex = $runnerText.IndexOf(
             '$task8State = [pscustomobject]@{', [StringComparison]::Ordinal)
         $rootPermissionCheckIndex = $runnerText.IndexOf(

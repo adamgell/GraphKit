@@ -409,7 +409,11 @@ internal static class GitShimLauncher
             if ($source.Contains($marker)) {
                 $namespace = 'GraphKit.R8.QA.N' + [guid]::NewGuid().ToString('N')
                 $types = @(Add-Type -TypeDefinition $source.Replace($marker, $namespace) -PassThru)
-                $script:sourceCaptureType = @($types | Where-Object FullName -CEQ "$namespace.SourceCapture")
+                $sourceCaptureMatches = @($types | Where-Object FullName -CEQ "$namespace.SourceCapture")
+                if ($sourceCaptureMatches.Count -ne 1) {
+                    throw 'The GraphKit source-capture helper did not load exactly once.'
+                }
+                $script:sourceCaptureType = $sourceCaptureMatches[0]
             }
             else {
                 if (-not ('GraphKit.R8.SourceCapture' -as [type])) {
@@ -628,7 +632,7 @@ $source
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
-        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment.*Scripts'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts'
     }
 
     It 'binds a physically internal proof helper when RepositoryRoot is a Unix symlink or Windows junction alias' {
@@ -648,7 +652,7 @@ $source
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
         $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
-        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment.*Scripts'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts'
     }
 
     It 'allows a genuinely external proof helper when RepositoryRoot is a filesystem alias' {
@@ -1058,6 +1062,8 @@ $source
 Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
     It 'maps Linux statx device fields in ABI order before formatting ordinary-file identity' {
         $captureType = Initialize-R8SourceCaptureHelper
+        $script:sourceCaptureType -is [type] | Should -BeTrue `
+            -Because 'the cached capture helper must remain one static-callable Type rather than Object[]'
         $statxType = $captureType.Assembly.GetType("$($captureType.Namespace).UnixNative+Statx", $true)
         $helperSource = Get-Content -LiteralPath $script:sourceCaptureHelper -Raw
 

@@ -1237,6 +1237,9 @@ function New-GraphKitAuthAbiTestFixture {
             finally { $sentinel.Dispose() }
             & git -C $RepositoryRoot check-ignore --quiet -- $sentinelRelative
             if ($LASTEXITCODE -eq 0) { throw 'The unrelated GraphKit.Auth ABI-test sentinel was unexpectedly excluded.' }
+            if ($LASTEXITCODE -ne 1) {
+                throw "The GraphKit.Auth ABI-test sentinel exclusion probe failed with git exit code '$LASTEXITCODE'; only exit 1 proves the sentinel is not ignored."
+            }
             $sentinelState = & $trainScript -RepositoryRoot $RepositoryRoot -AsObject
             if ([string]$sentinelState.sourceStateSha256 -ceq [string]$hiddenState.sourceStateSha256) {
                 throw 'An unrelated untracked source file did not change the dirty-source fingerprint.'

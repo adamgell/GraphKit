@@ -8,7 +8,13 @@ BeforeAll {
 
     $script:versionScriptPath = Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1'
     $script:expectedVersion = (& $script:versionScriptPath -RepositoryRoot $script:repoRoot).Trim()
+    if (-not $script:expectedVersion.StartsWith("$script:baseVersion-", [StringComparison]::Ordinal)) {
+        throw "The derived package version '$script:expectedVersion' does not extend the expected base version '$script:baseVersion'."
+    }
     $script:expectedPrerelease = $script:expectedVersion.Substring($script:baseVersion.Length + 1)
+    if ([string]::IsNullOrWhiteSpace($script:expectedPrerelease)) {
+        throw "The derived package version '$script:expectedVersion' has no prerelease identity."
+    }
     $script:builtManifestPath = Join-Path $script:repoRoot "output/module/GraphKit/$script:baseVersion/GraphKit.psd1"
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:expectedVersion.nupkg"
 

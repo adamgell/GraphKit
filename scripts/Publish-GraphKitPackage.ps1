@@ -285,7 +285,9 @@ switch ($Channel) {
         }
 
         $publishedSource = "https://github.com/$Destination/releases/tag/$tag"
-        $publishedProofSource = "https://github.com/$Destination/releases/download/$tag/$proofAssetName"
+        if (-not $SkipTestProof) {
+            $publishedProofSource = "https://github.com/$Destination/releases/download/$tag/$proofAssetName"
+        }
     }
 }
 

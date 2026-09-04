@@ -537,11 +537,14 @@ $defaultMsalReferenceUnchanged = $defaultMsalAfter.Count -eq 1 -and
 Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
     It 'provides the private build task and native capture helper' {
         Test-Path -LiteralPath $script:taskPath -PathType Leaf | Should -BeTrue
+        $taskSource = Get-Content -LiteralPath $script:taskPath -Raw
         $helperPath = Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs'
         Test-Path -LiteralPath $helperPath -PathType Leaf | Should -BeTrue
         $helperSource = Get-Content -LiteralPath $helperPath -Raw
         $helperSource | Should -Match 'EntryPoint = "fstat\$INODE64"'
         $helperSource | Should -Match 'Architecture\.X64 => fstat_inode64\('
+        $taskSource | Should -Match 'if \(\$LASTEXITCODE -ne 1\)' `
+            -Because 'only git check-ignore exit 1 proves the unrelated sentinel is not ignored'
         { Assert-GraphKitAuthStageCommands } | Should -Not -Throw
     }
 
@@ -1287,12 +1290,27 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $stageRootB = Join-Path $outputB 'GraphKit.Auth/stage'
             $versionRootA = Split-Path $first.StagePath -Parent
             $versionRootB = Split-Path $second.StagePath -Parent
+            $movedVersionRootB = Join-Path $stageRootA $upperVersion
             try {
                 $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $true)
                 $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootB, $true, $true)
-                [IO.Directory]::Move($versionRootB, (Join-Path $stageRootA $upperVersion))
+                # Linux Directory.Move probes both version directories in addition to their
+                # rename parents. Temporarily restore owner-write on those sealed wrappers,
+                # then reseal them before the assertions inspect either candidate.
+                $script:GraphKitAuthStageCaptureType::SetOwnerOnly($versionRootA, $true, $true)
+                $script:GraphKitAuthStageCaptureType::SetOwnerOnly($versionRootB, $true, $true)
+                [IO.Directory]::Move($versionRootB, $movedVersionRootB)
             }
             finally {
+                if (Test-Path -LiteralPath $versionRootA -PathType Container) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($versionRootA, $true, $false)
+                }
+                if (Test-Path -LiteralPath $versionRootB -PathType Container) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($versionRootB, $true, $false)
+                }
+                if (Test-Path -LiteralPath $movedVersionRootB -PathType Container) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($movedVersionRootB, $true, $false)
+                }
                 if (Test-Path -LiteralPath $stageRootA -PathType Container) {
                     $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $false)
                 }
@@ -1300,7 +1318,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                     $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootB, $true, $false)
                 }
             }
-            $movedSecondStage = Join-Path (Join-Path $stageRootA $upperVersion) ([IO.Path]::GetFileName($second.StagePath))
+            $movedSecondStage = Join-Path $movedVersionRootB ([IO.Path]::GetFileName($second.StagePath))
             { Test-GraphKitAuthSealedStage -StagePath $first.StagePath -FullVersion $lowerVersion } |
                 Should -Not -Throw
             { Test-GraphKitAuthSealedStage -StagePath $movedSecondStage -FullVersion $upperVersion } |

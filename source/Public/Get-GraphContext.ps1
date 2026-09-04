@@ -113,6 +113,9 @@ function Get-GraphContext {
         $authMode = 'Provider'
     }
     elseif ($null -ne $Certificate) {
+        if ([string]::IsNullOrWhiteSpace([string] $schema.ApplicationClientId)) {
+            throw "An injected certificate requires a profile with a valid application ClientId; profile '$ProfileId' uses AuthMethod '$($tenantProfile.AuthMethod)'."
+        }
         $generation = Get-GraphCredentialGeneration -TenantProfile @{
             AuthMethod = 'Certificate'
             Credential = @{ Thumbprint = $Certificate.Thumbprint }

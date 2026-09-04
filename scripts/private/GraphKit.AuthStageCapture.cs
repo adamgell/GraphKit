@@ -59,10 +59,28 @@ public static class GraphKitAuthStageCapture
     private const uint FileAttributeReparsePoint = 0x00000400;
 
     public static GraphKitAuthPathEvidence InspectFile(string rootPath, string relativePath)
-        => Inspect(rootPath, relativePath, expectDirectory: false);
+        => Inspect(rootPath, relativePath, expectDirectory: false, hashContent: true);
+
+    public static GraphKitAuthPathEvidence InspectFileMetadata(
+        string rootPath,
+        string relativePath,
+        long maximumLength)
+    {
+        if (maximumLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumLength));
+        }
+        GraphKitAuthPathEvidence evidence = Inspect(
+            rootPath, relativePath, expectDirectory: false, hashContent: false);
+        if (evidence.Length > maximumLength)
+        {
+            throw new IOException($"Source '{relativePath}' exceeds its bounded inspection length.");
+        }
+        return evidence;
+    }
 
     public static GraphKitAuthPathEvidence InspectDirectory(string rootPath, string relativePath)
-        => Inspect(rootPath, relativePath, expectDirectory: true);
+        => Inspect(rootPath, relativePath, expectDirectory: true, hashContent: false);
 
     public static bool HasInitialOwnerOnlyAccess(GraphKitAuthPathEvidence evidence)
     {
@@ -207,7 +225,8 @@ public static class GraphKitAuthStageCapture
         string sourceRelativePath,
         string destinationRoot,
         string destinationRelativePath,
-        bool requireInitialOwnerOnly = false)
+        bool requireInitialOwnerOnly = false,
+        long maximumLength = long.MaxValue)
     {
         string sourcePath = ResolveRelative(sourceRoot, sourceRelativePath);
         string destinationPath = ResolveRelative(destinationRoot, destinationRelativePath);
@@ -219,6 +238,10 @@ public static class GraphKitAuthStageCapture
         if (!sourceBefore.IsRegularFile || sourceBefore.IsReparsePoint)
         {
             throw new IOException($"Source '{sourceRelativePath}' is not one regular no-follow file.");
+        }
+        if (maximumLength < 0 || sourceBefore.Length > maximumLength)
+        {
+            throw new IOException($"Source '{sourceRelativePath}' exceeds its bounded capture length.");
         }
 
         using FileStream destinationStream = OpenDestinationCreateNew(destinationPath);
@@ -234,10 +257,15 @@ public static class GraphKitAuthStageCapture
         long offset = 0;
         while (offset < sourceBefore.Length)
         {
-            int read = RandomAccess.Read(sourceHandle, buffer, offset);
+            int requested = (int)Math.Min(buffer.Length, sourceBefore.Length - offset);
+            int read = RandomAccess.Read(sourceHandle, buffer.AsSpan(0, requested), offset);
             if (read == 0)
             {
                 throw new EndOfStreamException($"Source '{sourceRelativePath}' ended during capture.");
+            }
+            if (offset > maximumLength - read)
+            {
+                throw new IOException($"Source '{sourceRelativePath}' exceeded its bounded capture length.");
             }
             RandomAccess.Write(destinationHandle, buffer.AsSpan(0, read), offset);
             offset += read;
@@ -442,19 +470,22 @@ public static class GraphKitAuthStageCapture
     private static GraphKitAuthPathEvidence Inspect(
         string rootPath,
         string relativePath,
-        bool expectDirectory)
+        bool expectDirectory,
+        bool hashContent)
     {
         string fullPath = ResolveRelative(rootPath, relativePath);
         EnsureAncestors(rootPath, relativePath);
         using SafeFileHandle handle = OpenReadNoFollow(fullPath, expectDirectory);
-        return EvidenceFromHandle(handle, fullPath, relativePath, expectDirectory);
+        return EvidenceFromHandle(
+            handle, fullPath, relativePath, expectDirectory, hashContent);
     }
 
     private static GraphKitAuthPathEvidence EvidenceFromHandle(
         SafeFileHandle handle,
         string fullPath,
         string relativePath,
-        bool expectDirectory)
+        bool expectDirectory,
+        bool hashContent = true)
     {
         NativeFacts before = GetNativeFacts(handle, fullPath);
         if (before.IsDirectory != expectDirectory ||
@@ -465,7 +496,7 @@ public static class GraphKitAuthStageCapture
         }
 
         string hash = string.Empty;
-        if (!expectDirectory)
+        if (!expectDirectory && hashContent)
         {
             hash = HashHandle(handle, before.Length);
         }
