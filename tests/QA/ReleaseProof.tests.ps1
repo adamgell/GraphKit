@@ -41,6 +41,51 @@ BeforeAll {
         }
     }
 
+    function Add-GraphKitFixturePayloadBytes {
+        param(
+            [Parameter(Mandatory)] [pscustomobject] $Fixture,
+            [Parameter(Mandatory)] [string] $EntryName,
+            [Parameter(Mandatory)] [byte[]] $Bytes
+        )
+
+        $payloadPath = Join-Path $Fixture.ModuleDir $EntryName
+        New-Item -ItemType Directory -Path (Split-Path $payloadPath -Parent) -Force | Out-Null
+        [System.IO.File]::WriteAllBytes($payloadPath, $Bytes)
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::Open($Fixture.PackagePath, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            if (@($archive.Entries | Where-Object FullName -CEQ $EntryName).Count -ne 0) {
+                throw "Fixture payload '$EntryName' already exists."
+            }
+            Add-GraphKitFixtureArchiveFile -Archive $archive -EntryName $EntryName -SourcePath $payloadPath
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        $proof = Get-Content -LiteralPath $Fixture.ProofPath -Raw | ConvertFrom-Json
+        $newRecord = [pscustomobject] [ordered] @{
+            path = $EntryName
+            sha256 = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        $proof.module.files = @(@($proof.module.files) + $newRecord | Sort-Object path)
+        $proof.package.sha256 = (Get-FileHash -LiteralPath $Fixture.PackagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $proof | ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $Fixture.ProofPath -NoNewline -Encoding utf8NoBOM
+    }
+
+    function Add-GraphKitFixturePayloadText {
+        param(
+            [Parameter(Mandatory)] [pscustomobject] $Fixture,
+            [Parameter(Mandatory)] [string] $EntryName,
+            [Parameter(Mandatory)] [string] $Content
+        )
+
+        Add-GraphKitFixturePayloadBytes -Fixture $Fixture -EntryName $EntryName `
+            -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($Content))
+    }
+
     function Update-GraphKitFixtureProofPackageHash {
         param([Parameter(Mandatory)] [pscustomobject] $Fixture)
 
@@ -132,6 +177,8 @@ BeforeAll {
             -Destination (Join-Path $scriptsDir 'Publish-GraphKitPackage.ps1')
         Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/Publish-GraphKitToGallery.ps1') `
             -Destination (Join-Path $scriptsDir 'Publish-GraphKitToGallery.ps1')
+        Copy-Item -LiteralPath (Join-Path $script:repoRoot 'scripts/private/Test-GraphKitPackagePrivacy.ps1') `
+            -Destination (Join-Path $privateScriptsDir 'Test-GraphKitPackagePrivacy.ps1')
         if ($IncludeGraphKitAuth) {
             Copy-Item -LiteralPath (Join-Path $script:repoRoot '.build/GraphKitAuth.tasks.ps1') `
                 -Destination (Join-Path $buildDir 'GraphKitAuth.tasks.ps1')
@@ -1133,6 +1180,103 @@ Describe 'Both publisher paths consume the canonical proof verifier' {
         $result.Output | Should -Match 'PRE-FLIGHT PASSED'
         (Get-Content -LiteralPath $script:fixture.PackagePath -Raw) | Should -Be 'replacement package after verifier return'
         (Get-Content -LiteralPath $script:fixture.ProofPath -Raw) | Should -Be '{"replacementProof":true}'
+    }
+
+    It 'gallery preflight rejects a local path in strict UTF-8 deps JSON from the verifier-owned package without disclosing it' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $sentinel = '/Users/GraphKitPrivacyJson/private-build'
+        Add-GraphKitFixturePayloadText -Fixture $script:fixture `
+            -EntryName 'Diagnostics/Fixture.deps.json' `
+            -Content ('{"runtimeTarget":{"path":"' + $sentinel + '"}}')
+        Install-GraphKitFixtureMutatingVerifier -Fixture $script:fixture
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'package carries no identifiers that must stay private'
+        $result.Output | Should -Match 'local user path'
+        $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
+        (Get-Content -LiteralPath $script:fixture.PackagePath -Raw) | Should -Be 'replacement package after verifier return'
+    }
+
+    It 'gallery preflight fails closed when a deps JSON entry is not strict UTF-8' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $invalidUtf8 = [byte[]] @(0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d)
+        Add-GraphKitFixturePayloadBytes -Fixture $script:fixture `
+            -EntryName 'Diagnostics/Invalid.deps.json' `
+            -Bytes $invalidUtf8
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'strict UTF-8'
+        $result.Output | Should -Not -Match ([char] 0xfffd)
+    }
+
+    It 'gallery preflight applies every privacy category to authored CSharp without disclosing matched values' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $privateGuid = '87f7ad68-c47e-48b4-a248-49602bc19e84'
+        $thumbprint = '0123456789abcdef0123456789abcdef01234567'
+        $localPath = 'C:\Users\GraphKitPrivacyCSharp\source.cs'
+        $internalProject = 'IntuneHealthAutomation'
+        Add-GraphKitFixturePayloadText -Fixture $script:fixture `
+            -EntryName 'Diagnostics/Fixture.cs' `
+            -Content @"
+internal static class Fixture {
+    private const string TenantId = "$privateGuid";
+    private const string CertificateThumbprint = "$thumbprint";
+    private const string SourcePath = @"$localPath";
+    private const string Project = "$internalProject";
+}
+"@
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'GUID that is not a well-known or package id'
+        $result.Output | Should -Match 'certificate thumbprint'
+        $result.Output | Should -Match 'local user path'
+        $result.Output | Should -Match 'internal project name'
+        foreach ($sentinel in @($privateGuid, $thumbprint, $localPath, $internalProject)) {
+            $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
+        }
+    }
+
+    It 'gallery preflight scans first-party and dependency DLL strings in ASCII and UTF-16LE without disclosing matched values' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $asciiSentinel = '/Users/GraphKitPrivacyBinary/private-build'
+        $wideSentinel = 'IntuneHealthAutomation'
+        Add-GraphKitFixturePayloadBytes -Fixture $script:fixture `
+            -EntryName 'Binary/GraphKit.Auth.dll' `
+            -Bytes ([System.Text.Encoding]::ASCII.GetBytes("prefix::$asciiSentinel::suffix"))
+        Add-GraphKitFixturePayloadBytes -Fixture $script:fixture `
+            -EntryName 'Binary/Microsoft.Identity.Client.DLL' `
+            -Bytes ([System.Text.Encoding]::Unicode.GetBytes("prefix::$wideSentinel::suffix"))
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Not -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'binary-ascii: local user path'
+        $result.Output | Should -Match 'binary-utf16le: internal project name'
+        $result.Output | Should -Not -Match ([regex]::Escape($asciiSentinel))
+        $result.Output | Should -Not -Match ([regex]::Escape($wideSentinel))
+    }
+
+    It 'gallery preflight accepts legitimate 40-hex source and vendor revisions' {
+        $script:fixture = New-GraphKitReleaseProofFixture
+        $sourceRevision = '6aee19bc50d2cdfbdba55d6694465855c5c6fb51'
+        $vendorRevision = '013d71559a017f50aa4861487226c523959d1579'
+        Add-GraphKitFixturePayloadText -Fixture $script:fixture `
+            -EntryName 'Diagnostics/Revisions.deps.json' `
+            -Content ('{"sourceRevision":"' + $sourceRevision + '"}')
+        Add-GraphKitFixturePayloadBytes -Fixture $script:fixture `
+            -EntryName 'Binary/Vendor.Dependency.dll' `
+            -Bytes ([System.Text.Encoding]::ASCII.GetBytes("RepositoryCommit=$vendorRevision"))
+
+        $result = Invoke-GraphKitFixtureGalleryPreflight -Fixture $script:fixture
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+        $result.Output | Should -Match 'PRE-FLIGHT PASSED'
     }
 
     It 'both publisher scripts switch to verifier-owned package snapshots' {

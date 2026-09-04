@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   portable Pester floor against fresh discovery, and verify every dynamically selected PowerShell
   CI archive against a committed checksum copied from that version's official PowerShell release
   `hashes.sha256` asset before extraction or execution.
+- The PSGallery preflight now scans the verifier-owned package snapshot rather than only selected
+  source-like entries: strict UTF-8 JSON and C# plus printable ASCII/UTF-8 and UTF-16LE strings in
+  every shipped DLL are checked for private paths, identifiers, GUIDs, and contextual certificate
+  thumbprints. Diagnostics retain only fixed categories and SHA-256 evidence fingerprints, and
+  legitimate 40-hex source or vendor revisions are no longer treated as thumbprints.
 - Restored the `0.3.0` lazy SecretManagement contract after the R8 manifest regressed it to an
   always-loaded package dependency. R8 packages again require only Graph Authentication at import;
   SecretManagement 1.1.2+ is discovered at first vault-backed context resolution, while help,

@@ -186,72 +186,19 @@ Test-Gate 'ReleaseNotes set' ($psData.ContainsKey('ReleaseNotes') -and -not [str
 
 # --- the scan that cannot be undone after the fact ---------------------------------------
 if ($packageExists) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
-    try {
-        $findings = [System.Collections.Generic.List[string]]::new()
-        $patterns = @{
-            'GUID that is not a well-known Microsoft id' = '\b(?!00000000-0000-0000-0000-00000000000[01]\b)(?!00000003-0000-0000-c000-000000000000\b)(?!' + [regex]::Escape($manifest.GUID) + '\b)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
-            'certificate thumbprint'                     = '\b[0-9A-Fa-f]{40}\b'
-            'local user path'                            = '/Users/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
-            'internal project name'                      = '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
-        }
-
-        # Customer names are matched by HASH rather than by literal, because this script lives in
-        # a public repository: a regex spelling out a customer name would publish the name it
-        # exists to keep out. SHA-256 of the lowercased token, first 32 hex chars. To add one,
-        # hash it the same way and give it a non-identifying label - never the name itself.
-        $secretTokenHashes = @{
-            '5cad5cdbf022740cbfc976f9836ac89d' = 'customer name (A)'
-            'e03427b1afcd1e84a97ed1f2241466cb' = 'internal workspace tenant'
-            '9a08498936078c81ec926fedbce5e7c9' = 'customer name (A, short form)'
-            '6ca05670c4afd49e806f7cddbab83b00' = 'lab tenant id'
-        }
-        function Get-TokenDigest {
-            param([string] $Token)
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Token.ToLowerInvariant())
-            return [System.BitConverter]::ToString(
-                [System.Security.Cryptography.SHA256]::HashData($bytes)
-            ).Replace('-', '').ToLowerInvariant().Substring(0, 32)
-        }
-
-        foreach ($entry in $archive.Entries) {
-            if ($entry.FullName -notmatch '\.(psm1|psd1|ps1|ps1xml|txt|nuspec|xml|md)$') { continue }
-            $reader = [System.IO.StreamReader]::new($entry.Open())
-            try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }
-
-            foreach ($token in [regex]::Matches($content, '[A-Za-z0-9][A-Za-z0-9-]{3,}')) {
-                $digest = Get-TokenDigest -Token $token.Value
-                if ($secretTokenHashes.ContainsKey($digest)) {
-                    # Report the label, never the matched value - this output is shown on screen
-                    # and would otherwise reintroduce the name it just caught.
-                    $findings.Add(('{0}: internal identifier - {1}' -f $entry.FullName, $secretTokenHashes[$digest]))
-                }
-            }
-
-            foreach ($label in $patterns.Keys) {
-                foreach ($match in [regex]::Matches($content, $patterns[$label])) {
-                    # Documentation placeholders like 11111111-2222-3333-4444-555555555555 are
-                    # conventional in .EXAMPLE blocks and carry no information. A real
-                    # identifier never has every segment built from one repeated character.
-                    if ($label -like 'GUID*') {
-                        # @() is required: Select-Object -Unique returns a scalar for a
-                        # segment of identical characters, and a scalar has no .Count under
-                        # Set-StrictMode.
-                        $segments = @($match.Value -split '-')
-                        $varied = @($segments | Where-Object { @($_.ToCharArray() | Select-Object -Unique).Count -gt 1 })
-                        if ($varied.Count -eq 0) { continue }
-                    }
-                    $findings.Add("$label in $($entry.FullName): $($match.Value)")
-                }
-            }
-        }
+    $privacyScannerPath = Join-Path $PSScriptRoot 'private/Test-GraphKitPackagePrivacy.ps1'
+    if (-not (Test-Path -LiteralPath $privacyScannerPath -PathType Leaf)) {
+        throw 'The fail-closed package privacy scanner is unavailable.'
     }
-    finally { $archive.Dispose() }
+    . $privacyScannerPath
+    $privacyResult = Test-GraphKitPackagePrivacy -PackagePath $PackagePath -ModuleGuid ([guid] $manifest.GUID)
 
-    Test-Gate 'package carries no identifiers that must stay private' ($findings.Count -eq 0) "$($findings.Count) finding(s)"
-    foreach ($finding in ($findings | Select-Object -First 12)) {
-        Write-Host "        $finding" -ForegroundColor Yellow
+    Test-Gate 'package carries no identifiers that must stay private' $privacyResult.Passed "$(@($privacyResult.Findings).Count) finding(s)"
+    foreach ($finding in @($privacyResult.Findings | Select-Object -First 12)) {
+        $entryEvidence = $finding.EntrySha256.Substring(0, 12)
+        $valueEvidence = $finding.EvidenceSha256.Substring(0, 12)
+        Write-Host ("        {0}: {1} [entry sha256:{2}; value redacted sha256:{3}]" -f `
+            $finding.Encoding, $finding.Category, $entryEvidence, $valueEvidence) -ForegroundColor Yellow
     }
 }
 
@@ -285,7 +232,9 @@ if ($failures.Count -gt 0) {
     Write-Host "  PRE-FLIGHT FAILED - $($failures.Count) gate(s):" -ForegroundColor Red
     $failures | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
     Write-Host ''
-    exit 1
+    # Throw rather than `exit 1`: this script is also invoked from a verifier/bootstrap
+    # script, where `exit` can terminate only the nested script and let the host report zero.
+    throw 'PowerShell Gallery preflight failed closed.'
 }
 Write-Host '  PRE-FLIGHT PASSED' -ForegroundColor Green
 Write-Host ''
