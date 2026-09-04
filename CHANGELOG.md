@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restored the `0.3.0` lazy SecretManagement contract after the R8 manifest regressed it to an
+  always-loaded package dependency. R8 packages again require only Graph Authentication at import;
+  SecretManagement 1.1.2+ is discovered at first vault-backed context resolution, while help,
+  catalog inspection, managed identity, and injected-provider contexts remain usable without it.
 - The real retry/sender path now acquires exactly one bearer per physical attempt. Tenant proof,
   the `Authorization` header, and returned provenance are bound to that same token fingerprint;
   a rotating no-expiry provider can no longer have one token proved and another sent.

@@ -146,3 +146,83 @@ removing its bundled MSAL"). Re-decide the deferral rather than raising this num
         }
     }
 }
+
+Describe 'Import-order without SecretManagement' -Skip:($null -eq $script:BuiltBase) {
+    BeforeAll {
+        $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $built = Get-ChildItem -Path (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+        $graphAuth = Join-Path $repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
+        if (-not (Test-Path -LiteralPath $graphAuth -PathType Container)) {
+            throw 'Microsoft.Graph.Authentication 2.38.1 is not available for the isolated import-order probe.'
+        }
+
+        $modulePath = Join-Path $TestDrive 'import-order-no-vault'
+        $graphKitDestination = Join-Path $modulePath "GraphKit/$($built.Name)"
+        $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
+        $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
+        Copy-Item -Path (Join-Path $built.FullName '*') -Destination $graphKitDestination -Recurse -Force
+        Copy-Item -Path (Join-Path $graphAuth '*') -Destination $graphAuthDestination -Recurse -Force
+
+        $escapedModulePath = $modulePath.Replace("'", "''")
+        $escapedManifest = (Join-Path $graphKitDestination 'GraphKit.psd1').Replace("'", "''")
+        $probe = @"
+`$ErrorActionPreference = 'Stop'
+`$result = [ordered]@{
+    ImportSucceeded           = `$false
+    GuardError                = `$null
+    DetectedMsalVersion       = `$null
+    SecretManagementLoaded    = `$false
+    SecretManagementAvailable = `$false
+    OperationName             = `$null
+}
+try {
+    `$env:PSModulePath = '$escapedModulePath'
+    Import-Module '$escapedManifest' -ErrorAction Stop
+    `$result.ImportSucceeded = `$true
+    `$operation = Get-GraphOperation -Type ManagedDevice -Operation List
+    `$result.OperationName = "`$(`$operation.Type).`$(`$operation.Operation)"
+}
+catch {
+    `$result.GuardError = `$_.Exception.Message
+}
+`$msal = [AppDomain]::CurrentDomain.GetAssemblies() |
+    Where-Object { `$_.GetName().Name -eq 'Microsoft.Identity.Client' } |
+    Select-Object -First 1
+if (`$msal) { `$result.DetectedMsalVersion = `$msal.GetName().Version.ToString() }
+`$result.SecretManagementLoaded = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
+`$env:PSModulePath = '$escapedModulePath'
+`$result.SecretManagementAvailable = [bool] (Get-Module Microsoft.PowerShell.SecretManagement -ListAvailable -Refresh)
+[pscustomobject] `$result | ConvertTo-Json -Compress
+"@
+
+        $savedModulePath = $env:PSModulePath
+        try {
+            $env:PSModulePath = $modulePath
+            $raw = & pwsh -NoLogo -NoProfile -Command $probe 2>&1
+        }
+        finally {
+            $env:PSModulePath = $savedModulePath
+        }
+
+        $json = @($raw | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+        if (-not $json) {
+            throw "isolated import-order probe produced no JSON. Raw output:`n$($raw | Out-String)"
+        }
+        $script:NoVaultImport = $json | ConvertFrom-Json
+    }
+
+    It 'imports GraphKit and inspects the catalog without SecretManagement on PSModulePath' {
+        $script:NoVaultImport.ImportSucceeded | Should -BeTrue -Because $script:NoVaultImport.GuardError
+        $script:NoVaultImport.OperationName | Should -Be 'ManagedDevice.List'
+        $script:NoVaultImport.SecretManagementLoaded | Should -BeFalse
+        $script:NoVaultImport.SecretManagementAvailable | Should -BeFalse
+    }
+
+    It 'still loads a tested MSAL version when SecretManagement is absent' {
+        $version = $script:NoVaultImport.DetectedMsalVersion
+        $version | Should -Not -BeNullOrEmpty
+        ([version] $version) -ge [version] '4.82.1' | Should -BeTrue
+        ([version] $version).Major | Should -Be 4
+    }
+}

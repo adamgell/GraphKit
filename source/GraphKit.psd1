@@ -54,7 +54,6 @@ PowerShellVersion = '7.4'
 RequiredModules = @(
     # MSAL delivery vehicle only - Connect-MgGraph is never called. See the design spec.
     @{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' }
-    @{ ModuleName = 'Microsoft.PowerShell.SecretManagement'; ModuleVersion = '1.1.2' }
 )
 
 # Assemblies that must be loaded prior to importing this module
@@ -146,8 +145,8 @@ Requires PowerShell 7.4+.
         # External dependent modules of this module
         # Do not mark Microsoft.Graph.Authentication external: Publish-Module omits external
         # modules from the package nuspec, leaving a clean installer with no MSAL dependency
-        # metadata. SecretManagement remains a runtime RequiredModule even though vault-backed
-        # paths validate vault availability only when they are used.
+        # metadata. SecretManagement is optional: vault-backed paths discover and import the
+        # tested minimum on first credential resolution, while non-vault paths never load it.
         # ExternalModuleDependencies = @()
 
     } # End of PSData hashtable
