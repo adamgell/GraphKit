@@ -2063,28 +2063,41 @@ Describe 'GraphTokenSource' {
         It 'collapses same-mode callers while ordinary and forced flights remain separate' {
             $key = 'mode-partition-key'
             $calls = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-            $ready = [System.Threading.CountdownEvent]::new(6)
-            $go = [System.Threading.ManualResetEventSlim]::new($false)
             $entered = [System.Threading.CountdownEvent]::new(2)
             $release = [System.Threading.ManualResetEventSlim]::new($false)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeCalls', $calls)
-            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeReady', $ready)
-            [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeGo', $go)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeEntered', $entered)
             [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeRelease', $release)
 
-            $jobs = $null
+            $workers = [System.Collections.Generic.List[object]]::new()
             try {
-                $jobs = 0..5 | ForEach-Object {
+                # Start-ThreadJob shares one process-global throttle. An unrelated
+                # running job can consume a slot and deadlock a participant-count
+                # readiness barrier before GraphKit is reached. Prepare dedicated
+                # runspaces synchronously so this test measures token-flight
+                # concurrency rather than ambient job-scheduler capacity.
+                0..5 | ForEach-Object {
                     $force = $_ -ge 3
-                    Start-ThreadJob -ThrottleLimit 6 -ScriptBlock {
-                        param($Key, $Force, $Manifest)
-                        Import-Module $Manifest
-                        $ready = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ModeReady')
-                        $go = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.ModeGo')
-                        $null = $ready.Signal()
-                        $null = $go.Wait()
+                    $runspace = [runspacefactory]::CreateRunspace()
+                    $runspace.ThreadOptions =
+                        [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+                    $runspace.Open()
 
+                    $initializer = [powershell]::Create()
+                    $initializer.Runspace = $runspace
+                    try {
+                        $null = $initializer.AddCommand('Import-Module').
+                            AddParameter('Name', $script:BuiltManifest).
+                            AddParameter('ErrorAction', 'Stop').Invoke()
+                    }
+                    finally {
+                        $initializer.Dispose()
+                    }
+
+                    $pipeline = [powershell]::Create()
+                    $pipeline.Runspace = $runspace
+                    $null = $pipeline.AddScript({
+                        param($Key, $Force)
                         & (Get-Module GraphKit) {
                             param($AcquisitionKey, $ForceRefresh)
                             $mode = if ($ForceRefresh) { 'refresh' } else { 'ordinary' }
@@ -2100,11 +2113,20 @@ Describe 'GraphTokenSource' {
                                 $mode
                             }.GetNewClosure()
                         } $Key $Force
-                    } -ArgumentList $key, $force, $script:BuiltManifest
+                    }).AddArgument($key).AddArgument($force)
+
+                    $workers.Add([pscustomobject] @{
+                        PowerShell = $pipeline
+                        Runspace = $runspace
+                        Async = $null
+                        Received = $false
+                    })
                 }
 
-                $ready.Wait(15000) | Should -BeTrue
-                $go.Set()
+                foreach ($worker in $workers) {
+                    $worker.Async = $worker.PowerShell.BeginInvoke()
+                }
+
                 $entered.Wait(5000) | Should -BeTrue
                 $flightKeys = InModuleScope GraphKit -Parameters @{ K = $key } {
                     param($K)
@@ -2128,7 +2150,14 @@ Describe 'GraphTokenSource' {
                 $forcedBeforeRelease.WaiterCount | Should -Be 2
                 $ordinaryBeforeRelease.RegistryCount | Should -Be 2
                 $forcedBeforeRelease.RegistryCount | Should -Be 2
-                $results = Receive-Task7BoundedJobs -Jobs $jobs -ExpectedCount 6
+                $results = @(
+                    foreach ($worker in $workers) {
+                        $worker.Async.AsyncWaitHandle.WaitOne(10000) |
+                            Should -BeTrue -Because 'each dedicated runspace must complete'
+                        $worker.Received = $true
+                        $worker.PowerShell.EndInvoke($worker.Async)
+                    }
+                )
 
                 @($calls | Where-Object { $_ -eq 'ordinary' }).Count | Should -Be 1
                 @($calls | Where-Object { $_ -eq 'refresh' }).Count | Should -Be 1
@@ -2141,20 +2170,22 @@ Describe 'GraphTokenSource' {
             }
             finally {
                 $release.Set()
-                $go.Set()
-                if ($null -ne $jobs) {
-                    $null = @($jobs | Wait-Job -Timeout 10)
+                foreach ($worker in $workers) {
+                    if ($null -ne $worker.Async -and -not $worker.Received) {
+                        if ($worker.Async.AsyncWaitHandle.WaitOne(10000)) {
+                            try { $null = $worker.PowerShell.EndInvoke($worker.Async) } catch { }
+                        }
+                        else {
+                            try { $worker.PowerShell.Stop() } catch { }
+                        }
+                    }
+                    $worker.PowerShell.Dispose()
+                    $worker.Runspace.Close()
+                    $worker.Runspace.Dispose()
                 }
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeCalls', $null)
-                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeReady', $null)
-                [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeGo', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeEntered', $null)
                 [System.AppDomain]::CurrentDomain.SetData('GraphKitTest.ModeRelease', $null)
-                if ($null -ne $jobs) {
-                    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
-                }
-                $ready.Dispose()
-                $go.Dispose()
                 $entered.Dispose()
                 $release.Dispose()
             }
