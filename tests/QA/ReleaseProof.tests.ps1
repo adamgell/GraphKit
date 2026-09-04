@@ -150,7 +150,7 @@ BeforeAll {
             [switch] $IncludeGraphKitAuth,
             [string] $BaseVersion = '0.4.0',
             [switch] $DirtySource,
-            [int] $Total = 1452
+            [int] $Total = 1460
         )
 
         $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('graphkit-release-proof-' + [guid]::NewGuid().ToString('N'))
@@ -365,7 +365,7 @@ $requiredAssembliesLine    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.
                     sha256 = (Get-FileHash -LiteralPath $pesterObjectPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 }
                 policy = [pscustomobject] [ordered] @{
-                    minimumTests = 1452
+                    minimumTests = 1460
                     allowedSkips = 0
                     allowedNotRun = 0
                 }
@@ -1053,7 +1053,7 @@ Describe 'Test workflow release-proof generation' {
         $proof.module.baseVersion | Should -Be $script:fixture.BaseVersion
         $proof.source.revision | Should -Match '^[0-9a-f]{40}$'
         @($proof.module.files).Count | Should -Be 5
-        $proof.testRun.summary.total | Should -Be 1452
+        $proof.testRun.summary.total | Should -Be 1460
         $proof.testRun.summary.notRun | Should -Be 0
         Test-Path -LiteralPath (Join-Path $script:fixture.Root 'output/testResults/candidate-release-input.json') | Should -BeFalse
     }
