@@ -196,6 +196,15 @@ function Invoke-GraphRetry {
     }
     if ($null -eq $jitter) { $jitter = { Get-Random -Minimum 0.0 -Maximum 1.0 } }
 
+    $delayAcceptsCancellationToken = $false
+    if ($null -ne $delay.Ast.ParamBlock) {
+        $delayAcceptsCancellationToken = @(
+            $delay.Ast.ParamBlock.Parameters | Where-Object {
+                $_.Name.VariablePath.UserPath -eq 'CancellationToken'
+            }
+        ).Count -gt 0
+    }
+
     # ---- Deadline: monotonic Stopwatch plus the injected (virtual) clock ----
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $deadlineUtc = (& $utcNow).AddSeconds([double] $DeadlineSeconds)
@@ -606,7 +615,12 @@ function Invoke-GraphRetry {
                 $requestedDelaySeconds = [double] $delayInfo.DelaySeconds
                 $boundedDelaySeconds = [Math]::Min($requestedDelaySeconds, $remainingDelaySeconds)
                 try {
-                    & $delay $boundedDelaySeconds -CancellationToken $CancellationToken
+                    if ($delayAcceptsCancellationToken) {
+                        & $delay $boundedDelaySeconds $CancellationToken
+                    }
+                    else {
+                        & $delay $boundedDelaySeconds
+                    }
                 }
                 catch {
                     $delayFailure = $_.Exception
@@ -691,6 +705,7 @@ function Invoke-GraphRetry {
         Data       = $data
         Outcome    = $outcome
         Certainty  = $certaintyFinal
+        Truncated  = $false
         Telemetry  = @($telemetry)
         Provenance = $provenance
     }

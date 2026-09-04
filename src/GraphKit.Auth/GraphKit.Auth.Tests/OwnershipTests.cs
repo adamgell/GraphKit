@@ -326,7 +326,7 @@ public sealed class OwnershipTests
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
             second = Task.Run(() => CaptureCreate(secondFactory, duplicateRequest));
             _ = await second.WaitAsync(TimeSpan.FromSeconds(5));
-            duplicateRejectedBeforeWinnerCompleted = second.IsCompleted;
+            duplicateRejectedBeforeWinnerCompleted = !first.IsCompleted;
         }
         catch (Exception exception)
         {

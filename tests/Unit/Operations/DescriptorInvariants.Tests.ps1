@@ -334,15 +334,13 @@ Describe 'The TenantPulse-unblocking reads keep their official paths' {
         $d.ApiVersion | Should -Be 'beta'
     }
 
-    It 'keeps the $select on Group/Get' {
-        # isAssignableToRole and isManagementRestricted are omitted unless selected. A Get
-        # without $select returns 200 and looks unprotected, which is a silent false Fail
-        # for TP.INT.0013.
+    It 'keeps the exact reporting and protection $select on Group/Get' {
+        # Description feeds normalized assignment reporting. isAssignableToRole and
+        # isManagementRestricted are omitted unless selected. A Get without $select returns
+        # 200 and looks unprotected, which is a silent false Fail for TP.INT.0013.
         $d = $script:catalog | Where-Object { $_.Type -eq 'Group' -and $_.Operation -eq 'Get' }
         $d | Should -Not -BeNullOrEmpty
-        $d.PathTemplate | Should -BeLike '/groups/{id}*$select=*'
-        $d.PathTemplate | Should -BeLike '*isAssignableToRole*'
-        $d.PathTemplate | Should -BeLike '*isManagementRestricted*'
+        $d.PathTemplate | Should -BeExactly '/groups/{id}?$select=id,displayName,description,isAssignableToRole,isManagementRestricted'
         $d.OperationKind | Should -Be 'Singleton'
         $d.PagingStrategy | Should -Be 'None'
     }
@@ -363,4 +361,3 @@ Describe 'The TenantPulse-unblocking reads keep their official paths' {
         $d.ApiVersion | Should -Be 'v1.0'
     }
 }
-

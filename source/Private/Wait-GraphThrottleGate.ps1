@@ -70,9 +70,20 @@ function Wait-GraphThrottleGate {
     }
 
     # Production waits block on the token wait handle, so cancellation wakes the
-    # thread without polling or duration-based guesses. Injected delays retain the
-    # virtual-time seam and receive the same token; cancellation is checked again
-    # immediately after every injected step.
+    # thread without polling or duration-based guesses. An injected delay receives
+    # the token as its second positional argument only when it declares a
+    # CancellationToken parameter. That preserves the original one-parameter test
+    # seam, including advanced scriptblocks that reject undeclared parameters.
+    # Cancellation is checked again immediately after every injected step.
+    $delayAcceptsCancellationToken = $false
+    if ($null -ne $Delay -and $null -ne $Delay.Ast.ParamBlock) {
+        $delayAcceptsCancellationToken = @(
+            $Delay.Ast.ParamBlock.Parameters | Where-Object {
+                $_.Name.VariablePath.UserPath -eq 'CancellationToken'
+            }
+        ).Count -gt 0
+    }
+
     $wait = {
         param([long] $Milliseconds)
 
@@ -90,7 +101,12 @@ function Wait-GraphThrottleGate {
             }
         }
         else {
-            & $Delay -Milliseconds $Milliseconds -CancellationToken $CancellationToken
+            if ($delayAcceptsCancellationToken) {
+                & $Delay $Milliseconds $CancellationToken
+            }
+            else {
+                & $Delay $Milliseconds
+            }
             $CancellationToken.ThrowIfCancellationRequested()
         }
     }.GetNewClosure()

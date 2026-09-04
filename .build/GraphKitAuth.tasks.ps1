@@ -59,12 +59,12 @@ function Initialize-GraphKitAuthStageCapture {
         throw "The generated GraphKit.Auth capture type '$expectedTypeName' already exists."
     }
     $compiled = @(Add-Type -TypeDefinition $template.Replace($marker, $namespace) -PassThru -ErrorAction Stop)
-    $matches = @($compiled | Where-Object FullName -CEQ $expectedTypeName)
+    $compiledMatches = @($compiled | Where-Object FullName -CEQ $expectedTypeName)
     $loaded = @([AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType($expectedTypeName, $false, $false) } | Where-Object { $null -ne $_ })
-    if ($matches.Count -ne 1 -or $loaded.Count -ne 1 -or -not [object]::ReferenceEquals($matches[0], $loaded[0])) {
+    if ($compiledMatches.Count -ne 1 -or $loaded.Count -ne 1 -or -not [object]::ReferenceEquals($compiledMatches[0], $loaded[0])) {
         throw 'The proof-bound GraphKit.Auth capture helper collided during compilation.'
     }
-    $script:GraphKitAuthStageCaptureType = $matches[0]
+    $script:GraphKitAuthStageCaptureType = $compiledMatches[0]
 }
 
 function Get-GraphKitAuthOutputRoot {
@@ -1179,6 +1179,7 @@ function New-GraphKitAuthAbiTestFixture {
         BaselineState = $baselineState
         StatusBefore = @($statusBefore)
         CreatedPaths = [Collections.Generic.List[string]]::new()
+        CreatedDirectories = [Collections.Generic.List[string]]::new()
         Completed = $false
         ExpectedEvidence = [ordered]@{}
     }
@@ -1187,7 +1188,21 @@ function New-GraphKitAuthAbiTestFixture {
             $relativeFile = [string]$entry.Value
             $destinationFile = Join-Path $RepositoryRoot $relativeFile
             $destination = Split-Path $destinationFile -Parent
-            $null = [IO.Directory]::CreateDirectory($destination)
+            $missingDirectories = [Collections.Generic.Stack[string]]::new()
+            $candidateDirectory = [IO.Path]::GetFullPath($destination)
+            while (-not [IO.Directory]::Exists($candidateDirectory)) {
+                $missingDirectories.Push($candidateDirectory)
+                $parentDirectory = [IO.Directory]::GetParent($candidateDirectory)
+                if ($null -eq $parentDirectory) {
+                    throw "The GraphKit.Auth ABI-test projection '$destination' has no existing ancestor."
+                }
+                $candidateDirectory = $parentDirectory.FullName
+            }
+            while ($missingDirectories.Count -gt 0) {
+                $createdDirectory = $missingDirectories.Pop()
+                $null = [IO.Directory]::CreateDirectory($createdDirectory)
+                $script:GraphKitAuthAbiFixtureState.CreatedDirectories.Add($createdDirectory)
+            }
             $copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
                 $verified.PayloadPath, $entry.Key, $destination, $entry.Key
             )
@@ -1274,6 +1289,11 @@ function Remove-GraphKitAuthAbiTestFixture {
         'src/GraphKit.Auth/GraphKit.Auth.Tests/bin/Release'
         'src/GraphKit.Auth/GraphKit.Auth.Tests/bin'
     ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
+    $allowedParentSet = [Collections.Generic.HashSet[string]]::new(
+        $(if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }))
+    foreach ($parent in $literalParents) {
+        $null = $allowedParentSet.Add([IO.Path]::GetFullPath($parent))
+    }
     $createdPaths = @($state.CreatedPaths | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })
     try {
         foreach ($file in $createdPaths) {
@@ -1296,15 +1316,25 @@ function Remove-GraphKitAuthAbiTestFixture {
             }
             [IO.File]::Delete($file)
         }
-        $createdParents = @($literalParents | Where-Object {
-            $parentPrefix = [IO.Path]::GetFullPath($_).TrimEnd(
-                [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
-            ) + [IO.Path]::DirectorySeparatorChar
-            @($createdPaths | Where-Object {
-                $_.StartsWith($parentPrefix, $(if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }))
-            }).Count -ne 0
-        } | Sort-Object Length -Descending)
+        $createdParents = if ($null -ne $state.PSObject.Properties['CreatedDirectories']) {
+            @($state.CreatedDirectories | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })
+        }
+        else {
+            @($literalParents | Where-Object {
+                $parentPrefix = [IO.Path]::GetFullPath($_).TrimEnd(
+                    [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
+                ) + [IO.Path]::DirectorySeparatorChar
+                @($createdPaths | Where-Object {
+                    $_.StartsWith($parentPrefix, $(if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }))
+                }).Count -ne 0
+            })
+        }
+        $createdParents = @($createdParents | Sort-Object Length -Descending -Unique)
         foreach ($directory in $createdParents) {
+            if (-not $allowedParentSet.Contains($directory)) {
+                $failures.Add("unregistered or out-of-bound projected directory '$directory'")
+                continue
+            }
             if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
             if (@([IO.Directory]::EnumerateFileSystemEntries($directory)).Count -ne 0) {
                 $failures.Add("non-empty projected parent '$directory'")

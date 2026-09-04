@@ -655,7 +655,7 @@ public static class GraphKitAuthStageCapture
         }
 
         byte[] stat = new byte[256];
-        if (fstat(handle.DangerousGetHandle().ToInt32(), stat) != 0)
+        if (InvokeUnixFStat(handle.DangerousGetHandle().ToInt32(), stat, path) != 0)
         {
             throw new IOException($"Could not fstat '{path}' (errno {Marshal.GetLastWin32Error()}).");
         }
@@ -673,13 +673,30 @@ public static class GraphKitAuthStageCapture
             inode = BitConverter.ToUInt64(stat, 8);
             length = BitConverter.ToInt64(stat, 96);
         }
-        else
+        else if (OperatingSystem.IsLinux() &&
+            RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+        {
+            // glibc's generic 64-bit Linux stat ABI (used by AArch64) places
+            // mode/nlink immediately after the 64-bit device and inode fields.
+            device = BitConverter.ToUInt64(stat, 0);
+            inode = BitConverter.ToUInt64(stat, 8);
+            mode = BitConverter.ToUInt32(stat, 16);
+            links = BitConverter.ToUInt32(stat, 20);
+            length = BitConverter.ToInt64(stat, 48);
+        }
+        else if (OperatingSystem.IsLinux() &&
+            RuntimeInformation.ProcessArchitecture == Architecture.X64)
         {
             device = BitConverter.ToUInt64(stat, 0);
             inode = BitConverter.ToUInt64(stat, 8);
             links = BitConverter.ToUInt64(stat, 16);
             mode = BitConverter.ToUInt32(stat, 24);
             length = BitConverter.ToInt64(stat, 48);
+        }
+        else
+        {
+            throw new PlatformNotSupportedException(
+                $"GraphKit.Auth stage capture does not define a native stat layout for '{RuntimeInformation.OSDescription}' on '{RuntimeInformation.ProcessArchitecture}'.");
         }
         uint fileType = mode & 0xF000;
         bool isDirectory = fileType == 0x4000;
@@ -722,7 +739,7 @@ public static class GraphKitAuthStageCapture
 
         using SafeFileHandle rebound = OpenReadNoFollow(path, directory);
         byte[] stat = new byte[256];
-        if (fstat(rebound.DangerousGetHandle().ToInt32(), stat) != 0)
+        if (InvokeUnixFStat(rebound.DangerousGetHandle().ToInt32(), stat, path) != 0)
         {
             throw new IOException($"Could not rebind physical path '{path}' (errno {Marshal.GetLastWin32Error()}).");
         }
@@ -734,6 +751,35 @@ public static class GraphKitAuthStageCapture
             throw new IOException($"Path '{path}' changed while its physical identity was resolved.");
         }
         return resolved;
+    }
+
+    private static int InvokeUnixFStat(int descriptor, byte[] stat, string path)
+    {
+        try
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                return RuntimeInformation.ProcessArchitecture switch
+                {
+                    Architecture.Arm64 => fstat(descriptor, stat),
+                    Architecture.X64 => fstat_inode64(descriptor, stat),
+                    _ => throw new PlatformNotSupportedException(
+                        $"GraphKit.Auth stage capture does not define a macOS fstat ABI for '{RuntimeInformation.ProcessArchitecture}'.")
+                };
+            }
+            if (!OperatingSystem.IsLinux())
+            {
+                throw new PlatformNotSupportedException(
+                    $"GraphKit.Auth stage capture cannot inspect Unix metadata on '{RuntimeInformation.OSDescription}'.");
+            }
+            return fstat(descriptor, stat);
+        }
+        catch (EntryPointNotFoundException exception)
+        {
+            throw new PlatformNotSupportedException(
+                $"GraphKit.Auth stage capture requires the libc fstat entry point to inspect '{path}'.",
+                exception);
+        }
     }
 
     private static string GetWindowsPhysicalPath(SafeFileHandle handle)
@@ -961,6 +1007,9 @@ public static class GraphKitAuthStageCapture
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fstat(int descriptor, [Out] byte[] stat);
+
+    [DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static extern int fstat_inode64(int descriptor, [Out] byte[] stat);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int mkdirat(int directory, string path, uint mode);

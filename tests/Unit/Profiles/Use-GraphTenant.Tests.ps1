@@ -26,7 +26,7 @@ Describe 'Use-GraphTenant' {
                 AuthMethod           = 'ClientSecret'
                 Material             = ConvertTo-SecureString 'use-graph-tenant-test' -AsPlainText -Force
                 OwnsMaterial         = $true
-                CredentialGeneration = 'g1|ClientSecret|use-graph-tenant-test'
+                CredentialGeneration = 'g1|ClientSecret|fixture'
             }
         }
     }

@@ -145,6 +145,7 @@ Describe 'Get-GraphVaultCredential' {
                 }
             } | Should -Throw -ExpectedMessage '*does not support per-secret versions*distinct secret name*'
 
+            Should-Invoke Import-GraphSecretManagement -ModuleName GraphKit -Times 1 -Exactly
             Should-NotInvoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit
             Should-NotInvoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit
         }

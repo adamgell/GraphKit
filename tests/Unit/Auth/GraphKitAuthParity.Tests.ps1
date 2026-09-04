@@ -5,11 +5,11 @@ function global:Get-Task7JsonProperty {
         [Parameter(Mandatory)] [string] $Location
     )
 
-    $matches = @($Element.EnumerateObject() | Where-Object Name -CEQ $Name)
-    if ($matches.Count -ne 1) {
+    $propertyMatches = @($Element.EnumerateObject() | Where-Object Name -CEQ $Name)
+    if ($propertyMatches.Count -ne 1) {
         throw [System.IO.InvalidDataException]::new("$Location must contain exactly one '$Name' property.")
     }
-    return $matches[0].Value
+    return $propertyMatches[0].Value
 }
 
 function global:Assert-Task7NoDuplicateJsonProperties {
@@ -326,12 +326,12 @@ function global:Read-Task7ParityMatrixJson {
                     )
                 }
 
-                $input = Get-Task7JsonProperty -Element $row -Name input -Location "row '$id'"
-                Assert-Task7NoDuplicateJsonProperties -Element $input -Location "row '$id'.input"
-                Assert-Task7ExactJsonFields -Element $input -Expected $inputFields `
+                $inputElement = Get-Task7JsonProperty -Element $row -Name input -Location "row '$id'"
+                Assert-Task7NoDuplicateJsonProperties -Element $inputElement -Location "row '$id'.input"
+                Assert-Task7ExactJsonFields -Element $inputElement -Expected $inputFields `
                     -Location "row '$id'.input"
                 foreach ($name in @('tokens', 'expiresOnUtc')) {
-                    $value = Get-Task7JsonProperty -Element $input -Name $name -Location "row '$id'.input"
+                    $value = Get-Task7JsonProperty -Element $inputElement -Name $name -Location "row '$id'.input"
                     Assert-Task7JsonArrayItems -Element $value -Allowed String `
                         -Location "row '$id'.input.$name"
                     if ($name -ceq 'expiresOnUtc') {
@@ -343,11 +343,11 @@ function global:Read-Task7ParityMatrixJson {
                         }
                     }
                 }
-                $inputFlags = Get-Task7JsonProperty -Element $input -Name forceFlags `
+                $inputFlags = Get-Task7JsonProperty -Element $inputElement -Name forceFlags `
                     -Location "row '$id'.input"
                 Assert-Task7JsonArrayItems -Element $inputFlags -Allowed @('True', 'False') `
                     -Location "row '$id'.input.forceFlags"
-                $cancel = Get-Task7JsonProperty -Element $input -Name cancelCaller `
+                $cancel = Get-Task7JsonProperty -Element $inputElement -Name cancelCaller `
                     -Location "row '$id'.input"
                 Assert-Task7JsonKind -Element $cancel -Allowed @('True', 'False') `
                     -Location "row '$id'.input.cancelCaller"
@@ -355,13 +355,13 @@ function global:Read-Task7ParityMatrixJson {
                     'fingerprintInput', 'adoptToken', 'adoptGeneration',
                     'adoptReceivedOnUtc', 'adoptExpiresOnUtc', 'adoptTenantProof'
                 )) {
-                    $value = Get-Task7JsonProperty -Element $input -Name $name `
+                    $value = Get-Task7JsonProperty -Element $inputElement -Name $name `
                         -Location "row '$id'.input"
                     Assert-Task7JsonKind -Element $value -Allowed @('String', 'Null') `
                         -Location "row '$id'.input.$name"
                 }
                 foreach ($name in @('adoptReceivedOnUtc', 'adoptExpiresOnUtc')) {
-                    $value = Get-Task7JsonProperty -Element $input -Name $name `
+                    $value = Get-Task7JsonProperty -Element $inputElement -Name $name `
                         -Location "row '$id'.input"
                     if ($value.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
                         Assert-Task7StrictTimestamp -Element $value `

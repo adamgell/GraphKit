@@ -460,6 +460,10 @@ public sealed class ModuleLifecycleState
 }
 
 function New-GraphModuleLifecycleState {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates private in-process lifecycle state and does not change external state.'
+    )]
     [CmdletBinding()]
     [OutputType([object])]
     param()
@@ -549,6 +553,10 @@ function Complete-GraphModuleCleanup {
 }
 
 function Stop-GraphModule {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Stops private in-process lifecycle state during module removal.'
+    )]
     [CmdletBinding()]
     param(
         [object] $State = $script:GraphKitModuleLifecycle,

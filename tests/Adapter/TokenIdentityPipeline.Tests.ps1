@@ -78,13 +78,13 @@ BeforeAll {
         if ($null -eq $Server) { return @() }
 
         $captured = @()
-        if ($null -ne $Server.PowerShell -and $null -ne $Server.Handle) {
-            try { $captured = @($Server.PowerShell.EndInvoke($Server.Handle)) }
-            catch { $captured = @([pscustomobject] @{ Error = $_.Exception.Message }) }
-        }
         if ($null -ne $Server.Listener) {
             try { $Server.Listener.Stop() } catch { }
             try { $Server.Listener.Close() } catch { }
+        }
+        if ($null -ne $Server.PowerShell -and $null -ne $Server.Handle) {
+            try { $captured = @($Server.PowerShell.EndInvoke($Server.Handle)) }
+            catch { $captured = @([pscustomobject] @{ Error = $_.Exception.Message }) }
         }
         if ($null -ne $Server.Runspace) {
             try { $Server.Runspace.Close() } catch { }

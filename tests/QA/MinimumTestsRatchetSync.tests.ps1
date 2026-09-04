@@ -53,7 +53,13 @@ Describe 'MinimumTests ratchet synchronization' -Tag 'QA' {
         if ($LASTEXITCODE -ne 0) {
             throw "Independent Pester discovery failed: $($discoveryOutput -join ' ')"
         }
-        $discovery = $discoveryOutput[-1] | ConvertFrom-Json
+        $discoveryJson = @($discoveryOutput |
+            Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith('{') }) |
+            Select-Object -Last 1
+        if (-not $discoveryJson) {
+            throw "Independent Pester discovery produced no JSON result: $($discoveryOutput -join ' ')"
+        }
+        $discovery = $discoveryJson | ConvertFrom-Json
         $platformOnlySurplus = switch ([string]$discovery.platform) {
             'MacOS' { 0 }
             'Linux' { 2 }

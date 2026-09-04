@@ -39,7 +39,7 @@ TenantPulse's authoritative `source/Data/DatasetMap.psd1` contains exactly five 
 
 The existing check functions already define the compact row contracts:
 
-- RBAC: `roleDefinitionName`, `groupId`, `groupDisplayName`, `isManagementRestricted`, `isAssignableToRole`.
+- RBAC and assignment reporting: `roleDefinitionName`, `groupId`, `groupDisplayName`, `groupDescription`, `isManagementRestricted`, `isAssignableToRole`.
 - BitLocker: `policyId`, `policyName`, `isFullDiskEncryption`.
 - LAPS: `policyId`, `policyName`, `backsUpToEntra`, `hasSufficientComplexity`, `hasSufficientLength`, `hasPostAuthAction`.
 - Security baseline: `id`, `name`, `templateFamily`, `hasAssignment`, `isDeprecated`, with native Boolean values.

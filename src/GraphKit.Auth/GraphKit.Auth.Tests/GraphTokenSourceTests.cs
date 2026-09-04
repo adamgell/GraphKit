@@ -47,12 +47,13 @@ public sealed class GraphTokenSourceTests
     }
 
     [Theory]
-    [InlineData(600, 60)]
-    [InlineData(3600, 300)]
-    [InlineData(7200, 300)]
+    [InlineData(600, 60, 1.7647058823529411)]
+    [InlineData(3600, 300, 8.823529411764707)]
+    [InlineData(7200, 300, 8.823529411764707)]
     public void AdaptiveRefreshUsesTheBoundedLifetimeSkew(
         int lifetimeSeconds,
-        int expectedBaseSkewSeconds)
+        int expectedBaseSkewSeconds,
+        double expectedSpreadSeconds)
     {
         var clock = new FakeClock(InitialNow);
         GraphTokenResult first = Result(
@@ -65,14 +66,13 @@ public sealed class GraphTokenSourceTests
         using var source = CreateRefreshableSource(client, clock);
 
         source.Acquire(false, CancellationToken.None);
-        double spread = EarlySpreadSeconds(first.TokenFingerprint, expectedBaseSkewSeconds);
         clock.UtcNow = first.ExpiresOnUtc
-            .AddSeconds(-(expectedBaseSkewSeconds + spread))
+            .AddSeconds(-(expectedBaseSkewSeconds + expectedSpreadSeconds))
             .AddMilliseconds(-1);
         Assert.Equal("adaptive", source.Acquire(false, CancellationToken.None).AccessToken);
 
         clock.UtcNow = first.ExpiresOnUtc
-            .AddSeconds(-(expectedBaseSkewSeconds + spread))
+            .AddSeconds(-(expectedBaseSkewSeconds + expectedSpreadSeconds))
             .AddMilliseconds(1);
         Assert.Equal("refreshed", source.Acquire(false, CancellationToken.None).AccessToken);
         Assert.Equal(2, client.AcquireCount);
@@ -89,9 +89,8 @@ public sealed class GraphTokenSourceTests
         using var source = CreateRefreshableSource(client, clock);
 
         source.Acquire(false, CancellationToken.None);
-        double spread = EarlySpreadSeconds(first.TokenFingerprint, 60);
-        Assert.InRange(spread, 0, 6);
-        clock.UtcNow = first.ExpiresOnUtc.AddSeconds(-(60 + spread));
+        const double expectedSpreadSeconds = 1.4588235294117646;
+        clock.UtcNow = first.ExpiresOnUtc.AddSeconds(-(60 + expectedSpreadSeconds));
 
         Assert.Equal("replacement", source.Acquire(false, CancellationToken.None).AccessToken);
     }
@@ -592,12 +591,6 @@ public sealed class GraphTokenSourceTests
     {
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)))
             .ToLowerInvariant();
-    }
-
-    private static double EarlySpreadSeconds(string fingerprint, double baseSkewSeconds)
-    {
-        int bucket = Convert.ToInt32(fingerprint[..2], 16);
-        return baseSkewSeconds * 0.1 * (bucket / 255d);
     }
 
     internal sealed class FakeClock(DateTimeOffset utcNow)

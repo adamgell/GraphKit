@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 
-**Status:** Approved by the active end-to-end product-program goal. Deterministic implementation is complete and green; protected live parity, exact-SHA CI, and publication remain approval-gated.
+**Status:** Approved by the active end-to-end product-program goal. Deterministic implementation is complete; protected live parity, exact-SHA CI, publication, and Task 9 removal of the transitive `Microsoft.Graph.Authentication` dependency remain approval-gated.
 
 **Scope:** GraphKit R8 only
 

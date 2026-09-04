@@ -141,7 +141,7 @@ internal sealed class MsalTokenClient : ITokenClient
                 result.AccessToken,
                 result.ExpiresOn,
                 _utcNow(),
-                _scope,
+                result.Scopes,
                 _credentialGeneration);
         }
         catch (OperationCanceledException)
@@ -271,9 +271,24 @@ internal static class TokenResultFactory
         DateTimeOffset expiresOnUtc,
         DateTimeOffset receivedOnUtc,
         string scope,
+        string credentialGeneration) =>
+        Create(
+            accessToken,
+            expiresOnUtc,
+            receivedOnUtc,
+            [scope],
+            credentialGeneration);
+
+    internal static GraphTokenResult Create(
+        string accessToken,
+        DateTimeOffset expiresOnUtc,
+        DateTimeOffset receivedOnUtc,
+        IEnumerable<string> scopes,
         string credentialGeneration)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accessToken);
+        ArgumentNullException.ThrowIfNull(scopes);
+        string[] grantedScopes = [.. scopes];
         byte[] bearerBytes = Encoding.UTF8.GetBytes(accessToken);
         try
         {
@@ -285,7 +300,7 @@ internal static class TokenResultFactory
                 ExpiresOnUtc = expiresOnUtc,
                 ReceivedOnUtc = receivedOnUtc,
                 TokenType = "Bearer",
-                Scopes = [scope],
+                Scopes = grantedScopes,
                 VerifiedTenantId = null,
                 TokenFingerprint = fingerprint,
                 CredentialGeneration = credentialGeneration

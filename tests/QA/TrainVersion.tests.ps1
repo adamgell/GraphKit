@@ -627,8 +627,8 @@ $source
 
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires'
-        $result.Output | Should -Match 'exactly one exact raw inventory record'
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment.*Scripts'
     }
 
     It 'binds a physically internal proof helper when RepositoryRoot is a Unix symlink or Windows junction alias' {
@@ -647,8 +647,8 @@ $source
 
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires'
-        $result.Output | Should -Match 'exactly one exact raw inventory record'
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment.*Scripts'
     }
 
     It 'allows a genuinely external proof helper when RepositoryRoot is a filesystem alias' {
@@ -1050,8 +1050,8 @@ $source
         }
         finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state.sourceStateSha256 | Should -Be '514a2ebe272e5d6e099617f784559b6056f8f8b2600a203ad777df08cbe605ec'
-        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d514a2ebe272e$'
+        $state.sourceStateSha256 | Should -Be 'a3bf0d85293ed96fd0b8fbef7336beb2dccdc081bb2d878386d2fa5cb46dba10'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.da3bf0d85293e$'
     }
 }
 
@@ -1059,11 +1059,16 @@ Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
     It 'maps Linux statx device fields in ABI order before formatting ordinary-file identity' {
         $captureType = Initialize-R8SourceCaptureHelper
         $statxType = $captureType.Assembly.GetType("$($captureType.Namespace).UnixNative+Statx", $true)
+        $helperSource = Get-Content -LiteralPath $script:sourceCaptureHelper -Raw
 
         [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'RDeviceMajor').ToInt32() | Should -Be 128
         [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'RDeviceMinor').ToInt32() | Should -Be 132
         [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'DeviceMajor').ToInt32() | Should -Be 136
         [Runtime.InteropServices.Marshal]::OffsetOf($statxType, 'DeviceMinor').ToInt32() | Should -Be 140
+        $helperSource | Should -Match 'EntryPoint = "fstat\$INODE64"'
+        $helperSource | Should -Match 'Architecture\.Arm64 => DarwinFStat\('
+        $helperSource | Should -Match 'Architecture\.X64 => DarwinFStatInode64\('
+        $helperSource | Should -Match 'catch \(EntryPointNotFoundException exception\)'
     }
 
     It 'rejects Windows reserved-device, ADS, and suspicious short-alias path forms without a platform skip' {

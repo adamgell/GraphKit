@@ -415,6 +415,9 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
         [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
         private static extern int DarwinFStat(int handle, out DarwinStat metadata);
 
+        [DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+        private static extern int DarwinFStatInode64(int handle, out DarwinStat metadata);
+
         [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
         private static extern int LinuxStatx(int directoryHandle, string path, int flags, uint mask, out Statx metadata);
 
@@ -473,7 +476,24 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
                 int descriptor = handle.DangerousGetHandle().ToInt32();
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
-                    if (LinuxStatx(descriptor, string.Empty, AtEmptyPath | AtSymlinkNoFollow, RequiredStatxMask, out Statx metadata) != 0)
+                    int status;
+                    Statx metadata;
+                    try
+                    {
+                        status = LinuxStatx(
+                            descriptor,
+                            string.Empty,
+                            AtEmptyPath | AtSymlinkNoFollow,
+                            RequiredStatxMask,
+                            out metadata);
+                    }
+                    catch (EntryPointNotFoundException exception)
+                    {
+                        throw new PlatformNotSupportedException(
+                            "Root-anchored Linux source capture requires the libc statx entry point.",
+                            exception);
+                    }
+                    if (status != 0)
                     {
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "statx failed for an opened source handle.");
                     }
@@ -493,7 +513,25 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
 
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
                 {
-                    if (DarwinFStat(descriptor, out DarwinStat metadata) != 0)
+                    int status;
+                    DarwinStat metadata;
+                    try
+                    {
+                        status = RuntimeInformation.ProcessArchitecture switch
+                        {
+                            Architecture.Arm64 => DarwinFStat(descriptor, out metadata),
+                            Architecture.X64 => DarwinFStatInode64(descriptor, out metadata),
+                            _ => throw new PlatformNotSupportedException(
+                                $"Root-anchored macOS source capture does not define an fstat ABI for '{RuntimeInformation.ProcessArchitecture}'.")
+                        };
+                    }
+                    catch (EntryPointNotFoundException exception)
+                    {
+                        throw new PlatformNotSupportedException(
+                            $"Root-anchored macOS source capture cannot resolve the required fstat ABI for '{RuntimeInformation.ProcessArchitecture}'.",
+                            exception);
+                    }
+                    if (status != 0)
                     {
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "fstat failed for an opened source handle.");
                     }

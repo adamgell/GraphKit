@@ -273,7 +273,9 @@ function Register-GraphTenant {
 
                 $hasPasswordVault = -not [string]::IsNullOrEmpty($CertificatePasswordVaultName)
                 $hasPasswordName = -not [string]::IsNullOrEmpty($CertificatePasswordSecretName)
-                if ($hasPasswordVault -ne $hasPasswordName) {
+                $hasPasswordVersion = $PSBoundParameters.ContainsKey('CertificatePasswordVersion')
+                if (($hasPasswordVault -or $hasPasswordName -or $hasPasswordVersion) -and
+                    -not ($hasPasswordVault -and $hasPasswordName)) {
                     throw 'Vault certificate password parameters must include both -CertificatePasswordVaultName and -CertificatePasswordSecretName.'
                 }
                 if ($hasPasswordVault) {

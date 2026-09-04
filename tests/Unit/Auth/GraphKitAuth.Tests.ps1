@@ -2245,11 +2245,19 @@ switch ($Scenario) {
     }
     'SamePathReplacement' {
         $residentMvid = [GraphKit.Auth.GraphAuthHost].Assembly.ManifestModule.ModuleVersionId.ToString('D')
-        [IO.File]::Copy(
-            (Resolve-Path -LiteralPath $ReplacementContractsPath).ProviderPath,
-            (Resolve-Path -LiteralPath $ContractsPath).ProviderPath,
-            $true
-        )
+        $resolvedReplacement = (Resolve-Path -LiteralPath $ReplacementContractsPath).ProviderPath
+        $resolvedContracts = (Resolve-Path -LiteralPath $ContractsPath).ProviderPath
+        if ($IsWindows) {
+            [IO.File]::Copy($resolvedReplacement, $resolvedContracts, $true)
+        }
+        else {
+            # Never truncate an assembly that CoreCLR may have memory-mapped: Linux can
+            # terminate with SIGBUS when a mapped page disappears. An atomic rename gives
+            # the path new bytes while the resident assembly retains its original inode.
+            $atomicReplacement = "$resolvedContracts.replacement.$([guid]::NewGuid().ToString('N'))"
+            [IO.File]::Copy($resolvedReplacement, $atomicReplacement)
+            [IO.File]::Move($atomicReplacement, $resolvedContracts, $true)
+        }
         $message = Get-Rejection {
             $replacementHost = [GraphKit.Auth.GraphAuthHost]::new($PayloadRoot, [version]'1.0.0.0', [timespan]::FromSeconds(2))
             $replacementHost.Dispose()

@@ -109,7 +109,7 @@ Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
 
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Data.Imported | Should -BeTrue
-        $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:baseVersion")
+        $result.Data.ModuleBase | Should -Be (Join-Path (Join-Path $modulePath 'GraphKit') $script:baseVersion)
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
         $result.Data.GraphAuthenticationLoaded | Should -BeTrue -Because 'Graph Authentication remains the R8 transition MSAL delivery vehicle'
         $result.Data.GraphAuthenticationAvailable | Should -BeTrue -Because 'Graph Authentication remains a required runtime package dependency until cutover'

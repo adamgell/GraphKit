@@ -98,7 +98,7 @@ Run:
 
 ```powershell
 ./build.ps1 -Tasks pack
-Invoke-Pester ./tests/QA/PackageIdentity.tests.ps1,./tests/QA/ReleaseProof.tests.ps1 -Output Detailed
+./build.ps1 -Tasks test
 ```
 
 Expected: failures naming stable `0.3.0`, missing source revision, and prerelease package discovery.

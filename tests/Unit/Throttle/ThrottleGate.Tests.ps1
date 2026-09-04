@@ -133,6 +133,37 @@ Describe 'Wait-GraphThrottleGate' {
         }
     }
 
+    It 'supports an advanced one-parameter delay seam without requiring cancellation support' {
+        InModuleScope GraphKit -Parameters @{
+            UtcNow     = $script:utcNow
+            Context    = $script:context
+            Descriptor = $script:descriptor
+        } {
+            param($UtcNow, $Context, $Descriptor)
+
+            $coordinator = [GraphThrottleCoordinator]::new()
+            $scope = New-GraphThrottleScope -Context $Context -Descriptor $Descriptor
+            $coordinator.ApplyCooldown($scope.CoarseKey, 1, $UtcNow)
+            $delays = [System.Collections.Generic.List[long]]::new()
+            $delay = {
+                [CmdletBinding()]
+                param([long] $Milliseconds)
+
+                $delays.Add($Milliseconds)
+            }.GetNewClosure()
+
+            $admission = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
+                -UtcNow $UtcNow -Delay $delay
+
+            try {
+                $delays | Should -Be @(1000)
+            }
+            finally {
+                Complete-GraphThrottleGate -Admission $admission
+            }
+        }
+    }
+
     It 'skips the wait and only acquires admission when no cooldown is active' {
         InModuleScope GraphKit -Parameters @{
             UtcNow     = $script:utcNow
@@ -169,14 +200,18 @@ Describe 'Wait-GraphThrottleGate' {
             $coordinator.ApplyCooldown($scope.CoarseKey, 60, $UtcNow)
             $cts = [System.Threading.CancellationTokenSource]::new()
             $cts.Cancel()
-            $delayCalls = 0
+            $delayCalls = [System.Collections.Generic.List[int]]::new()
+            $delay = {
+                param($Milliseconds)
+                $delayCalls.Add([int] $Milliseconds)
+            }.GetNewClosure()
 
             try {
                 $failure = $null
                 try {
                     $null = Wait-GraphThrottleGate -Scope $scope -Coordinator $coordinator `
                         -UtcNow $UtcNow -CancellationToken $cts.Token `
-                        -Delay { param($Milliseconds) $delayCalls++ }
+                        -Delay $delay
                 }
                 catch {
                     $failure = $_.Exception
@@ -194,7 +229,7 @@ Describe 'Wait-GraphThrottleGate' {
 
                 [pscustomobject] @{
                     IsCancellation = $isCancellation
-                    DelayCalls     = $delayCalls
+                    DelayCalls     = $delayCalls.Count
                     InFlight       = $coordinator.GetInFlight($scope.LeafKey)
                 }
             }

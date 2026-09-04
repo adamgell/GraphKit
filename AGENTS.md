@@ -33,7 +33,7 @@ metadata.
 
 Run the suite through `./build.ps1 -Tasks test`, never `Invoke-Pester ./tests` directly: the changelog checks are Sampler-generated and depend on build-injected variables, so a bare Pester run reports two false failures.
 
-**Remote CI contract.** `.github/workflows/ci.yml` runs PowerShell 7.4 and 7.6 across Windows, Ubuntu, and macOS. A source revision is CI-verified only when all six matrix jobs pass for that exact SHA; workflow existence or an older successful run is not evidence. The published `0.3.0` evidence is 772 deterministic tests. The post-release development tree requires 1460 deterministic tests under `./build.ps1 -Tasks test`, with zero failures, errors, skips, or NotRun tests, and `tests/QA/Assert-GateResult.ps1` enforces the same minimum-count floor used by CI and package verification. The synchronization test independently discovers the suite and removes only the repository's explicit platform-only surplus before accepting that shared floor, so agreeing stale copies are not sufficient.
+**Remote CI contract.** `.github/workflows/ci.yml` runs PowerShell 7.4 and 7.6 across Windows, Ubuntu, and macOS. A source revision is CI-verified only when all six matrix jobs pass for that exact SHA; workflow existence or an older successful run is not evidence. The published `0.3.0` evidence is 772 deterministic tests. The post-release development tree requires 1462 deterministic tests under `./build.ps1 -Tasks test`, with zero failures, errors, skips, or NotRun tests, and `tests/QA/Assert-GateResult.ps1` enforces the same minimum-count floor used by CI and package verification. The synchronization test independently discovers the suite and removes only the repository's explicit platform-only surplus before accepting that shared floor, so agreeing stale copies are not sufficient.
 
 **Phase 5 (cutover) implementation and Ivy24 verification are complete.** All eight steps ran and were verified against the Ivy24 lab tenant: legacy-caller inventory, `Import-GraphLegacyProfile`, a private versioned package channel with publish/pin/install, a live read through the *installed* package, a GraphKit-backed data plane in IHA behind a default-off flag, reads and a reverted mutating write through it, and a full credential-generation rollover ending in the old generation's revocation. Catalog coverage of IHA's declared surface is 27 of 27 at the API version it actually calls. The 2026-08-15 cutover record preserved two operator actions because active customer repointing would have required the legacy fallback to remain. The owner has since confirmed that there are no installed users, legacy consumers, customer-tenant consumers, or repoint targets. R9 legacy import/migration, customer repointing, rollback-window operation, legacy-layer retirement, and deleted-directory purge are therefore **NotApplicable** and must not be executed merely to manufacture closeout evidence. Reusable `New-GraphAppRegistration` provisioning and actual role-grant verification remain applicable product work. Reopen adopter-specific gates only if an adopter is later identified. Read `docs/cutover/2026-08-15-phase5-cutover.md` before revisiting the historical cutover.
 
@@ -58,9 +58,10 @@ These are standalone scripts, deliberately not module functions: converting the 
 Runtime flow:
 
 1. `Register-GraphTenant` persists non-secret profile metadata; credentials stay in `Microsoft.PowerShell.SecretManagement`.
-2. `Get-GraphContext` resolves a profile into an immutable runtime context. The approved end state
-   resolves it before parallel work begins; the post-`0.3.0` legacy PowerShell token source is
-   temporarily same-runspace-only until `GraphKit.Auth` supplies the compiled boundary.
+2. `Get-GraphContext` resolves a profile into an immutable runtime context before parallel work
+   begins. Built-in certificate, client-secret, managed-identity, and fixed-bearer modes use the
+   runspace-neutral `GraphKit.Auth` boundary; only caller-owned `-TokenProvider` and `-MsalFactory`
+   compatibility seams remain same-runspace-only.
 3. Public commands resolve an operation descriptor from `source/Data/Operations/*.psd1`.
 4. `Invoke-GraphOperation` validates URI/query/version/cloud/permission rules, then issues the request through a **GraphKit-owned `HttpClient`** using a token from the context's own MSAL confidential client.
 5. The request pipeline handles paging, deadlines, cancellation, scoped admission control, and semantics-aware retry. GraphKit is the **sole retry owner**; there is no underlying handler that can retry behind its back.
@@ -78,10 +79,10 @@ Preserve these boundaries:
 - Generic reads may use `Get-GraphObject`; do not introduce a universal generic mutation API.
 - IntuneHealthAutomation retains its reports, Excel processing, checkpointing, console UI, and caching in its own repository; no adopted runtime currently makes their consolidation a GraphKit release condition.
 - A current context is interactive convenience only. Low-level work must accept `-Context` or
-  `-ProfileId`. Until `GraphKit.Auth` lands, built-in PowerShell token sources must be created and
-  used in the same runspace; the public sender rejects a crossed source before it joins a shared
-  token flight. Re-resolving mutable credentials independently in child runspaces is not proof of
-  the approved immutable-context contract and must not be described as equivalent.
+  `-ProfileId`. Caller-owned legacy `-TokenProvider` and `-MsalFactory` sources must be created and
+  used in the same runspace; the public sender rejects a crossed legacy source before it joins a
+  shared token flight. Re-resolving mutable credentials independently in child runspaces is not
+  proof of the approved immutable-context contract and must not be described as equivalent.
 
 Example planned usage:
 
@@ -123,11 +124,10 @@ Treat `build.ps1`, `build.yaml`, and `RequiredModules.psd1` as authoritative for
 - Normalize transport outcomes before policy logic. Retry code should consume a stable result record rather than PowerShell exception internals.
 - Inject `Send`, `UtcNow`, `Delay`, and `Jitter` into retry logic. Tests must use virtual time and deterministic jitter.
 - Prefer `PSCustomObject` records or a small compiled type over many public PowerShell classes; class definitions persist awkwardly across test runs.
-- The target contract resolves immutable contexts before asynchronous/runspace work. Current
-  legacy PowerShell token sources are same-runspace-only fail-fast containment; do not enable or
-  claim cross-runspace context use until the compiled `GraphKit.Auth` source passes that gate.
-  Shared throttle state must remain thread-safe and scoped by cloud, tenant, client, resource
-  family, and read/write class.
+- Resolve immutable contexts before asynchronous/runspace work. Built-in compiled token sources
+  are runspace-neutral; caller-owned legacy provider/factory seams remain same-runspace-only
+  fail-fast containment. Shared throttle state must remain thread-safe and scoped by cloud,
+  tenant, client, resource family, and read/write class.
 - Error handling must preserve certainty: distinguish known failure from indeterminate commit. Never blanket-replay POST/PATCH after timeouts, resets, or ambiguous 5xx responses.
 - A successful 2xx response with `Retry-After` remains success: update future pacing, never replay it.
 - Treat `@odata.nextLink` as opaque, validate its Graph authority before forwarding authorization, and continue through empty pages carrying a next link.

@@ -188,6 +188,13 @@ function Get-GraphKitPackagePrivacyAllowedGuidSet {
         '00000000-0000-0000-0000-000000000000',
         '00000000-0000-0000-0000-000000000001',
         '00000003-0000-0000-c000-000000000000',
+        # Public solution metadata: the C# project-type id and the three stable
+        # GraphKit.Auth project ids. Keep this explicit so an unrelated GUID in
+        # project metadata still fails the privacy gate.
+        'FAE04EC0-301F-11D3-BF4B-00C04F79EFBC',
+        'A1A5DC18-8823-4AA1-BB0D-6F96E19E13C0',
+        'B2B6ED29-9934-4BB2-CC1E-70A7F20F24D1',
+        'C3C7FE3A-AA45-4CC3-DD2F-81B8A31035E2',
         $ModuleGuid.ToString('D')
     )) {
         $null = $allowedGuids.Add($allowedGuid)
@@ -227,12 +234,17 @@ function Test-GraphKitAuthSourcePrivacy {
     $maximumSourceBytes = 128MB
     [long] $scannedBytes = 0
     [int] $sourceFilesScanned = 0
+    $authoredTextExtensions = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($extension in @('.cs', '.csproj', '.props', '.sln', '.json')) {
+        $null = $authoredTextExtensions.Add($extension)
+    }
 
     foreach ($sourceFile in $sourceCandidates) {
         $relativePath = [System.IO.Path]::GetRelativePath($resolvedSourceRoot, $sourceFile.FullName).Replace('\', '/')
         $segments = @($relativePath -split '/')
         if (@($segments | Where-Object { $_ -ieq 'bin' -or $_ -ieq 'obj' }).Count -gt 0 -or
-            [System.IO.Path]::GetExtension($sourceFile.Name) -ine '.cs') {
+            -not $authoredTextExtensions.Contains([System.IO.Path]::GetExtension($sourceFile.Name))) {
             continue
         }
 
@@ -267,7 +279,7 @@ function Test-GraphKitAuthSourcePrivacy {
             $text = $strictUtf8.GetString($bytes)
         }
         catch {
-            throw "GraphKit.Auth privacy scan rejected authored CSharp that is not strict UTF-8 (source sha256: $sourcePathDigest)."
+            throw "GraphKit.Auth privacy scan rejected an authored project file that is not strict UTF-8 (source sha256: $sourcePathDigest)."
         }
         if ($text.Length -gt 0 -and $text[0] -eq [char] 0xfeff) {
             $text = $text.Substring(1)
@@ -281,7 +293,7 @@ function Test-GraphKitAuthSourcePrivacy {
     }
 
     if ($sourceFilesScanned -eq 0) {
-        throw 'GraphKit.Auth privacy scan found no authored CSharp files and failed closed.'
+        throw 'GraphKit.Auth privacy scan found no authored project files and failed closed.'
     }
 
     return [pscustomobject] [ordered] @{

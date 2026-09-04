@@ -214,6 +214,7 @@ if (`$msal) { `$result.DetectedMsalVersion = `$msal.GetName().Version.ToString()
 
     It 'imports GraphKit and inspects the catalog without SecretManagement on PSModulePath' {
         $script:NoVaultImport.ImportSucceeded | Should -BeTrue -Because $script:NoVaultImport.GuardError
+        $script:NoVaultImport.GuardError | Should -BeNullOrEmpty
         $script:NoVaultImport.OperationName | Should -Be 'ManagedDevice.List'
         $script:NoVaultImport.SecretManagementLoaded | Should -BeFalse
         $script:NoVaultImport.SecretManagementAvailable | Should -BeFalse

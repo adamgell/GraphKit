@@ -184,22 +184,16 @@ switch ($Channel) {
     'FileSystem' {
         $target = Join-Path $Destination $package.Name
         $proofTarget = if ($SkipTestProof) { $null } else { Join-Path $Destination $proofAssetName }
+        $packageAlreadyPublished = $false
 
-        if ((Test-Path -LiteralPath $target -PathType Leaf) -and -not $Force) {
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
             $existingHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($existingHash -ceq $hash) {
-                Write-Host '  Already published with identical bytes; nothing to do.' -ForegroundColor Green
+                $packageAlreadyPublished = $true
             }
-            else {
+            elseif (-not $Force) {
                 throw "Version $moduleVersion already exists in '$Destination' with DIFFERENT bytes (channel $existingHash vs local $hash). Replacing it would make every existing pin a lie. Publish a new version, or pass -Force if you are certain."
             }
-        }
-        elseif ($PSCmdlet.ShouldProcess($target, 'Publish package to file-system channel')) {
-            if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
-                $null = New-Item -ItemType Directory -Path $Destination -Force
-            }
-            Copy-Item -LiteralPath $package.FullName -Destination $target -Force
-            Write-Host "  Published to $target" -ForegroundColor Green
         }
 
         if (-not $SkipTestProof) {
@@ -215,9 +209,34 @@ switch ($Channel) {
                     $null = New-Item -ItemType Directory -Path $Destination -Force
                 }
                 Copy-Item -LiteralPath $verifiedProofSnapshot.FullName -Destination $proofTarget
+                $publishedProofHash = (Get-FileHash -LiteralPath $proofTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($publishedProofHash -cne $verifiedRelease.ProofSha256) {
+                    Remove-Item -LiteralPath $proofTarget -Force -ErrorAction SilentlyContinue
+                    throw "Published tested-release proof '$proofTarget' failed its content hash check."
+                }
                 Write-Host "  Published tested-release proof to $proofTarget" -ForegroundColor Green
             }
             $publishedProofSource = [System.IO.Path]::GetFullPath($proofTarget)
+
+            if (-not $WhatIfPreference -and -not (Test-Path -LiteralPath $proofTarget -PathType Leaf)) {
+                throw 'The tested-release proof was not published; refusing to make the package discoverable.'
+            }
+        }
+
+        if ($packageAlreadyPublished) {
+            Write-Host '  Already published with identical bytes; nothing to do.' -ForegroundColor Green
+        }
+        elseif ($PSCmdlet.ShouldProcess($target, 'Publish package to file-system channel')) {
+            if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
+                $null = New-Item -ItemType Directory -Path $Destination -Force
+            }
+            Copy-Item -LiteralPath $package.FullName -Destination $target -Force
+            $publishedPackageHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($publishedPackageHash -cne $hash) {
+                Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+                throw "Published package '$target' failed its content hash check."
+            }
+            Write-Host "  Published to $target" -ForegroundColor Green
         }
 
         $publishedSource = [System.IO.Path]::GetFullPath($Destination)
@@ -235,7 +254,7 @@ switch ($Channel) {
 
         # This is an outward publication: it sends the package to GitHub. It only happens
         # under an explicit ShouldProcess decision, never as a side effect.
-        if ($PSCmdlet.ShouldProcess("$Destination release $tag", 'Upload package asset to GitHub release')) {
+        if ($PSCmdlet.ShouldProcess("$Destination release $tag", 'Upload proof and package assets to GitHub release')) {
             $exists = (& gh release view $tag --repo $Destination --json tagName 2>$null)
             if ($LASTEXITCODE -ne 0) {
                 & gh release create $tag --repo $Destination --title "GraphKit $moduleVersion" --notes "GraphKit $moduleVersion. sha256 $hash" --prerelease=false
@@ -245,14 +264,23 @@ switch ($Channel) {
                 throw "Release $tag already exists in $Destination. Publish a new version rather than replacing one under an existing pin, or pass -Force."
             }
 
-            $uploadArguments = @(
+            $proofUploadArguments = @(
                 'release', 'upload', $tag,
-                $package.FullName, $verifiedProofSnapshot.FullName,
+                $verifiedProofSnapshot.FullName,
                 '--repo', $Destination
             )
-            if ($Force) { $uploadArguments += '--clobber' }
-            & gh @uploadArguments
-            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $Destination $tag." }
+            if ($Force) { $proofUploadArguments += '--clobber' }
+            & gh @proofUploadArguments
+            if ($LASTEXITCODE -ne 0) { throw "gh tested-release proof upload failed for $Destination $tag." }
+
+            $packageUploadArguments = @(
+                'release', 'upload', $tag,
+                $package.FullName,
+                '--repo', $Destination
+            )
+            if ($Force) { $packageUploadArguments += '--clobber' }
+            & gh @packageUploadArguments
+            if ($LASTEXITCODE -ne 0) { throw "gh package upload failed for $Destination $tag." }
             Write-Host "  Uploaded $($package.Name) and $proofAssetName to $Destination release $tag" -ForegroundColor Green
         }
 

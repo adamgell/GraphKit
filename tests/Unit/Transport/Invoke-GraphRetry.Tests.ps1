@@ -118,7 +118,12 @@ BeforeAll {
         return @{
             Send   = (New-TestSend)
             UtcNow = { $script:clock }
-            Delay  = { param([double] $s) $script:clock = $script:clock.AddSeconds($s); $script:requestedDelays.Add($s) }
+            Delay  = {
+                [CmdletBinding()]
+                param([double] $s)
+                $script:clock = $script:clock.AddSeconds($s)
+                $script:requestedDelays.Add($s)
+            }
             Jitter = { 0.5 }
         }
     }
@@ -714,7 +719,7 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $r.PSObject.TypeNames | Should -Contain 'GraphKit.OperationResult'
 
                 $names = @($r.PSObject.Properties.Name)
-                foreach ($f in @('Data', 'Outcome', 'Certainty', 'Telemetry', 'Provenance')) {
+                foreach ($f in @('Data', 'Outcome', 'Certainty', 'Truncated', 'Telemetry', 'Provenance')) {
                     $names | Should -Contain $f
                 }
 
@@ -725,6 +730,7 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
 
                 $r.Data | Should -Not -BeNullOrEmpty
                 $r.Outcome | Should -Be 'Succeeded'
+                $r.Truncated | Should -BeFalse
             }
 
             It 'adds a client-request-id header on every attempt' {

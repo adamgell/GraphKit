@@ -252,7 +252,13 @@ BeforeAll {
             'renamed' { [IO.File]::Move($targetPath, (Join-Path $payloadPath 'GraphKit.Auth.renamed.dll')) }
             'writable' { if ($IsWindows) { (Get-Item $targetPath).IsReadOnly = $false } else { & chmod 0600 $targetPath } }
             'byte-mutated' { [IO.File]::WriteAllText($targetPath, 'mutated') }
-            'byte-identical-replaced' { $bytes = [IO.File]::ReadAllBytes($targetPath); [IO.File]::Delete($targetPath); [IO.File]::WriteAllBytes($targetPath, $bytes) }
+            'byte-identical-replaced' {
+                $bytes = [IO.File]::ReadAllBytes($targetPath)
+                $replacement = Join-Path $payloadPath ('.replacement-' + [guid]::NewGuid().ToString('N'))
+                [IO.File]::WriteAllBytes($replacement, $bytes)
+                [IO.File]::Delete($targetPath)
+                [IO.File]::Move($replacement, $targetPath)
+            }
             'hard-link' {
                 $outsideLink = Join-Path $TestDrive ('GraphKit.Auth.hardlink-' + [guid]::NewGuid().ToString('N') + '.dll')
                 $null = New-Item -ItemType HardLink -Path $outsideLink -Target $targetPath -ErrorAction Stop
@@ -531,7 +537,11 @@ $defaultMsalReferenceUnchanged = $defaultMsalAfter.Count -eq 1 -and
 Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
     It 'provides the private build task and native capture helper' {
         Test-Path -LiteralPath $script:taskPath -PathType Leaf | Should -BeTrue
-        Test-Path -LiteralPath (Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs') -PathType Leaf | Should -BeTrue
+        $helperPath = Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs'
+        Test-Path -LiteralPath $helperPath -PathType Leaf | Should -BeTrue
+        $helperSource = Get-Content -LiteralPath $helperPath -Raw
+        $helperSource | Should -Match 'EntryPoint = "fstat\$INODE64"'
+        $helperSource | Should -Match 'Architecture\.X64 => fstat_inode64\('
         { Assert-GraphKitAuthStageCommands } | Should -Not -Throw
     }
 
@@ -1274,9 +1284,22 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $second = New-GraphKitAuthSealedStage -OutputRoot $outputB -FullVersion $upperVersion `
                 -PayloadSourceRoot (Join-Path $script:stagePath 'payload')
             $stageRootA = Join-Path $outputA 'GraphKit.Auth/stage'
+            $stageRootB = Join-Path $outputB 'GraphKit.Auth/stage'
             $versionRootA = Split-Path $first.StagePath -Parent
             $versionRootB = Split-Path $second.StagePath -Parent
-            [IO.Directory]::Move($versionRootB, (Join-Path $stageRootA $upperVersion))
+            try {
+                $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $true)
+                $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootB, $true, $true)
+                [IO.Directory]::Move($versionRootB, (Join-Path $stageRootA $upperVersion))
+            }
+            finally {
+                if (Test-Path -LiteralPath $stageRootA -PathType Container) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $false)
+                }
+                if (Test-Path -LiteralPath $stageRootB -PathType Container) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootB, $true, $false)
+                }
+            }
             $movedSecondStage = Join-Path (Join-Path $stageRootA $upperVersion) ([IO.Path]::GetFileName($second.StagePath))
             { Test-GraphKitAuthSealedStage -StagePath $first.StagePath -FullVersion $lowerVersion } |
                 Should -Not -Throw
@@ -1516,6 +1539,30 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
         Test-Path -LiteralPath $preexisting -PathType Leaf | Should -BeTrue
         [IO.File]::ReadAllText($preexisting) | Should -BeExactly 'caller-owned'
+    }
+
+    It 'removes recorded empty projection directories after setup fails before a file is copied' {
+        $root = Join-Path $TestDrive ('projection-directory-state-' + [guid]::NewGuid().ToString('N'))
+        $bin = Join-Path $root 'src/GraphKit.Auth/GraphKit.Auth/bin'
+        $release = Join-Path $bin 'Release'
+        $destination = Join-Path $release 'net8.0'
+        $null = [IO.Directory]::CreateDirectory($destination)
+        $createdDirectories = [Collections.Generic.List[string]]::new()
+        foreach ($directory in @($bin, $release, $destination)) {
+            $createdDirectories.Add($directory)
+        }
+        $script:GraphKitAuthAbiFixtureState = [pscustomobject]@{
+            BaselineState = $null
+            StatusBefore = @()
+            CreatedPaths = [Collections.Generic.List[string]]::new()
+            CreatedDirectories = $createdDirectories
+            Completed = $false
+            ExpectedEvidence = [ordered]@{}
+        }
+
+        { Remove-GraphKitAuthAbiTestFixture -RepositoryRoot $root } | Should -Not -Throw
+
+        Test-Path -LiteralPath $bin | Should -BeFalse
     }
 
     It 'deletes only a recorded projection and preserves an unrecorded partial materialization' {

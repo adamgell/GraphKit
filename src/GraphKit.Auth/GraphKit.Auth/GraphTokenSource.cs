@@ -11,6 +11,7 @@ internal sealed class GraphTokenSource : IGraphTokenSource
 {
     private readonly object _cacheGate = new();
     private readonly object _flightGate = new();
+    private readonly object _drainGate = new();
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly Action<IDisposable> _disposeMaterial;
     private readonly CancellationTokenSource _disposalCancellation = new();
@@ -153,7 +154,15 @@ internal sealed class GraphTokenSource : IGraphTokenSource
             // continues and only a sanitized lifecycle failure may cross the ABI.
         }
 
-        _operationsDrained.Wait();
+        bool operationsRemain;
+        lock (_drainGate)
+        {
+            operationsRemain = _activeOperations != 0;
+        }
+        if (operationsRemain)
+        {
+            _operationsDrained.Wait();
+        }
 
         ITokenClient? client = Interlocked.Exchange(ref _client, null);
         IDisposable? ownedMaterial = Interlocked.Exchange(ref _ownedMaterial, null);
@@ -456,11 +465,14 @@ internal sealed class GraphTokenSource : IGraphTokenSource
 
     private OperationLease BeginOperation(CancellationToken callerCancellation)
     {
-        ThrowIfDisposed();
-        int active = Interlocked.Increment(ref _activeOperations);
-        if (active == 1)
+        lock (_drainGate)
         {
-            _operationsDrained.Reset();
+            ThrowIfDisposed();
+            _activeOperations++;
+            if (_activeOperations == 1)
+            {
+                _operationsDrained.Reset();
+            }
         }
 
         try
@@ -480,9 +492,13 @@ internal sealed class GraphTokenSource : IGraphTokenSource
 
     private void ExitOperation()
     {
-        if (Interlocked.Decrement(ref _activeOperations) == 0)
+        lock (_drainGate)
         {
-            _operationsDrained.Set();
+            _activeOperations--;
+            if (_activeOperations == 0)
+            {
+                _operationsDrained.Set();
+            }
         }
     }
 

@@ -13,14 +13,15 @@ BeforeAll {
     . (Join-Path $script:repoRoot 'scripts/private/Test-GraphKitPackagePrivacy.ps1')
 }
 
-Describe 'GraphKit.Auth authored CSharp privacy' {
+Describe 'GraphKit.Auth authored project-source privacy' {
 
-    It 'passes the reusable strict source privacy scan for every authored CSharp file' {
+    It 'passes the reusable strict source privacy scan for every authored project file' {
         $authSourceRoot = Join-Path $script:repoRoot 'src/GraphKit.Auth'
+        $authoredExtensions = @('.cs', '.csproj', '.props', '.sln', '.json')
         $expectedSourceFiles = @(
             Get-ChildItem -LiteralPath $authSourceRoot -Recurse -File -Force |
                 Where-Object {
-                    $_.Extension -ieq '.cs' -and
+                    $_.Extension -iin $authoredExtensions -and
                     $_.FullName -notmatch '[\\/](?:bin|obj)[\\/]'
                 }
         )
@@ -34,18 +35,27 @@ Describe 'GraphKit.Auth authored CSharp privacy' {
         @($result.Findings).Count | Should -Be 0
     }
 
-    It 'fails closed when an authored CSharp file is not strict UTF-8' {
+    It 'fails closed for invalid project-metadata encoding or an unapproved identifier' {
         $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('graphkit-auth-source-privacy-' + [guid]::NewGuid().ToString('N'))
         try {
             New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $fixtureRoot 'Valid.cs'), 'internal class Valid {}')
             [System.IO.File]::WriteAllBytes(
-                (Join-Path $fixtureRoot 'Invalid.cs'),
-                [byte[]] @(0x63, 0x6c, 0x61, 0x73, 0x73, 0x20, 0xc3, 0x28)
+                (Join-Path $fixtureRoot 'Invalid.props'),
+                [byte[]] @(0x3c, 0x50, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0xc3, 0x28)
             )
 
             {
                 Test-GraphKitAuthSourcePrivacy -SourceRoot $fixtureRoot -ModuleGuid ([guid]::Empty)
             } | Should -Throw '*strict UTF-8*'
+
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureRoot 'Invalid.props'),
+                '<Project><PropertyGroup><TenantId>01234567-89ab-4cde-8f01-23456789abcd</TenantId></PropertyGroup></Project>'
+            )
+            $result = Test-GraphKitAuthSourcePrivacy -SourceRoot $fixtureRoot -ModuleGuid ([guid]::Empty)
+            $result.Passed | Should -BeFalse
+            @($result.Findings).Category | Should -Contain 'GUID that is not a well-known or package id'
         }
         finally {
             Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue

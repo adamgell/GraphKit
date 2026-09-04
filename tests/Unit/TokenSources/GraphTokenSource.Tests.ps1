@@ -30,7 +30,12 @@ public static class Task6CredentialFixture
         using X509Certificate2 source = request.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddMinutes(-1),
             DateTimeOffset.UtcNow.AddHours(1));
-        return X509CertificateLoader.LoadPkcs12(source.Export(X509ContentType.Pkcs12), null);
+#pragma warning disable SYSLIB0057
+        return new X509Certificate2(
+            source.Export(X509ContentType.Pkcs12),
+            (string)null,
+            X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
     }
 
     public static SecureString CreateSecret()
@@ -135,10 +140,12 @@ public static class Task6PfxFixture
 
     public static string GetThumbprint(byte[] pfx, string password)
     {
-        using X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12(
+#pragma warning disable SYSLIB0057
+        using X509Certificate2 certificate = new(
             pfx,
             password,
             X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
         return certificate.Thumbprint;
     }
 }

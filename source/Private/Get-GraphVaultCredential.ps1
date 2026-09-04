@@ -343,6 +343,7 @@ function Assert-GraphSecretVersionSupported {
         return
     }
 
+    $null = Import-GraphSecretManagement
     $getSecret = Get-Command -Name Get-Secret -Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
     if ($null -eq $getSecret -or -not $getSecret.Parameters.ContainsKey('Version')) {
         throw "A secret version ('$Version') was requested for '$Name' but the loaded Microsoft.PowerShell.SecretManagement does not support per-secret versions. Store each immutable generation under a distinct secret name; Version metadata cannot be resolved through this Get-Secret API."

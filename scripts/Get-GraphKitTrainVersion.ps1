@@ -13,8 +13,8 @@ function Invoke-GraphKitGitBytes {
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; $null = $process.Start()
     if ($InputBytes.Length) { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) }
     $process.StandardInput.Close(); $output = [IO.MemoryStream]::new(); $process.StandardOutput.BaseStream.CopyTo($output)
-    $error = $process.StandardError.ReadToEnd(); $process.WaitForExit()
-    if ($process.ExitCode -notin $AllowedExitCodes) { throw "git $($Arguments -join ' ') failed: $error" }
+    $standardError = $process.StandardError.ReadToEnd(); $process.WaitForExit()
+    if ($process.ExitCode -notin $AllowedExitCodes) { throw "git $($Arguments -join ' ') failed: $standardError" }
     return ,$output.ToArray()
 }
 

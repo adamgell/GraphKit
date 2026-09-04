@@ -110,17 +110,17 @@ Describe 'Test-GraphTenant' {
             Credential = @{ ManagedIdentityClientId = '11111111-2222-3333-4444-555555555555' }
         }
     ) {
-        $profile = @{
+        $tenantProfileUnderTest = @{
             ProfileId = 'invalid-mi'; Name = $Case; Kind = 'lab'
             TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
             ClientId = $null; AuthMethod = 'ManagedIdentity'; Environment = 'Global'
             Credential = $Credential
         }
         if ($null -ne $TopLevelSelector) {
-            $profile.ManagedIdentityClientId = $TopLevelSelector
+            $tenantProfileUnderTest.ManagedIdentityClientId = $TopLevelSelector
         }
 
-        Test-GraphTenant -TenantProfile $profile | Should -BeFalse
+        Test-GraphTenant -TenantProfile $tenantProfileUnderTest | Should -BeFalse
     }
 
     It 'rejects a present canonical nested selector with a null, empty, or whitespace value' -ForEach @(
@@ -167,20 +167,20 @@ Describe 'Test-GraphTenant' {
         }
     ) {
         $credential = @{}
-        $profile = @{
+        $tenantProfileUnderTest = @{
             ProfileId = 'invalid-alias'; Name = $Case; Kind = 'lab'
             TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
             ClientId = $null; AuthMethod = 'ManagedIdentity'; Environment = 'Global'
             Credential = $credential
         }
         if ($Location -eq 'Profile') {
-            $profile[$SelectorName] = $null
+            $tenantProfileUnderTest[$SelectorName] = $null
         }
         else {
             $credential[$SelectorName] = $null
         }
 
-        Test-GraphTenant -TenantProfile $profile | Should -BeFalse
+        Test-GraphTenant -TenantProfile $tenantProfileUnderTest | Should -BeFalse
     }
 
     It 'documents false plus corrective re-registration for invalid successor metadata' {

@@ -29,9 +29,12 @@ public static class Task6CredentialFixture
         using X509Certificate2 source = request.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddMinutes(-1),
             DateTimeOffset.UtcNow.AddHours(1));
-        return X509CertificateLoader.LoadPkcs12(
+#pragma warning disable SYSLIB0057
+        return new X509Certificate2(
             source.Export(X509ContentType.Pkcs12),
-            password: null);
+            (string)null,
+            X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
     }
 
     public static SecureString CreateSecret()

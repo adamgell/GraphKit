@@ -9,8 +9,6 @@ namespace GraphKit.Auth;
 public sealed class GraphAuthHost : IDisposable
 {
     public const string ContractMarker = "GraphKit.Auth.Abi/1";
-
-    private const string ExpectedContractMarker = "GraphKit.Auth.Abi/1";
     private const string FactoryTypeName = "GraphKit.Auth.GraphTokenSourceFactory";
     private const int Running = 0;
     private const int ShutdownOwnerDisposingSources = 1;
@@ -383,12 +381,6 @@ public sealed class GraphAuthHost : IDisposable
         {
             throw IncompatibleContracts(
                 $"the loaded contracts assembly is named '{loadedIdentity.Name}'.");
-        }
-
-        if (!string.Equals(ContractMarker, ExpectedContractMarker, StringComparison.Ordinal))
-        {
-            throw IncompatibleContracts(
-                $"the loaded contract marker is '{ContractMarker}', not '{ExpectedContractMarker}'.");
         }
 
         string candidatePath = Path.Combine(

@@ -1058,23 +1058,14 @@ function New-GraphTokenSource {
 
     switch ($authMethod) {
         'Certificate' {
-            # -MsalFactory remains injectable for tests; when absent the REAL factory is
-            # used. It previously defaulted to a scriptblock that threw, which meant the
-            # module could not authenticate by any means outside a test.
-            $factory = $MsalFactory
-            if ($null -eq $factory) {
-                $factory = New-GraphMsalApplicationFactory -Profile $factoryProfile -Cloud $Cloud `
-                    -ExpectedCredentialGeneration $generation
-            }
-            return [ConfidentialClientTokenSource]::new($factory, 'Certificate', $audience, $clientId, $generation)
+            # A caller-supplied factory selects this legacy same-runspace compatibility
+            # path. Built-in authentication returned through GraphKit.Auth above.
+            return [ConfidentialClientTokenSource]::new(
+                $MsalFactory, 'Certificate', $audience, $clientId, $generation)
         }
         'ClientSecret' {
-            $factory = $MsalFactory
-            if ($null -eq $factory) {
-                $factory = New-GraphMsalApplicationFactory -Profile $Profile -Cloud $Cloud `
-                    -ExpectedCredentialGeneration $generation
-            }
-            return [ConfidentialClientTokenSource]::new($factory, 'ClientSecret', $audience, $clientId, $generation)
+            return [ConfidentialClientTokenSource]::new(
+                $MsalFactory, 'ClientSecret', $audience, $clientId, $generation)
         }
         'ManagedIdentity' {
             return [ManagedIdentityTokenSource]::new(
