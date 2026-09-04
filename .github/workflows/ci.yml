@@ -47,8 +47,8 @@ jobs:
 
       # Each row installs its exact PowerShell version rather than trusting the
       # runner image, then asserts the running version matches before doing work.
-      # Pinned release tags + direct GitHub release assets: no third-party action,
-      # no secrets, fork-safe.
+      # Pinned release tags + direct GitHub release assets + committed official
+      # checksums: no third-party action, no secrets, fork-safe.
       - name: Install PowerShell ${{ matrix.pwsh-version }}
         shell: pwsh
         run: |
@@ -68,16 +68,13 @@ jobs:
 
           $installDir = Join-Path $env:RUNNER_TOOL_CACHE "pwsh-$version"
           $archive = Join-Path $env:RUNNER_TEMP $asset
+          $hashMap = Join-Path $env:GITHUB_WORKSPACE '.github/powershell-release-sha256.json'
 
-          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
           Write-Host "Downloading $asset"
           Invoke-WebRequest -Uri "https://github.com/PowerShell/PowerShell/releases/download/v$version/$asset" -OutFile $archive
-
-          if ($IsWindows) {
-              Expand-Archive -Path $archive -DestinationPath $installDir -Force
-          } else {
-              tar -xzf $archive -C $installDir
-          }
+          & (Join-Path $env:GITHUB_WORKSPACE '.github/scripts/Install-VerifiedPowerShellArchive.ps1') `
+              -Version $version -AssetName $asset -ArchivePath $archive `
+              -InstallDirectory $installDir -HashMapPath $hashMap
 
           Add-Content -Path $env:GITHUB_PATH -Value $installDir
           Write-Host "Installed PowerShell $version to $installDir"
@@ -114,7 +111,7 @@ jobs:
           if ($resultFiles.Count -gt 1) {
               throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
           }
-          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 896 -AllowedSkips 0
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 1452 -AllowedSkips 0
           if ($LASTEXITCODE -ne 0) {
               throw 'The standalone whole-result gate failed.'
           }

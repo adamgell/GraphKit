@@ -22,7 +22,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
-$minimumTests = 896
+$minimumTests = 1452
 $allowedSkips = 0
 $allowedNotRun = 0
 

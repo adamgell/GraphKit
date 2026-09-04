@@ -17,6 +17,24 @@ $script:GraphKitAuthStage = $null
 $script:GraphKitAuthStageCaptureType = $null
 $script:GraphKitAuthAbiFixtureState = $null
 $script:GraphKitAuthAbiGitConfigState = $null
+$script:GraphKitAuthExpectedTestCount = 74
+
+function Assert-GraphKitAuthTestResult {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][xml] $Result)
+
+    $outcomes = @($Result.TestRun.Results.UnitTestResult | ForEach-Object { [string]$_.outcome })
+    $counters = $Result.TestRun.ResultSummary.Counters
+    $zeroCounterNames = @('failed','error','timeout','aborted','inconclusive','notExecuted',
+        'notRunnable','disconnected','warning','inProgress','pending')
+    $nonZeroCounters = @($zeroCounterNames | Where-Object { [int]$counters.$_ -ne 0 })
+    if ($outcomes.Count -ne $script:GraphKitAuthExpectedTestCount -or
+        @($outcomes | Where-Object { $_ -cne 'Passed' }).Count -ne 0 -or
+        [int]$counters.total -ne $outcomes.Count -or [int]$counters.executed -ne $outcomes.Count -or
+        [int]$counters.passed -ne $outcomes.Count -or $nonZeroCounters.Count -ne 0) {
+        throw "GraphKit.Auth machine-readable test result is incomplete: expected exactly $($script:GraphKitAuthExpectedTestCount); total=$($outcomes.Count), passed=$(@($outcomes | Where-Object { $_ -ceq 'Passed' }).Count)."
+    }
+}
 
 function Initialize-GraphKitAuthStageCapture {
     if ($null -ne $script:GraphKitAuthStageCaptureType) { return }
@@ -1343,16 +1361,7 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
             if ($LASTEXITCODE -ne 0) { throw 'GraphKit.Auth Release tests failed.' }
             $trxPath = Join-Path $resultRoot 'GraphKit.Auth.trx'
             [xml]$trx = Get-Content -LiteralPath $trxPath -Raw
-            $outcomes = @($trx.TestRun.Results.UnitTestResult | ForEach-Object { [string]$_.outcome })
-            $counters = $trx.TestRun.ResultSummary.Counters
-            $zeroCounterNames = @('failed','error','timeout','aborted','inconclusive','notExecuted',
-                'notRunnable','disconnected','warning','inProgress','pending')
-            $nonZeroCounters = @($zeroCounterNames | Where-Object { [int]$counters.$_ -ne 0 })
-            if ($outcomes.Count -lt 48 -or @($outcomes | Where-Object { $_ -cne 'Passed' }).Count -ne 0 -or
-                [int]$counters.total -ne $outcomes.Count -or [int]$counters.executed -ne $outcomes.Count -or
-                [int]$counters.passed -ne $outcomes.Count -or $nonZeroCounters.Count -ne 0) {
-                throw "GraphKit.Auth machine-readable test result is incomplete: total=$($outcomes.Count), passed=$(@($outcomes | Where-Object { $_ -ceq 'Passed' }).Count)."
-            }
+            Assert-GraphKitAuthTestResult -Result $trx
             $null = [IO.Directory]::CreateDirectory($providerPublish)
             & dotnet publish $providerProject -c Release --no-build --no-restore --no-self-contained -o $providerPublish
             if ($LASTEXITCODE -ne 0) { throw 'GraphKit.Auth provider publish failed.' }
