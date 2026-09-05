@@ -127,7 +127,7 @@ Describe 'Source hygiene' {
         # repositories, and hiding them would cost readability for no privacy gain.
         $patterns = @{
             'internal project name' = '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
-            'local user path'       = '/Users/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
+            'local user path'       = '/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|C:\\Users\\[A-Za-z0-9._-]+'
         }
 
         function Get-TokenDigest {

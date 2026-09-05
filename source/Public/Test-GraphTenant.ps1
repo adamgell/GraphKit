@@ -98,7 +98,10 @@ function Test-GraphTenant {
         $null = Assert-GraphTenantProfileAuthSchema -Profile $TenantProfile
     }
     catch {
-        return $false
+        if ($_.FullyQualifiedErrorId -ceq 'GraphKit.InvalidTenantProfileAuthSchema') {
+            return $false
+        }
+        throw
     }
 
     return $true

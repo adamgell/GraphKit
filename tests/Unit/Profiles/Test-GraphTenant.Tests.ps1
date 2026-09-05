@@ -189,6 +189,22 @@ Describe 'Test-GraphTenant' {
 
         $description | Should -Match '(?i)returns? false'
         $description | Should -Match '(?i)re-register'
+
+        InModuleScope GraphKit {
+            Mock Assert-GraphTenantProfileAuthSchema {
+                throw [System.InvalidOperationException]::new('schema implementation failure')
+            }
+            {
+                Test-GraphTenant -TenantProfile @{
+                    ProfileId = 'valid'; Name = 'Valid'; Kind = 'lab'
+                    TenantId = '3a4b5c6d-1111-2222-3333-444455556666'
+                    ClientId = '7d6e5f44-9999-8888-7777-666655554444'
+                    AuthMethod = 'ClientSecret'; Environment = 'Global'
+                    Credential = @{ VaultName = 'v'; SecretName = 's' }
+                }
+            } | Should -Throw -ExceptionType ([System.InvalidOperationException]) `
+                -ExpectedMessage '*schema implementation failure*'
+        }
     }
 
     It 'preserves the literal public parameter signature' {

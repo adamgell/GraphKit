@@ -1238,6 +1238,7 @@ Describe 'Both publisher paths consume the canonical proof verifier' {
         $privateGuid = '87f7ad68-c47e-48b4-a248-49602bc19e84'
         $thumbprint = '0123456789abcdef0123456789abcdef01234567'
         $localPath = 'C:\Users\GraphKitPrivacyCSharp\source.cs'
+        $linuxLocalPath = '/home/GraphKitPrivacyCSharp/source.cs'
         $internalProject = 'IntuneHealthAutomation'
         Add-GraphKitFixturePayloadText -Fixture $script:fixture `
             -EntryName 'Diagnostics/Fixture.cs' `
@@ -1246,6 +1247,7 @@ internal static class Fixture {
     private const string TenantId = "$privateGuid";
     private const string CertificateThumbprint = "$thumbprint";
     private const string SourcePath = @"$localPath";
+    private const string LinuxSourcePath = "$linuxLocalPath";
     private const string Project = "$internalProject";
 }
 "@
@@ -1257,7 +1259,7 @@ internal static class Fixture {
         $result.Output | Should -Match 'certificate thumbprint'
         $result.Output | Should -Match 'local user path'
         $result.Output | Should -Match 'internal project name'
-        foreach ($sentinel in @($privateGuid, $thumbprint, $localPath, $internalProject)) {
+        foreach ($sentinel in @($privateGuid, $thumbprint, $localPath, $linuxLocalPath, $internalProject)) {
             $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
         }
     }

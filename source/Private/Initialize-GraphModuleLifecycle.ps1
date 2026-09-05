@@ -8,12 +8,12 @@
 
     Shutdown has two independent gates: every operation lease must drain, and every
     cancellation callback must finish. Cleanup starts asynchronously only after both
-    gates close. Module removal waits for CleanupDone only up to its caller-provided
+    gates close. Module removal waits through WaitForCleanup only up to its caller-provided
     deadline; a blocking or reentrant Dispose therefore cannot wedge OnRemove.
 #>
 
 $script:GraphKitModuleLifecycleStateTypeName = 'GraphKit.Internal.RuntimeV1.ModuleLifecycleState'
-$script:GraphKitModuleLifecycleContractMarker = 'GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.1'
+$script:GraphKitModuleLifecycleContractMarker = 'GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.2'
 
 function Assert-GraphModuleLifecycleTypeContract {
     [CmdletBinding()]
@@ -66,7 +66,6 @@ function Assert-GraphModuleLifecycleTypeContract {
         @{ Name = 'SyncRoot'; PropertyType = [object] }
         @{ Name = 'ShutdownCts'; PropertyType = [System.Threading.CancellationTokenSource] }
         @{ Name = 'Drained'; PropertyType = [System.Threading.ManualResetEventSlim] }
-        @{ Name = 'CleanupDone'; PropertyType = [System.Threading.ManualResetEventSlim] }
         @{ Name = 'OwnedResources'; PropertyType = [System.Collections.Generic.List[System.IDisposable]] }
         @{ Name = 'HttpClients'; PropertyType = [System.Collections.Generic.Dictionary[string, object]] }
         @{ Name = 'StopRequested'; PropertyType = [bool] }
@@ -100,6 +99,7 @@ function Assert-GraphModuleLifecycleTypeContract {
         @{ Name = 'TryScheduleCleanup'; ReturnType = 'System.Void'; Parameters = [string[]] @() }
         @{ Name = 'MarkCleanupDeferred'; ReturnType = 'System.Void'; Parameters = [string[]] @() }
         @{ Name = 'GetFailures'; ReturnType = 'System.Exception[]'; Parameters = [string[]] @() }
+        @{ Name = 'WaitForCleanup'; ReturnType = 'System.Boolean'; Parameters = [string[]] @('System.Int32') }
     )
     $publicMethods = @($Type.GetMethods($publicInstance))
     foreach ($requiredMethod in $requiredMethods) {
@@ -161,7 +161,7 @@ public sealed class ModuleLifecycleState
 {
     public static string ContractMarker
     {
-        get { return "GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.1"; }
+        get { return "GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.2"; }
     }
 
     private readonly object _stateSync = new object();
@@ -170,6 +170,8 @@ public sealed class ModuleLifecycleState
     private readonly Dictionary<string, object> _httpClients =
         new Dictionary<string, object>(StringComparer.Ordinal);
     private readonly List<Exception> _failures = new List<Exception>();
+    private readonly TaskCompletionSource<bool> _cleanupCompletion =
+        new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private bool _stopRequested;
     private bool _cleanupStarted;
@@ -184,7 +186,6 @@ public sealed class ModuleLifecycleState
     {
         ShutdownCts = new CancellationTokenSource();
         Drained = new ManualResetEventSlim(true);
-        CleanupDone = new ManualResetEventSlim(false);
     }
 
     // The HTTP-client cache has its own lock because its factory is PowerShell
@@ -192,7 +193,6 @@ public sealed class ModuleLifecycleState
     public object SyncRoot { get { return _syncRoot; } }
     public CancellationTokenSource ShutdownCts { get; private set; }
     public ManualResetEventSlim Drained { get; private set; }
-    public ManualResetEventSlim CleanupDone { get; private set; }
     public List<IDisposable> OwnedResources { get { return _ownedResources; } }
     public Dictionary<string, object> HttpClients { get { return _httpClients; } }
 
@@ -344,6 +344,15 @@ public sealed class ModuleLifecycleState
         lock (_stateSync) { return _failures.ToArray(); }
     }
 
+    public bool WaitForCleanup(int timeoutMilliseconds)
+    {
+        if (timeoutMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException("timeoutMilliseconds");
+        }
+        return _cleanupCompletion.Task.Wait(timeoutMilliseconds);
+    }
+
     private void CancellationCompleted(Task completed)
     {
         lock (_stateSync)
@@ -391,7 +400,7 @@ public sealed class ModuleLifecycleState
 
         // Disposal never runs on the Stop, OnRemove, cancellation-callback, or
         // final-operation thread. A blocking/reentrant resource can delay only
-        // this cleanup task; the caller observes the bounded CleanupDone wait.
+        // this cleanup task; the caller observes the bounded WaitForCleanup wait.
         _cleanupTask = Task.Run(() => DisposeResources(resources));
     }
 
@@ -413,8 +422,13 @@ public sealed class ModuleLifecycleState
         }
         finally
         {
+            try { ShutdownCts.Dispose(); }
+            catch (Exception ex) { AddFailure(ex); }
+            try { Drained.Dispose(); }
+            catch (Exception ex) { AddFailure(ex); }
+
             lock (_stateSync) { _cleanupComplete = true; }
-            CleanupDone.Set();
+            _cleanupCompletion.TrySetResult(true);
         }
     }
 
@@ -579,7 +593,7 @@ function Stop-GraphModule {
     }
 
     $remaining = [Math]::Max(0, $DrainTimeoutMilliseconds - [int] $watch.ElapsedMilliseconds)
-    $cleanupObserved = $State.CleanupDone.Wait($remaining)
+    $cleanupObserved = $State.WaitForCleanup($remaining)
     $watch.Stop()
 
     if (-not $cleanupObserved) {

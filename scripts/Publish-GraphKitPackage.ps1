@@ -243,9 +243,6 @@ switch ($Channel) {
     }
 
     'GitHubRelease' {
-        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-            throw 'The gh CLI is required for the GitHubRelease channel and was not found on PATH.'
-        }
         if ($Destination -notmatch '^[^/]+/[^/]+$') {
             throw "For -Channel GitHubRelease, -Destination must be owner/repo; got '$Destination'."
         }
@@ -255,6 +252,9 @@ switch ($Channel) {
         # This is an outward publication: it sends the package to GitHub. It only happens
         # under an explicit ShouldProcess decision, never as a side effect.
         if ($PSCmdlet.ShouldProcess("$Destination release $tag", 'Upload proof and package assets to GitHub release')) {
+            if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                throw 'The gh CLI is required for the GitHubRelease channel and was not found on PATH.'
+            }
             $exists = (& gh release view $tag --repo $Destination --json tagName 2>$null)
             if ($LASTEXITCODE -ne 0) {
                 & gh release create $tag --repo $Destination --title "GraphKit $moduleVersion" --notes "GraphKit $moduleVersion. sha256 $hash" --prerelease=false

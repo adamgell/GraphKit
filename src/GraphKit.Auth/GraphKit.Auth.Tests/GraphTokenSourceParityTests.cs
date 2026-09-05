@@ -16,7 +16,10 @@ public sealed class GraphTokenSourceParityTests
     private const string MatrixSha256 =
         "c6953120ea3a29966acabf671a193e7ff51b38d561fb0028a2a585177dea0eb0";
     private static readonly DateTimeOffset InjectedNow =
-        DateTimeOffset.Parse("2026-08-31T12:00:00+00:00", null);
+        DateTimeOffset.Parse(
+            "2026-08-31T12:00:00+00:00",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None);
 
     public static IEnumerable<object[]> SemanticRows =>
         ParityMatrix.LoadFixture().Rows.Select(static row => new object[] { row });

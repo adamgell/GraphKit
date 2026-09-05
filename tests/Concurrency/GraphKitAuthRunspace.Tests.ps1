@@ -345,7 +345,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
                     $cleanupError = ($_ | Out-String)
                 }
             }
-            $cleanupObserved = $null -ne $state -and $state.CleanupDone.Wait(5000)
+            $cleanupObserved = $null -ne $state -and $state.WaitForCleanup(5000)
             $moduleAbsent = $null -eq (Get-Module -Name GraphKit)
             if ($null -ne $state) {
                 $stopRequested = [bool] $state.StopRequested
@@ -500,7 +500,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
                     $cleanupError = ($_ | Out-String)
                 }
             }
-            $cleanupObserved = $null -ne $state -and $state.CleanupDone.Wait(5000)
+            $cleanupObserved = $null -ne $state -and $state.WaitForCleanup(5000)
             $moduleAbsent = $null -eq (Get-Module -Name GraphKit)
             if ($null -ne $state) {
                 $stopRequested = [bool] $state.StopRequested
@@ -652,7 +652,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
                     $cleanupError = ($_ | Out-String)
                 }
             }
-            $cleanupObserved = $null -ne $state -and $state.CleanupDone.Wait(5000)
+            $cleanupObserved = $null -ne $state -and $state.WaitForCleanup(5000)
             $moduleAbsent = $null -eq (Get-Module -Name GraphKit)
             if ($null -ne $state) {
                 $stopRequested = [bool] $state.StopRequested
@@ -1452,7 +1452,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
 
                     Remove-Module -ModuleInfo $module -Force -ErrorAction Stop
                     $moduleRemoved = $true
-                    $cleanupObserved = $state.CleanupDone.Wait(5000)
+                    $cleanupObserved = $state.WaitForCleanup(5000)
                     $cleanupComplete = [bool] $state.CleanupComplete
                     $activeOperations = [int] $state.ActiveOperations
                     $ownedResourceCount = [int] $state.OwnedResources.Count

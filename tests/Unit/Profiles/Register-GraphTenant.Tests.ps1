@@ -62,7 +62,8 @@ Describe 'Register-GraphTenant' {
         $invalidStore = Join-Path $TestDrive ("profiles-{0}.json" -f [guid]::NewGuid())
         {
             Register-GraphTenant -ProfileId 'invalid-vault-cert' -Name 'Invalid' -Kind 'lab' `
-                -TenantId $script:tenantId -Environment 'Global' -AuthMethod 'Certificate' `
+                -TenantId $script:tenantId -ClientId '7d6e5f44-9999-8888-7777-666655554444' `
+                -Environment 'Global' -AuthMethod 'Certificate' `
                 -VaultName 'GraphKit' -CertificateName 'certificate-pfx' `
                 -CertificatePasswordVaultName 'GraphKit' -StorePath $invalidStore
         } | Should -Throw -ExpectedMessage '*must include both*'

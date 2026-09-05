@@ -381,6 +381,37 @@ process
 
 begin
 {
+    function Get-GraphKitValidatedTrainVersion
+    {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param
+        (
+            [Parameter(Mandatory)]
+            [string]
+            $VersionScript,
+
+            [Parameter(Mandatory)]
+            [string]
+            $RepositoryRoot
+        )
+
+        $versionOutput = @(
+            & $VersionScript -RepositoryRoot $RepositoryRoot -ErrorAction Stop
+        )
+        if ($versionOutput.Count -ne 1 -or
+            $versionOutput[0] -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $versionOutput[0]))
+        {
+            throw (
+                "The GraphKit train-version script must return exactly one non-empty string; " +
+                "received $($versionOutput.Count) output object(s)."
+            )
+        }
+
+        return ([string] $versionOutput[0]).Trim()
+    }
+
     # Find build config if not specified.
     if (-not $BuildConfig)
     {
@@ -540,7 +571,8 @@ begin
         Write-Verbose -Message "Bootstrap completed. Handing back to InvokeBuild."
 
         $versionScript = Join-Path $PSScriptRoot 'scripts/Get-GraphKitTrainVersion.ps1'
-        $env:ModuleVersion = (& $versionScript -RepositoryRoot $PSScriptRoot).Trim()
+        $env:ModuleVersion = Get-GraphKitValidatedTrainVersion `
+            -VersionScript $versionScript -RepositoryRoot $PSScriptRoot
 
         if ($PSBoundParameters.ContainsKey('ResolveDependency'))
         {

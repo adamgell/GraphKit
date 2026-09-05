@@ -100,7 +100,7 @@ function Test-GraphKitPackagePrivacyText {
     )
 
     $fixedPatterns = [ordered] @{
-        'local user path' = '(?i)(?:/Users/[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._-]+)'
+        'local user path' = '(?i)(?:/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._-]+)'
         'internal project name' = '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
     }
     foreach ($category in $fixedPatterns.Keys) {
@@ -376,7 +376,6 @@ function Test-GraphKitPackagePrivacy {
     [int] $textEntriesScanned = 0
     [int] $binaryEntriesScanned = 0
 
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
     try {
         $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $PackagePath).ProviderPath)
     }

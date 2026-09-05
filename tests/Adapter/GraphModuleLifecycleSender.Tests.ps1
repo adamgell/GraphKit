@@ -410,7 +410,7 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
             $handler.Exited.Task.IsCompleted | Should -BeTrue
             $result.TransportException | Should -Not -BeNullOrEmpty
             $result.TransportException.Data['GraphKit.OperationCancellation'] | Should -BeTrue
-            $state.CleanupDone.Wait(5000) | Should -BeTrue
+            $state.WaitForCleanup(5000) | Should -BeTrue
             $state.ActiveOperations | Should -Be 0
             $state.CleanupComplete | Should -BeTrue
             $state.OwnedResources.Count | Should -Be 0

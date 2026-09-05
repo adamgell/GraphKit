@@ -203,7 +203,10 @@ internal sealed class GraphTokenSource : IGraphTokenSource
         }
 
         _disposalCancellation.Dispose();
-        _operationsDrained.Dispose();
+        lock (_drainGate)
+        {
+            _operationsDrained.Dispose();
+        }
         Volatile.Write(ref _disposeState, 2);
 
         if (cleanupFailed)

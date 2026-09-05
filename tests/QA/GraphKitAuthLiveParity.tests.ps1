@@ -121,7 +121,7 @@ $task8EvidenceMutationCases = @(
     @{ Kind = 'unix-path'; Value = '/Users/task8-secret-sentinel/profile.json' }
     @{ Kind = 'windows-path'; Value = 'C:\\Users\\task8-secret-sentinel\\profile.json' }
     @{ Kind = 'unknown-nested'; Value = 'task8-secret-sentinel' }
-    @{ Kind = 'string-count'; Value = '7' }
+    @{ Kind = 'string-count'; Value = 'task8-string-count-sentinel' }
 )
 
 BeforeAll {
@@ -1117,7 +1117,7 @@ switch ($HookKind) {
     'EvidenceMutation' {
         $hooks.MutateEvidence = {
             param($record)
-            if ($MutationValue -ceq '7') {
+            if ($MutationValue -ceq 'task8-string-count-sentinel') {
                 $record.read.rowCount = $MutationValue
             }
             elseif ($MutationValue -ceq '0.4.0-task8-secret-sentinel') {
@@ -2083,7 +2083,7 @@ Describe 'Task 8 guarded parameter and package binding' {
             -AuthMode Certificate -DryRun
 
         Assert-Task8SafeFailure -Invocation $result -Stage Artifact -Code ArtifactRejected
-        $result.Output | Should -Not -Match [regex]::Escape($sentinel)
+        $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
         @((Get-Task8TraceRecords $result.TracePath) | Where-Object event -eq 'root-created').Count |
             Should -Be 0
     }
@@ -2106,7 +2106,7 @@ Describe 'Task 8 guarded parameter and package binding' {
             -AuthMode $sentinel -DryRun
 
         Assert-Task8SafeFailure -Invocation $result -Stage Artifact -Code ArtifactRejected
-        $result.Output | Should -Not -Match [regex]::Escape($sentinel)
+        $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
         @((Get-Task8TraceRecords $result.TracePath) | Where-Object event -eq 'root-created').Count |
             Should -Be 0
     }
@@ -2120,7 +2120,7 @@ Describe 'Task 8 guarded parameter and package binding' {
 
         Assert-Task8SafeFailure -Invocation $result -Stage Artifact -Code ArtifactRejected
         $result.Data.execution | Should -BeExactly 'Live'
-        $result.Output | Should -Not -Match [regex]::Escape($sentinel)
+        $result.Output | Should -Not -Match ([regex]::Escape($sentinel))
         @((Get-Task8TraceRecords $result.TracePath) | Where-Object event -eq 'root-created').Count |
             Should -Be 0
     }
@@ -2405,8 +2405,8 @@ Describe 'Task 8 isolated import, routing, and cleanup' {
         $result.Data.read.rowCount | Should -Be 0
         @((Get-Task8TraceRecords $result.TracePath) | Where-Object event -eq 'forbidden-seam').Count |
             Should -Be 0
-        $result.Output | Should -Not -Match [regex]::Escape($script:repoRoot)
-        $result.Output | Should -Not -Match [regex]::Escape($TestDrive)
+        $result.Output | Should -Not -Match ([regex]::Escape($script:repoRoot))
+        $result.Output | Should -Not -Match ([regex]::Escape($TestDrive))
     }
 
     It 'refuses an already loaded GraphKit module without removing the caller-owned module' {
@@ -2946,7 +2946,7 @@ Describe 'Task 8 evidence schema and stream guard' {
 
         Assert-Task8SafeFailure -Invocation $result -Stage Evidence -Code EvidenceRejected `
             -PackageSha256 $candidate.PackageSha256
-        $result.Output | Should -Not -Match [regex]::Escape($Value)
+        $result.Output | Should -Not -Match ([regex]::Escape($Value))
     }
 
     It 'captures success, error, warning, verbose, debug, information, and host sentinels' {

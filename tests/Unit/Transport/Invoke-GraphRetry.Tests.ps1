@@ -94,7 +94,7 @@ BeforeAll {
 
     function New-TestSend {
         return {
-            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
+            param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding, $TenantBindingContext)
             $script:sendCount++
             $script:lastSendHeaders = $Headers
             $script:lastTokenAcquisitionKey = $TokenAcquisitionKey
@@ -557,7 +557,7 @@ Describe 'Invoke-GraphRetry (virtual clock)' {
                 $script:cancelDuringSendSource = $cts
                 $injections = New-TestInjections
                 $injections.Send = {
-                    param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding)
+                    param($Uri, $Method, $Headers, $Body, $CancellationToken, $CredentialPolicy, $TokenSource, $ForceRefresh, $TokenAcquisitionKey, $ExpectedAuthority, $TargetTenantId, $VerifyTenantBinding, $TenantBindingContext)
                     $script:cancelDuringSendSource.Cancel()
                     throw [System.OperationCanceledException]::new('single-flight waiter cancelled')
                 }

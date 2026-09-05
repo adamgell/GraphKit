@@ -2,6 +2,22 @@
     Private: validate the successor profile identity discriminator shared by
     registration, metadata validation, and context construction.
 #>
+function New-GraphTenantProfileAuthSchemaErrorRecord {
+    [CmdletBinding()]
+    [OutputType([System.Management.Automation.ErrorRecord])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+
+    return [System.Management.Automation.ErrorRecord]::new(
+        [System.ArgumentException]::new($Message),
+        'GraphKit.InvalidTenantProfileAuthSchema',
+        [System.Management.Automation.ErrorCategory]::InvalidData,
+        $null
+    )
+}
+
 function Assert-GraphTenantProfileAuthSchema {
     [CmdletBinding()]
     [OutputType([System.Management.Automation.PSCustomObject])]
@@ -46,31 +62,31 @@ function Assert-GraphTenantProfileAuthSchema {
         }
     }
     if ($unsupportedSelectors.Count -ne 0) {
-        throw "AuthMethod '$authMethod' contains unsupported identity selector metadata ($($unsupportedSelectors -join ', ')). Re-register the profile using only top-level ClientId for Certificate/ClientSecret or Credential.ClientId for user-assigned ManagedIdentity."
+        throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod '$authMethod' contains unsupported identity selector metadata ($($unsupportedSelectors -join ', ')). Re-register the profile using only top-level ClientId for Certificate/ClientSecret or Credential.ClientId for user-assigned ManagedIdentity.")
     }
 
     switch ($authMethod) {
         { $_ -in @('Certificate', 'ClientSecret') } {
             if (-not $hasTopLevelClientId) {
-                throw "AuthMethod '$authMethod' requires a non-empty, non-zero top-level ClientId. Re-register the profile with -ClientId."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod '$authMethod' requires a non-empty, non-zero top-level ClientId. Re-register the profile with -ClientId.")
             }
             if ($hasNestedClientId) {
-                throw "AuthMethod '$authMethod' must not declare ManagedIdentityClientId or Credential.ClientId. Re-register the profile with only the top-level application ClientId."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod '$authMethod' must not declare ManagedIdentityClientId or Credential.ClientId. Re-register the profile with only the top-level application ClientId.")
             }
 
             $parsed = [guid]::Empty
             if (-not [guid]::TryParse($topLevelClientId, [ref] $parsed)) {
-                throw "AuthMethod '$authMethod' ClientId '$topLevelClientId' is not a valid GUID. Re-register the profile with a non-zero application ClientId."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod '$authMethod' ClientId '$topLevelClientId' is not a valid GUID. Re-register the profile with a non-zero application ClientId.")
             }
             if ($parsed -eq [guid]::Empty) {
-                throw "AuthMethod '$authMethod' requires a non-zero ClientId. Re-register the profile with the application ClientId."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod '$authMethod' requires a non-zero ClientId. Re-register the profile with the application ClientId.")
             }
             $applicationClientId = $parsed.ToString('D')
             break
         }
         'ManagedIdentity' {
             if ($hasNonNullTopLevelClientId) {
-                throw "AuthMethod 'ManagedIdentity' must not declare top-level ClientId. Re-register the profile and use -ManagedIdentityClientId only for a user-assigned identity."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod 'ManagedIdentity' must not declare top-level ClientId. Re-register the profile and use -ManagedIdentityClientId only for a user-assigned identity.")
             }
             $selector = if ($hasNestedClientId) {
                 $nestedClientId
@@ -80,14 +96,14 @@ function Assert-GraphTenantProfileAuthSchema {
             }
             if ($null -ne $selector) {
                 if ([string]::IsNullOrWhiteSpace($selector)) {
-                    throw 'ManagedIdentity Credential.ClientId must be a non-empty, non-zero GUID when the key is present. Re-register the profile or omit Credential.ClientId entirely for system-assigned identity.'
+                    throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message 'ManagedIdentity Credential.ClientId must be a non-empty, non-zero GUID when the key is present. Re-register the profile or omit Credential.ClientId entirely for system-assigned identity.')
                 }
                 $parsed = [guid]::Empty
                 if (-not [guid]::TryParse($selector, [ref] $parsed)) {
-                    throw "ManagedIdentityClientId / Credential.ClientId '$selector' is not a valid GUID. Re-register the profile with a non-zero user-assigned managed-identity client GUID."
+                    throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "ManagedIdentityClientId / Credential.ClientId '$selector' is not a valid GUID. Re-register the profile with a non-zero user-assigned managed-identity client GUID.")
                 }
                 if ($parsed -eq [guid]::Empty) {
-                    throw 'ManagedIdentity requires a non-zero ManagedIdentityClientId / Credential.ClientId for user-assigned identity. Re-register the profile or omit the selector for system-assigned identity.'
+                    throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message 'ManagedIdentity requires a non-zero ManagedIdentityClientId / Credential.ClientId for user-assigned identity. Re-register the profile or omit the selector for system-assigned identity.')
                 }
                 $managedIdentityClientId = $parsed.ToString('D')
             }
@@ -95,12 +111,12 @@ function Assert-GraphTenantProfileAuthSchema {
         }
         'BearerToken' {
             if ($hasNonNullTopLevelClientId -or $hasNestedClientId) {
-                throw "AuthMethod 'BearerToken' must not declare ClientId, ManagedIdentityClientId, or Credential.ClientId. Re-register the profile without a client identity selector."
+                throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "AuthMethod 'BearerToken' must not declare ClientId, ManagedIdentityClientId, or Credential.ClientId. Re-register the profile without a client identity selector.")
             }
             break
         }
         default {
-            throw "Unknown AuthMethod '$authMethod'. Re-register the profile with Certificate, ClientSecret, ManagedIdentity, or BearerToken."
+            throw (New-GraphTenantProfileAuthSchemaErrorRecord -Message "Unknown AuthMethod '$authMethod'. Re-register the profile with Certificate, ClientSecret, ManagedIdentity, or BearerToken.")
         }
     }
 

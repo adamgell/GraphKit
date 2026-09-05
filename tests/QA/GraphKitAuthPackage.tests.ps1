@@ -1312,7 +1312,9 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                     $script:GraphKitAuthStageCaptureType::SetOwnerOnly($movedVersionRootB, $true, $false)
                 }
                 if (Test-Path -LiteralPath $stageRootA -PathType Container) {
-                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $false)
+                    # Prepare owns mutations beneath this authority root, so the fixture
+                    # must leave the parent writable while both candidate versions remain sealed.
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootA, $true, $true)
                 }
                 if (Test-Path -LiteralPath $stageRootB -PathType Container) {
                     $script:GraphKitAuthStageCaptureType::SetOwnerOnly($stageRootB, $true, $false)
@@ -1353,6 +1355,16 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $helper | Should -Match 'catch\s*\(EntryPointNotFoundException'
         $helper | Should -Match 'ENOSYS|errno\s*==\s*38'
         $helper | Should -Match 'renameat2[^\r\n]*unavailable[^\r\n]*no fallback'
+
+        Initialize-GraphKitAuthStageCapture
+        $normalizer = $script:GraphKitAuthStageCaptureType.GetMethod(
+            'NormalizeWindowsPhysicalPath',
+            [Reflection.BindingFlags]'NonPublic, Static')
+        $normalizer | Should -Not -BeNullOrEmpty
+        $normalizer.Invoke($null, [object[]] @('\\?\UNC\server\share\file.bin')) |
+            Should -BeExactly '\\server\share\file.bin'
+        $normalizer.Invoke($null, [object[]] @('\\?\C:\repo\file.bin')) |
+            Should -BeExactly 'C:\repo\file.bin'
     }
 
     It 'reports an existing atomic destination as a collision and changes neither directory' {

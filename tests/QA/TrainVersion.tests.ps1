@@ -86,6 +86,7 @@ BeforeAll {
                 'helper-case-alias',
                 'case-collision',
                 'normalization-collision',
+                'stderr-flood',
                 'reverse-untracked'
             )] [string] $Mode,
             [hashtable] $Configuration = @{}
@@ -267,6 +268,17 @@ switch ($payload.Mode) {
             $result.Output = $joined
         }
         Write-Result $result
+    }
+    'stderr-flood' {
+        if ($isObjectFormat) {
+            [Console]::Error.Write([string]::new([char] 'x', 1MB))
+            Write-Result ([pscustomobject] @{
+                ExitCode = 0
+                Output = [Text.Encoding]::ASCII.GetBytes("sha1`n")
+                Error = ''
+            })
+        }
+        Write-Result (Invoke-RealGit $gitArguments)
     }
     'reverse-untracked' {
         $result = Invoke-RealGit $gitArguments
@@ -560,6 +572,21 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
         $output.Trim() | Should -Be 'sha1'
         $invocationLog | Should -Exist -Because 'the injected process must prove the shim, not a PATH-resolved real Git, handled the call'
         (Get-Content -LiteralPath $invocationLog -Raw) | Should -Match 'rev-parse.*--show-object-format'
+
+        $floodShim = New-R8PortableGitShim -Mode stderr-flood
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$floodShim$([IO.Path]::PathSeparator)$savedPath"
+            $floodResult = Get-R8TrainVersionWithTimeout -RepositoryRoot $root -TimeoutMilliseconds 30000
+        }
+        finally {
+            $env:PATH = $savedPath
+        }
+        Assert-R8PortableGitShimInvoked -ShimDirectory $floodShim
+        $floodResult.Running | Should -BeFalse `
+            -Because 'stdout and stderr must drain concurrently even when stderr exceeds the pipe buffer'
+        $floodResult.ExitCode | Should -Be 0 -Because $floodResult.Output
+        $floodResult.Output | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
     }
 
     It 'ignores a malicious ambient legacy helper and remains deterministic across repeated calls in one process' {
@@ -1054,8 +1081,8 @@ $source
         }
         finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state.sourceStateSha256 | Should -Be 'a3bf0d85293ed96fd0b8fbef7336beb2dccdc081bb2d878386d2fa5cb46dba10'
-        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.da3bf0d85293e$'
+        $state.sourceStateSha256 | Should -Be '2580391fda4b94fd209d16941dda7e9472f049a5fa5f9bb5dfe8f73d63f7844a'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d2580391fda4b$'
     }
 }
 
@@ -1075,6 +1102,9 @@ Describe 'GraphKit R8 root-anchored source capture' -Tag 'QA' {
         $helperSource | Should -Match 'Architecture\.Arm64 => DarwinFStat\('
         $helperSource | Should -Match 'Architecture\.X64 => DarwinFStatInode64\('
         $helperSource | Should -Match 'catch \(EntryPointNotFoundException exception\)'
+        $helperSource | Should -Match 'FileTraverse\s*=\s*0x0020'
+        $helperSource | Should -Match 'FileTraverse\s*\|\s*FileReadAttributes\s*\|\s*Synchronize'
+        $helperSource | Should -Match 'directory\s*\?\s*FileListDirectory\s*\|\s*FileTraverse'
     }
 
     It 'rejects Windows reserved-device, ADS, and suspicious short-alias path forms without a platform skip' {

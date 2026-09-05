@@ -154,5 +154,14 @@ Describe 'Publish-GraphKitPackage refusals' {
         $dryRun.ExitCode | Should -Be 0 -Because $dryRun.Output
         $dryRun.Output | Should -BeLike '*NONE - WhatIf-only unverified dry run*'
         $dryRun.Output | Should -Not -BeLike '*releases/download/v9.9.9/*'
+
+        $publisherSource = [IO.File]::ReadAllText($script:publish)
+        $githubBranchIndex = $publisherSource.IndexOf("'GitHubRelease' {", [StringComparison]::Ordinal)
+        $shouldProcessIndex = $publisherSource.IndexOf('$PSCmdlet.ShouldProcess', $githubBranchIndex, [StringComparison]::Ordinal)
+        $ghAvailabilityIndex = $publisherSource.IndexOf('Get-Command gh', $githubBranchIndex, [StringComparison]::Ordinal)
+        $githubBranchIndex | Should -BeGreaterOrEqual 0
+        $shouldProcessIndex | Should -BeGreaterThan $githubBranchIndex
+        $ghAvailabilityIndex | Should -BeGreaterThan $shouldProcessIndex `
+            -Because 'WhatIf must not require a publication-only CLI'
     }
 }

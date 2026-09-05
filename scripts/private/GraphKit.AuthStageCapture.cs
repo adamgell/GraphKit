@@ -821,7 +821,16 @@ public static class GraphKitAuthStageCapture
         {
             throw new IOException($"Could not resolve the opened Windows path (Win32 {Marshal.GetLastWin32Error()}).");
         }
-        string value = builder.ToString();
+        return NormalizeWindowsPhysicalPath(builder.ToString());
+    }
+
+    private static string NormalizeWindowsPhysicalPath(string value)
+    {
+        const string extendedUncPrefix = @"\\?\UNC\";
+        if (value.StartsWith(extendedUncPrefix, StringComparison.Ordinal))
+        {
+            return @"\\" + value.Substring(extendedUncPrefix.Length);
+        }
         return value.StartsWith(@"\\?\", StringComparison.Ordinal) ? value.Substring(4) : value;
     }
 

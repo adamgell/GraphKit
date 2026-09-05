@@ -927,7 +927,7 @@ public sealed class Task7LegacyAuthenticationResult
                         }
                         finally {
                             if ($null -ne $module) { Remove-Module $module -Force -ErrorAction SilentlyContinue }
-                            $cleaned = $null -ne $state -and $state.CleanupDone.Wait(5000)
+                            $cleaned = $null -ne $state -and $state.WaitForCleanup(5000)
                             $module = $null
                             $state = $null
                         }

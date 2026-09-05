@@ -654,6 +654,7 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
     {
         private const uint FileReadData = 0x0001;
         private const uint FileListDirectory = 0x0001;
+        private const uint FileTraverse = 0x0020;
         private const uint FileReadAttributes = 0x0080;
         private const uint Synchronize = 0x00100000;
         private const uint GenericRead = 0x80000000;
@@ -715,7 +716,7 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
         {
             SafeFileHandle handle = CreateFileW(
                 root,
-                FileReadAttributes | Synchronize,
+                FileTraverse | FileReadAttributes | Synchronize,
                 ShareRead | ShareWrite | ShareDelete,
                 IntPtr.Zero,
                 OpenExisting,
@@ -755,7 +756,8 @@ namespace __GRAPHKIT_SOURCE_CAPTURE_NAMESPACE__
                     ObjectName = unicodeStringPointer,
                     Attributes = 0
                 };
-                uint access = FileReadAttributes | Synchronize | (directory ? FileListDirectory : GenericRead | FileReadData);
+                uint access = FileReadAttributes | Synchronize |
+                    (directory ? FileListDirectory | FileTraverse : GenericRead | FileReadData);
                 uint options = FileOpenReparsePoint | FileSynchronousIoNonAlert | (directory ? FileDirectoryFile : FileNonDirectoryFile);
                 int status = NtCreateFile(
                     out raw,

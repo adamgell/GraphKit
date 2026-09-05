@@ -158,7 +158,7 @@ Describe 'GraphKit module lifecycle' {
     It 'pins the compiled lifecycle coordinator to the expected namespace and ABI surface' {
         InModuleScope GraphKit {
             $expectedTypeName = 'GraphKit.Internal.RuntimeV1.ModuleLifecycleState'
-            $expectedMarker = 'GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.1'
+            $expectedMarker = 'GraphKit.ModuleLifecycle.RuntimeV1/2026-08-30.2'
             $stateType = $expectedTypeName -as [type]
 
             $stateType | Should -Not -BeNullOrEmpty
@@ -206,7 +206,8 @@ Describe 'GraphKit module lifecycle' {
                 } $sharedState
             } -ArgumentList $script:BuiltManifest, $stateKey
 
-            $state.ShutdownCts.Token.WaitHandle.WaitOne(5000) | Should -BeTrue -Because 'Stop must signal the module lifetime before waiting for the active operation'
+            $state.ShutdownCts.Token.WaitHandle.WaitOne(10000) | Should -BeTrue `
+                -Because 'Stop must signal the module lifetime before waiting for the active operation, including on a loaded CI worker'
             $stopJob.State | Should -Not -Be 'Completed' -Because 'cleanup must drain the active operation before disposing shared transport resources'
             $owned.DisposeCount | Should -Be 0
             $injected.DisposeCount | Should -Be 0
@@ -244,6 +245,28 @@ Describe 'GraphKit module lifecycle' {
         }
 
         $owned.DisposeCount | Should -Be 1
+        $state.WaitForCleanup(0) | Should -BeTrue
+        $state.WaitForCleanup(0) | Should -BeTrue `
+            -Because 'completed cleanup waits must remain safe after lifecycle signals are released'
+        $shutdownDisposeError = try {
+            $state.ShutdownCts.Cancel()
+            $null
+        }
+        catch {
+            $_.Exception
+        }
+        $shutdownDisposeError | Should -Not -BeNullOrEmpty
+        $shutdownDisposeError.GetBaseException() | Should -BeOfType ([System.ObjectDisposedException])
+
+        $drainedDisposeError = try {
+            $null = $state.Drained.Wait(0)
+            $null
+        }
+        catch {
+            $_.Exception
+        }
+        $drainedDisposeError | Should -Not -BeNullOrEmpty
+        $drainedDisposeError.GetBaseException() | Should -BeOfType ([System.ObjectDisposedException])
         {
             InModuleScope GraphKit -Parameters @{ State = $state } {
                 param($State)
@@ -298,7 +321,7 @@ Describe 'GraphKit module lifecycle' {
             Exit-GraphModuleOperation -State $State
         }
 
-        $state.CleanupDone.Wait(5000) | Should -BeTrue
+        $state.WaitForCleanup(5000) | Should -BeTrue
         $state.CleanupComplete | Should -BeTrue
         $owned.DisposeCount | Should -Be 1
     }
@@ -344,7 +367,7 @@ Describe 'GraphKit module lifecycle' {
 
             $blocker.Release.Set()
             $state.CancellationTask.Wait(5000) | Should -BeTrue
-            $state.CleanupDone.Wait(5000) | Should -BeTrue
+            $state.WaitForCleanup(5000) | Should -BeTrue
             $state.CleanupComplete | Should -BeTrue
             $owned.DisposeCount | Should -Be 1
         }
@@ -391,7 +414,7 @@ Describe 'GraphKit module lifecycle' {
 
                 $stopFailure | Should -Not -BeNullOrEmpty
                 $stopFailure.ToString() | Should -Match ([regex]::Escape($sentinel))
-                $state.CleanupDone.IsSet | Should -BeTrue
+                $state.WaitForCleanup(0) | Should -BeTrue
                 $state.CleanupComplete | Should -BeTrue
                 $state.CancellationObserved | Should -BeTrue
                 $owned.DisposeCount | Should -Be 1
@@ -440,7 +463,7 @@ Describe 'GraphKit module lifecycle' {
             $null = $stopJob | Receive-Job -ErrorAction Stop
 
             $completedBeforeRelease | Should -BeTrue -Because 'blocking Dispose must run outside the bounded module-removal path'
-            $state.CleanupDone.Wait(5000) | Should -BeTrue
+            $state.WaitForCleanup(5000) | Should -BeTrue
             $state.CleanupComplete | Should -BeTrue
             $owned.Completed.IsSet | Should -BeTrue
             $owned.DisposeCount | Should -Be 1
@@ -494,7 +517,7 @@ Describe 'GraphKit module lifecycle' {
             }
         } | Should -Throw -ExceptionType ([System.AggregateException]) -ExpectedMessage '*dispose-failed-source1*'
 
-        $state.CleanupDone.IsSet | Should -BeTrue
+        $state.WaitForCleanup(0) | Should -BeTrue
         $state.CleanupComplete | Should -BeTrue
         $state.ActiveOperations | Should -Be 0
         $state.OwnedResources.Count | Should -Be 0
@@ -655,7 +678,7 @@ Describe 'GraphKit module lifecycle' {
                 ExactResourceReferences = $result.ExactResourceReferences
                 ResourceTypes = $result.ResourceTypes
                 SourceRejectedCount = $rejectedCount
-                CleanupObserved = $result.State.CleanupDone.Wait(5000)
+                CleanupObserved = $result.State.WaitForCleanup(5000)
                 CleanupComplete = $result.State.CleanupComplete
                 ActiveOperations = $result.State.ActiveOperations
                 OwnedResourceCount = $result.State.OwnedResources.Count

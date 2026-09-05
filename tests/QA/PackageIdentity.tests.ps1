@@ -15,6 +15,9 @@ BeforeAll {
     if ([string]::IsNullOrWhiteSpace($script:expectedPrerelease)) {
         throw "The derived package version '$script:expectedVersion' has no prerelease identity."
     }
+    if (-not $script:expectedPrerelease.StartsWith("$script:train.", [StringComparison]::Ordinal)) {
+        throw "The derived package prerelease '$script:expectedPrerelease' is not bound to train '$script:train'."
+    }
     $script:builtManifestPath = Join-Path $script:repoRoot "output/module/GraphKit/$script:baseVersion/GraphKit.psd1"
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:expectedVersion.nupkg"
 
@@ -55,6 +58,44 @@ Describe 'GraphKit release package identity' -Tag 'QA' {
         if (Test-Path -LiteralPath $script:versionScriptPath -PathType Leaf) {
             (& $script:versionScriptPath -RepositoryRoot $script:repoRoot) | Should -Be $script:expectedVersion
         }
+
+        $buildPath = Join-Path $script:repoRoot 'build.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $buildAst = [Management.Automation.Language.Parser]::ParseFile(
+            $buildPath, [ref] $tokens, [ref] $parseErrors)
+        @($parseErrors).Count | Should -Be 0
+        $versionValidators = @($buildAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Get-GraphKitValidatedTrainVersion'
+        }, $true))
+        $versionValidators.Count | Should -Be 1
+        . ([scriptblock]::Create($versionValidators[0].Extent.Text))
+
+        $stubRoot = Join-Path $TestDrive 'train-version-output-contract'
+        $null = New-Item -ItemType Directory -Path $stubRoot -Force
+        $validStub = Join-Path $stubRoot 'valid.ps1'
+        $noneStub = Join-Path $stubRoot 'none.ps1'
+        $multipleStub = Join-Path $stubRoot 'multiple.ps1'
+        $objectStub = Join-Path $stubRoot 'object.ps1'
+        $errorStub = Join-Path $stubRoot 'error.ps1'
+        Set-Content -LiteralPath $validStub -Encoding utf8NoBOM -Value "[CmdletBinding()] param([string] `$RepositoryRoot)`n' 0.4.0-r8.fixture '"
+        Set-Content -LiteralPath $noneStub -Encoding utf8NoBOM -Value "[CmdletBinding()] param([string] `$RepositoryRoot)"
+        Set-Content -LiteralPath $multipleStub -Encoding utf8NoBOM -Value "[CmdletBinding()] param([string] `$RepositoryRoot)`n'one'`n 'two'"
+        Set-Content -LiteralPath $objectStub -Encoding utf8NoBOM -Value "[CmdletBinding()] param([string] `$RepositoryRoot)`n[pscustomobject] @{ value = 'wrong type' }"
+        Set-Content -LiteralPath $errorStub -Encoding utf8NoBOM -Value "[CmdletBinding()] param([string] `$RepositoryRoot)`nthrow 'train-version fixture failure'"
+
+        Get-GraphKitValidatedTrainVersion -VersionScript $validStub -RepositoryRoot $stubRoot |
+            Should -BeExactly '0.4.0-r8.fixture'
+        foreach ($invalidStub in @($noneStub, $multipleStub, $objectStub)) {
+            {
+                Get-GraphKitValidatedTrainVersion -VersionScript $invalidStub -RepositoryRoot $stubRoot
+            } | Should -Throw -ExpectedMessage '*exactly one non-empty string*'
+        }
+        {
+            Get-GraphKitValidatedTrainVersion -VersionScript $errorStub -RepositoryRoot $stubRoot
+        } | Should -Throw -ExpectedMessage '*train-version fixture failure*'
     }
 
     It 'builds the base module directory and packages the full r8 identity' {
