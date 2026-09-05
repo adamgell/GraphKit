@@ -202,7 +202,7 @@ Describe 'GraphKit module lifecycle' {
                 $sharedState = [System.AppDomain]::CurrentDomain.GetData($StateKey)
                 & (Get-Module GraphKit) {
                     param($State)
-                    Stop-GraphModule -State $State
+                    Stop-GraphModule -State $State -DrainTimeoutMilliseconds 30000
                 } $sharedState
             } -ArgumentList $script:BuiltManifest, $stateKey
 
