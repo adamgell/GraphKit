@@ -1763,6 +1763,10 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $helper | Should -Match ([regex]::Escape(
             'options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite'))
         $helper | Should -Match 'writable.*ContainerInherit.*ObjectInherit'
+        @([regex]::Matches($helper,
+            'OpenDestinationCreateNew\(\s*destinationPath,\s*requireInitialOwnerOnly\)')).Count |
+            Should -Be 2
+        $helper | Should -Match '(?s)FileSecurity security = new\(\);.*security\.SetOwner\(owner\);.*security\.SetAccessRuleProtection\(isProtected: true, preserveInheritance: false\);.*CreateFileWithSecurityW'
         $newStage = [regex]::Match($task,
             '(?ms)^function New-GraphKitAuthSealedStage \{.*?^\}').Value
         $captureRootSecure = $newStage.IndexOf("-ChildName 'capture' -Kind 'capture root'")
@@ -1820,18 +1824,43 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $source = Join-Path $root 'source'
         $destination = Join-Path $root 'destination'
         $null = New-Item -ItemType Directory -Path $source, $destination -Force
-        $script:GraphKitAuthStageCaptureType::SetOwnerOnly($destination, $true, $true)
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $worldSid = [Security.Principal.SecurityIdentifier]::new(
+            [Security.Principal.WellKnownSidType]::WorldSid, $null)
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetOwner($currentSid)
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $currentSid, [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $worldSid, [Security.AccessControl.FileSystemRights]::Read,
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+        [Security.AccessControl.FileSystemAclExtensions]::SetAccessControl(
+            [IO.DirectoryInfo]::new($destination), $acl)
         [IO.File]::WriteAllBytes((Join-Path $source 'candidate.dll'), [byte[]](1..32))
 
         $copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
-            $source, 'candidate.dll', $destination, 'candidate.dll')
+            $source, 'candidate.dll', $destination, 'candidate.dll', $true)
 
         $copy.DestinationInitial.OwnerOnlyAccess | Should -BeTrue
+        $copy.DestinationInitial.OwnerSid | Should -BeExactly $currentSid.Value
         $copy.DestinationInitial.CurrentIdentitySid |
-            Should -BeExactly ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+            Should -BeExactly $currentSid.Value
+        $copy.DestinationInitial.AccessRulesProtected | Should -BeTrue
+        $copy.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
+        $captured = Join-Path $destination 'candidate.dll'
+        $renamed = Join-Path $destination 'candidate-renamed.dll'
+        [IO.File]::Move($captured, $renamed)
+        [IO.File]::Delete($renamed)
+        Test-Path -LiteralPath $renamed | Should -BeFalse
     }
 
-    It 'allows an ordinary Windows inherited-ACL copy only when the sealed initial gate is false' -ForEach $windowsInitialAccessCases -AllowNullOrEmptyForEach {
+    It 'preserves ordinary Windows inheritance but overrides it for a sealed copy' -ForEach $windowsInitialAccessCases -AllowNullOrEmptyForEach {
         Initialize-GraphKitAuthStageCapture
         $root = Join-Path $TestDrive ('windows-scoped-initial-gate-' + [guid]::NewGuid().ToString('N'))
         $source = Join-Path $root 'source'
@@ -1858,10 +1887,24 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Set-Acl -LiteralPath $directory -AclObject $acl
         }
 
+        $ordinary = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
+            $source, 'candidate.dll', $destination, 'candidate.dll', $false)
+        $ordinary.DestinationInitial.OwnerOnlyAccess | Should -BeFalse
+
+        $sealed = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
+            $source, 'candidate.dll', $sealedDestination, 'candidate.dll', $true)
+        $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyAccess($sealed.DestinationInitial) |
+            Should -BeTrue
+        $sealed.DestinationInitial.AccessRulesProtected | Should -BeTrue
+        $sealed.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
+
+        $sealedPath = Join-Path $sealedDestination 'candidate.dll'
+        $sealedHash = (Get-FileHash -LiteralPath $sealedPath -Algorithm SHA256).Hash
         { $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
-            $source, 'candidate.dll', $destination, 'candidate.dll', $false) } | Should -Not -Throw
-        { $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
-            $source, 'candidate.dll', $sealedDestination, 'candidate.dll', $true) } | Should -Throw '*owner-only*'
+            $source, 'candidate.dll', $sealedDestination, 'candidate.dll', $true) } |
+            Should -Throw '*destination collision*'
+        (Get-FileHash -LiteralPath $sealedPath -Algorithm SHA256).Hash |
+            Should -BeExactly $sealedHash
     }
 
     It 'rejects a sealed stage after Windows ACL <Kind> mutation' -ForEach $windowsAclMutationCases -AllowNullOrEmptyForEach {

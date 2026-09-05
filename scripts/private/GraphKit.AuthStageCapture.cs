@@ -50,12 +50,16 @@ public sealed class GraphKitAuthWriteEvidence
 public static class GraphKitAuthStageCapture
 {
     private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
     private const uint ShareRead = 0x00000001;
     private const uint ShareWrite = 0x00000002;
     private const uint ShareDelete = 0x00000004;
+    private const uint CreateNew = 1;
     private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagWriteThrough = 0x80000000;
     private const uint FileAttributeReparsePoint = 0x00000400;
 
     public static GraphKitAuthPathEvidence InspectFile(string rootPath, string relativePath)
@@ -256,7 +260,8 @@ public static class GraphKitAuthStageCapture
             throw new IOException($"Source '{sourceRelativePath}' exceeds its bounded capture length.");
         }
 
-        using FileStream destinationStream = OpenDestinationCreateNew(destinationPath);
+        using FileStream destinationStream = OpenDestinationCreateNew(
+            destinationPath, requireInitialOwnerOnly);
         SafeFileHandle destinationHandle = destinationStream.SafeFileHandle;
         GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
             destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
@@ -318,7 +323,8 @@ public static class GraphKitAuthStageCapture
         string destinationPath = ResolveRelative(destinationRoot, destinationRelativePath);
         EnsureAncestors(destinationRoot, destinationRelativePath);
 
-        using FileStream destinationStream = OpenDestinationCreateNew(destinationPath);
+        using FileStream destinationStream = OpenDestinationCreateNew(
+            destinationPath, requireInitialOwnerOnly);
         SafeFileHandle destinationHandle = destinationStream.SafeFileHandle;
         GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
             destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
@@ -657,8 +663,68 @@ public static class GraphKitAuthStageCapture
         return new SafeFileHandle((IntPtr)fd, ownsHandle: true);
     }
 
-    private static FileStream OpenDestinationCreateNew(string destinationPath)
+    private static FileStream OpenDestinationCreateNew(
+        string destinationPath,
+        bool requireInitialOwnerOnly)
     {
+        if (OperatingSystem.IsWindows() && requireInitialOwnerOnly)
+        {
+            FileSecurity security = new();
+            SecurityIdentifier owner = WindowsIdentity.GetCurrent().User
+                ?? throw new IOException("The current Windows identity has no SID.");
+            security.SetOwner(owner);
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(
+                owner,
+                FileSystemRights.FullControl,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+            GCHandle pinnedDescriptor = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+            try
+            {
+                SecurityAttributes attributes = new()
+                {
+                    Length = Marshal.SizeOf<SecurityAttributes>(),
+                    SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject(),
+                    InheritHandle = 0
+                };
+                SafeFileHandle handle = CreateFileWithSecurityW(
+                    destinationPath,
+                    GenericRead | GenericWrite,
+                    ShareRead,
+                    ref attributes,
+                    CreateNew,
+                    FileAttributeNormal | FileFlagWriteThrough,
+                    IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    if (error == 80 || error == 183)
+                    {
+                        throw new IOException("Atomic owner-only file destination collision.");
+                    }
+                    throw new IOException(
+                        $"Could not atomically create owner-only destination file (Win32 {error}).");
+                }
+                try
+                {
+                    return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false);
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
+            finally
+            {
+                pinnedDescriptor.Free();
+            }
+        }
+
         var options = new FileStreamOptions
         {
             Mode = FileMode.CreateNew,
@@ -1064,6 +1130,11 @@ public static class GraphKitAuthStageCapture
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode,
         IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern SafeFileHandle CreateFileWithSecurityW(string fileName, uint desiredAccess,
+        uint shareMode, ref SecurityAttributes securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateDirectoryW(string path, ref SecurityAttributes securityAttributes);
