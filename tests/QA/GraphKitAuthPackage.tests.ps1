@@ -582,11 +582,11 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
         $observed = & {
             $tasks = @{}
-            function Capture-GraphKitAuthTask {
+            function Register-GraphKitAuthTaskCapture {
                 param([string] $Name, [scriptblock] $Action)
                 $tasks[$Name] = $Action
             }
-            Set-Alias -Name task -Value Capture-GraphKitAuthTask -Scope Local
+            Set-Alias -Name task -Value Register-GraphKitAuthTaskCapture -Scope Local
 
             . $script:taskPath
 

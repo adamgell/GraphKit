@@ -297,7 +297,7 @@ public sealed class GraphAuthHost : IDisposable
                 _sourceDisposalFailures.Clear();
             }
 
-            Volatile.Write(ref _state, SourcesDisposedAwaitingDrain);
+            Interlocked.Exchange(ref _state, SourcesDisposedAwaitingDrain);
             TryFinalizeUnload();
             GraphAuthException? finalizationFailure =
                 await _finalizationCompletion.Task.ConfigureAwait(false);

@@ -85,12 +85,12 @@ BeforeAll {
             [guid] $TenantId = [guid] '00000000-0000-0000-0000-000000000001',
             [guid] $ActualTenantId = [guid] '00000000-0000-0000-0000-000000000001',
             [string] $IdentityState = 'VerifiedForToken',
-            [AllowNull()] [string] $TokenFingerprint = 'paging-token-fingerprint',
-            [AllowNull()] [string] $CredentialGeneration = 'paging-credential-generation',
+            [AllowNull()] [object] $TokenFingerprint = 'paging-token-fingerprint',
+            [AllowNull()] [object] $CredentialGeneration = 'paging-credential-generation',
             [string] $Cloud = 'Global'
         )
 
-        return @{
+        $provenance = @{
             ProfileId            = 'paging-verified'
             TenantId             = $TenantId
             ActualTenantId       = $ActualTenantId
@@ -101,6 +101,12 @@ BeforeAll {
             ApiVersion           = 'v1.0'
             ResourceFamily       = 'Intune.ManagedDevices'
         }
+        foreach ($name in @('TokenFingerprint', 'CredentialGeneration')) {
+            if ($null -eq $provenance[$name]) {
+                $null = $provenance.Remove($name)
+            }
+        }
+        return $provenance
     }
 
     function Reset-PagingState {
@@ -219,6 +225,9 @@ Describe 'Invoke-GraphPaging' {
         $descriptor = $script:Descriptor.Clone()
         $descriptor.IdentityRequirement = 'Verified'
         $pageProvenance = New-VerifiedPageProvenance @Override
+        $identityField = if ($Case -like '*fingerprint') { 'TokenFingerprint' } else { 'CredentialGeneration' }
+        $pageProvenance.ContainsKey($identityField) | Should -Be ($Case -like 'blank *') `
+            -Because 'missing and blank exact-token provenance are separate test inputs'
         $script:PageQueue.Enqueue((New-GraphPage @(@{ id = 'must-not-escape' }) $null $pageProvenance))
 
         $capture = InModuleScope GraphKit -ArgumentList $context, $descriptor, $script:Factory, $script:FakeTransport {
@@ -261,6 +270,11 @@ Describe 'Invoke-GraphPaging' {
         $descriptor = $script:Descriptor.Clone()
         $descriptor.IdentityRequirement = 'Verified'
         $secondProvenance = New-VerifiedPageProvenance @Second
+        if ($Case -like 'missing *') {
+            $identityField = if ($Case -like '*fingerprint') { 'TokenFingerprint' } else { 'CredentialGeneration' }
+            $secondProvenance.ContainsKey($identityField) | Should -BeFalse `
+                -Because 'missing and blank cross-page provenance are separate test inputs'
+        }
         $script:PageQueue.Enqueue((New-GraphPage @(@{ id = 'must-not-escape' }) 'https://graph.microsoft.com/v1.0/page2' (New-VerifiedPageProvenance)))
         $script:PageQueue.Enqueue((New-GraphPage @(@{ id = 'also-must-not-escape' }) $null $secondProvenance))
 

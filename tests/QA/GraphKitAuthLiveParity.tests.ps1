@@ -1636,15 +1636,15 @@ finally {
             throw 'A Verified descriptor is not bound to the sender before invocation.'
         }
 
-        $sender = Get-Task8ParsedFunction -Path (
+        $senderFunction = Get-Task8ParsedFunction -Path (
             Join-Path $SourceRoot 'Private/Transport/Send-GraphHttpRequest.ps1') `
             -Name Send-GraphHttpRequest
-        $proofCalls = @($sender.FindAll({
+        $proofCalls = @($senderFunction.FindAll({
             param($node)
             $node -is [Management.Automation.Language.CommandAst] -and
                 $node.GetCommandName() -ceq 'Confirm-GraphTenantBinding'
         }, $true))
-        $physicalSends = @($sender.FindAll({
+        $physicalSends = @($senderFunction.FindAll({
             param($node)
             $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
                 $node.Member.Extent.Text -ceq 'SendAsync'

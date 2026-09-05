@@ -489,9 +489,10 @@ try {
 
     # Publish-Module writes PowerShellGet's export-discovery tags.  The R8
     # package task deliberately uses PSResourceGet's SemVer-capable archive
-    # writer instead, which retains only the manifest-declared tags.  Both
-    # forms are deterministic projections of the same proven manifest; accept
-    # only either exact projection so metadata tampering remains detectable.
+    # writer instead, which emits its baseline PSModule tag plus only the
+    # manifest-declared tags (no export-discovery tags). Both forms are
+    # deterministic projections of the same proven manifest; accept only either
+    # exact projection so metadata tampering remains detectable.
     $expectedPsResourceTags = (@('PSModule') + @($psData.Tags) -join ' ')
     foreach ($fieldName in $expectedMetadata.Keys) {
         $actualValue = Get-NuspecMetadataValue -Name $fieldName

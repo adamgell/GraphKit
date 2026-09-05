@@ -310,8 +310,8 @@ switch ($payload.Mode) {
 
             $inputBytes = [IO.MemoryStream]::new()
             [Console]::OpenStandardInput().CopyTo($inputBytes)
-            $input = $inputBytes.ToArray()
-            $stdout.Write($input, 0, $input.Length)
+            $capturedInput = $inputBytes.ToArray()
+            $stdout.Write($capturedInput, 0, $capturedInput.Length)
             $stdout.Flush()
             exit 0
         }

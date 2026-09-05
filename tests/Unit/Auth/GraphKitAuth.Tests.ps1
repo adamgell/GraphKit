@@ -2916,6 +2916,14 @@ Describe 'GraphKit.Auth ABI v1 validation and lifetime' -Tag 'Unit' {
     }
 
     It 'keeps one shutdown owner under concurrent Dispose callers and releases every collectible reference' {
+        $hostSource = Get-Content -LiteralPath (
+            Join-Path $script:repoRoot 'src/GraphKit.Auth/GraphKit.Auth.Contracts/GraphAuthHost.cs') -Raw
+        $hostSource | Should -Match (
+            'Interlocked\.Exchange\(ref _state,\s*SourcesDisposedAwaitingDrain\);\s*' +
+            'TryFinalizeUnload\(\);') -Because (
+            'the shutdown-owner state publication and following active-operation read need a full fence ' +
+            'to prevent a lost finalization wake-up on weakly ordered CPUs')
+
         $payloadRoot = Join-Path $TestDrive 'concurrent-dispose-provider'
         $providerPath = New-GraphKitAuthProviderFixtureAssembly -Root $payloadRoot
         Copy-Item -LiteralPath $script:contractsPath -Destination (Join-Path $payloadRoot 'out/GraphKit.Auth.Contracts.dll')
