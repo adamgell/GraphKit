@@ -206,7 +206,14 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureAssembly -PathType Leaf)) {
             throw "Task 7 controlled fixture build failed: $($buildOutput | Out-String)"
         }
-        $null = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($fixtureAssembly)
+        $fixtureStream = [IO.MemoryStream]::new(
+            [IO.File]::ReadAllBytes($fixtureAssembly), $false)
+        try {
+            $null = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromStream($fixtureStream)
+        }
+        finally {
+            $fixtureStream.Dispose()
+        }
     }
     $controlledType = 'GraphKit.Tests.Task7ControlledTokenSource' -as [type]
     $contractField = if ($null -ne $controlledType) {
@@ -789,6 +796,8 @@ AfterAll {
 
 Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrency {
     It 'uses one public compiled fixed-bearer source by exact reference in two children' {
+        [GraphKit.Tests.Task7ControlledTokenSource].Assembly.Location |
+            Should -BeNullOrEmpty
         $storePath = Join-Path $TestDrive 'task7-fixed-bearer-profiles.json'
         $store = [ordered] @{
             SchemaVersion = 1

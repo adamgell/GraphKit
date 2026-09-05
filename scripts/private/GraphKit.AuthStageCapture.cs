@@ -165,7 +165,7 @@ public static class GraphKitAuthStageCapture
                     SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject(),
                     InheritHandle = 0
                 };
-                if (!CreateDirectoryW(child, ref attributes))
+                if (!CreateDirectoryW(ToExtendedWindowsPath(child), ref attributes))
                 {
                     error = Marshal.GetLastWin32Error();
                     if (error == 80 || error == 183)
@@ -570,7 +570,10 @@ public static class GraphKitAuthStageCapture
         int error;
         if (OperatingSystem.IsWindows())
         {
-            if (MoveFileExW(source, destination, 0))
+            if (MoveFileExW(
+                ToExtendedWindowsPath(source),
+                ToExtendedWindowsPath(destination),
+                0))
             {
                 return;
             }
@@ -797,7 +800,7 @@ public static class GraphKitAuthStageCapture
         if (OperatingSystem.IsWindows())
         {
             SafeFileHandle handle = CreateFileW(
-                fullPath,
+                ToExtendedWindowsPath(fullPath),
                 GenericRead,
                 ShareRead | ShareWrite | ShareDelete,
                 IntPtr.Zero,
@@ -855,7 +858,7 @@ public static class GraphKitAuthStageCapture
                         InheritHandle = 0
                     };
                     handle = CreateFileWithSecurityW(
-                        destinationPath,
+                        ToExtendedWindowsPath(destinationPath),
                         GenericRead | GenericWrite | DeleteAccess | WriteDacAccess | WriteOwnerAccess,
                         ShareRead,
                         ref attributes,
@@ -871,7 +874,7 @@ public static class GraphKitAuthStageCapture
             else
             {
                 handle = CreateFileW(
-                    destinationPath,
+                    ToExtendedWindowsPath(destinationPath),
                     GenericRead | GenericWrite | DeleteAccess | WriteDacAccess | WriteOwnerAccess,
                     ShareRead,
                     IntPtr.Zero,
@@ -1131,6 +1134,40 @@ public static class GraphKitAuthStageCapture
         return value.StartsWith(@"\\?\", StringComparison.Ordinal) ? value.Substring(4) : value;
     }
 
+    private static string ToExtendedWindowsPath(string value)
+    {
+        if (value.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            throw new IOException("A Windows device path is not permitted for native access.");
+        }
+        if (value.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+        {
+            return value.Length > 8
+                ? value
+                : throw new IOException("A fully qualified Windows path is required for native access.");
+        }
+        if (value.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            string extendedValue = value.Substring(4);
+            return IsWindowsDriveRooted(extendedValue)
+                ? value
+                : throw new IOException("A Windows device path is not permitted for native access.");
+        }
+        if (value.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return @"\\?\UNC\" + value.Substring(2);
+        }
+        if (IsWindowsDriveRooted(value))
+        {
+            return @"\\?\" + value;
+        }
+        throw new IOException("A fully qualified Windows path is required for native access.");
+    }
+
+    private static bool IsWindowsDriveRooted(string value) =>
+        value.Length >= 3 && char.IsAsciiLetter(value[0]) &&
+        value[1] == ':' && value[2] == '\\';
+
     private static WindowsPermissionFacts GetWindowsPermissionFacts(string path, bool directory)
     {
         FileSystemSecurity security = directory
@@ -1145,8 +1182,7 @@ public static class GraphKitAuthStageCapture
             FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.Delete |
             FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
         FileSystemRights expectedRights =
-            (directory ? FileSystemRights.ReadAndExecute : FileSystemRights.Read) |
-            FileSystemRights.Synchronize;
+            FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize;
         bool ownerWritable = false;
         bool hasInheritedAccessRules = false;
         bool ownerOnlyAccess = owner.Equals(current) && rules.Count >= 1;
@@ -1246,7 +1282,7 @@ public static class GraphKitAuthStageCapture
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         FileSystemRights rights = writable
             ? FileSystemRights.FullControl
-            : (directory ? FileSystemRights.ReadAndExecute : FileSystemRights.Read);
+            : FileSystemRights.ReadAndExecute;
         InheritanceFlags inheritance = directory && writable ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None;
         security.AddAccessRule(new FileSystemAccessRule(owner, rights, inheritance,
             PropagationFlags.None, AccessControlType.Allow));

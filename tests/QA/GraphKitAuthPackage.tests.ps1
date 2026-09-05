@@ -153,30 +153,36 @@ BeforeAll {
         finally { $archive.Dispose() }
     }
 
+    function Test-GraphKitAuthTestAclMutationSafe {
+        param([Parameter(Mandatory)] $Item)
+        return [string]::IsNullOrEmpty([string] $Item.LinkType) -and
+            (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+    }
+
     function Set-GraphKitAuthTestStageWritable {
         param([Parameter(Mandatory)] [string] $StagePath)
-        $payloadPath = Join-Path $StagePath 'payload'
         $versionPath = Split-Path $StagePath -Parent
-        if ($IsWindows) {
-            $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-            foreach ($directoryPath in @($versionPath, $StagePath, $payloadPath)) {
-                $acl = Get-Acl -LiteralPath $directoryPath
-                $acl.SetAccessRuleProtection($true, $false)
-                $rule = [Security.AccessControl.FileSystemAccessRule]::new(
-                    $identity, [Security.AccessControl.FileSystemRights]::FullControl,
-                    [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
-                    [Security.AccessControl.PropagationFlags]::None,
-                    [Security.AccessControl.AccessControlType]::Allow)
-                $acl.SetAccessRule($rule)
-                Set-Acl -LiteralPath $directoryPath -AclObject $acl
-            }
-            Get-ChildItem -LiteralPath $StagePath -File -Recurse -Force | ForEach-Object { $_.IsReadOnly = $false }
+        $stageItem = Get-Item -LiteralPath $StagePath -Force -ErrorAction Stop
+        $versionItem = Get-Item -LiteralPath $versionPath -Force -ErrorAction Stop
+        if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $stageItem) -or
+            -not (Test-GraphKitAuthTestAclMutationSafe -Item $versionItem)) {
+            throw 'GraphKit.Auth test stage cleanup refused a link or reparse root.'
         }
-        else {
-            & chmod 0700 $versionPath $StagePath $payloadPath
-            if ($LASTEXITCODE -ne 0) { throw 'Could not open the stage fixture for mutation.' }
-            Get-ChildItem -LiteralPath $StagePath -File -Recurse -Force | ForEach-Object { & chmod 0600 $_.FullName }
-            if ($LASTEXITCODE -ne 0) { throw 'Could not open the stage files for mutation.' }
+        $items = @(
+            Get-ChildItem -LiteralPath $StagePath -Recurse -Force -ErrorAction Stop |
+                Sort-Object { $_.FullName.Length } -Descending
+        ) + @($stageItem, $versionItem)
+        foreach ($item in $items) {
+            if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $item)) { continue }
+            $directory = [bool] $item.PSIsContainer
+            if ($IsWindows) {
+                Set-GraphKitAuthTestWindowsPathWritable `
+                    -Path $item.FullName -Directory $directory
+            }
+            else {
+                Set-GraphKitAuthTestUnixPathWritable -Path $item.FullName `
+                    -Directory $directory -Exact
+            }
         }
     }
 
@@ -214,20 +220,97 @@ BeforeAll {
         return [int][IO.File]::GetUnixFileMode($Path)
     }
 
+    function Set-GraphKitAuthTestWindowsPathWritable {
+        param(
+            [Parameter(Mandatory)][string] $Path,
+            [Parameter(Mandatory)][bool] $Directory
+        )
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security = if ($Directory) {
+            [Security.AccessControl.DirectorySecurity]::new()
+        }
+        else {
+            [Security.AccessControl.FileSecurity]::new()
+        }
+        $security.SetAccessRuleProtection($true, $false)
+        $inheritance = if ($Directory) {
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+        if ($Directory) {
+            [IO.FileSystemAclExtensions]::SetAccessControl(
+                [IO.DirectoryInfo]::new($Path), $security)
+        }
+        else {
+            [IO.FileSystemAclExtensions]::SetAccessControl(
+                [IO.FileInfo]::new($Path), $security)
+            $attributes = [IO.File]::GetAttributes($Path)
+            if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                $writableAttributes = [IO.FileAttributes](
+                    [int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
+                [IO.File]::SetAttributes(
+                    $Path,
+                    $(if ([int]$writableAttributes -eq 0) {
+                        [IO.FileAttributes]::Normal
+                    }
+                    else { $writableAttributes }))
+            }
+        }
+    }
+
+    function Set-GraphKitAuthTestUnixPathWritable {
+        param(
+            [Parameter(Mandatory)][string] $Path,
+            [Parameter(Mandatory)][bool] $Directory,
+            [switch] $Exact
+        )
+        $required = [IO.UnixFileMode]::UserRead -bor
+            [IO.UnixFileMode]::UserWrite
+        $current = if ($Exact) {
+            [IO.UnixFileMode]::None
+        }
+        else {
+            [IO.File]::GetUnixFileMode($Path)
+        }
+        $anyExecute = [IO.UnixFileMode]::UserExecute -bor
+            [IO.UnixFileMode]::GroupExecute -bor
+            [IO.UnixFileMode]::OtherExecute
+        if ($Directory -or (([int] $current -band [int] $anyExecute) -ne 0)) {
+            $required = $required -bor [IO.UnixFileMode]::UserExecute
+        }
+        [IO.File]::SetUnixFileMode(
+            $Path, [IO.UnixFileMode]([int] $current -bor [int] $required))
+    }
+
     function Set-GraphKitAuthTestTreeWritable {
         param([Parameter(Mandatory)][string] $Path)
         if (-not (Test-Path -LiteralPath $Path)) { return }
-        if ($IsWindows) {
-            Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
-                ForEach-Object { $_.IsReadOnly = $false }
-            foreach ($directory in @(Get-ChildItem -LiteralPath $Path -Directory -Recurse -Force -ErrorAction SilentlyContinue |
-                Sort-Object { $_.FullName.Length } -Descending) + @(Get-Item -LiteralPath $Path -Force)) {
-                $script:GraphKitAuthStageCaptureType::SetOwnerOnly($directory.FullName, $true, $true)
+        $rootItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $rootItem)) { return }
+        $items = @(
+            Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+                Sort-Object { $_.FullName.Length } -Descending
+        ) + @($rootItem)
+        foreach ($item in $items) {
+            if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $item)) { continue }
+            $directory = [bool] $item.PSIsContainer
+            if ($IsWindows) {
+                Set-GraphKitAuthTestWindowsPathWritable `
+                    -Path $item.FullName -Directory $directory
             }
-        }
-        else {
-            & chmod -R u+rwX $Path
-            if ($LASTEXITCODE -ne 0) { throw "Could not make test tree '$Path' writable." }
+            else {
+                Set-GraphKitAuthTestUnixPathWritable -Path $item.FullName `
+                    -Directory $directory
+            }
         }
     }
 
@@ -1856,7 +1939,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
     }
 
-    It 'handles unavailable Linux renameat2 as actionable fail-closed without a fallback' {
+    It 'normalizes native Windows paths and handles unavailable Linux renameat2 fail-closed' {
         $helper = Get-Content -LiteralPath (
             Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs') -Raw
         $helper | Should -Match 'catch\s*\(EntryPointNotFoundException'
@@ -1872,6 +1955,116 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Should -BeExactly '\\server\share\file.bin'
         $normalizer.Invoke($null, [object[]] @('\\?\C:\repo\file.bin')) |
             Should -BeExactly 'C:\repo\file.bin'
+        $extender = $script:GraphKitAuthStageCaptureType.GetMethod(
+            'ToExtendedWindowsPath',
+            [Reflection.BindingFlags]'NonPublic, Static')
+        $extender | Should -Not -BeNullOrEmpty
+        $extender.Invoke($null, [object[]] @('C:\repo\file.bin')) |
+            Should -BeExactly '\\?\C:\repo\file.bin'
+        $extender.Invoke($null, [object[]] @('\\server\share\file.bin')) |
+            Should -BeExactly '\\?\UNC\server\share\file.bin'
+        $extender.Invoke($null, [object[]] @('\\?\C:\repo\file.bin')) |
+            Should -BeExactly '\\?\C:\repo\file.bin'
+        { $extender.Invoke($null, [object[]] @('relative\file.bin')) } |
+            Should -Throw '*fully qualified Windows path*'
+        { $extender.Invoke($null, [object[]] @('\\.\PhysicalDrive0')) } |
+            Should -Throw '*Windows device path*'
+
+        $linkSafetyRoot = Join-Path $TestDrive (
+            'acl-link-safety-' + [guid]::NewGuid().ToString('N'))
+        $targetPath = Join-Path $TestDrive (
+            'acl-link-target-' + [guid]::NewGuid().ToString('N') + '.bin')
+        $null = New-Item -ItemType Directory -Path $linkSafetyRoot
+        try {
+            $regularPath = Join-Path $linkSafetyRoot 'regular.bin'
+            $hardLinkPath = Join-Path $linkSafetyRoot 'hard-link.bin'
+            [IO.File]::WriteAllText($regularPath, 'regular')
+            [IO.File]::WriteAllText($targetPath, 'shared')
+            $null = New-Item -ItemType HardLink -Path $hardLinkPath `
+                -Target $targetPath -ErrorAction Stop
+
+            (Test-GraphKitAuthTestAclMutationSafe -Item (
+                Get-Item -LiteralPath $regularPath -Force)) | Should -BeTrue
+            (Test-GraphKitAuthTestAclMutationSafe -Item (
+                Get-Item -LiteralPath $hardLinkPath -Force)) | Should -BeFalse
+            (Test-GraphKitAuthTestAclMutationSafe -Item ([pscustomobject] @{
+                LinkType = $null
+                Attributes = [IO.FileAttributes]::ReparsePoint
+            })) | Should -BeFalse
+
+            if ($IsWindows) {
+                $targetAclBefore = (Get-Acl -LiteralPath $targetPath).Sddl
+                $targetAttributesBefore = [IO.File]::GetAttributes($targetPath)
+            }
+            else {
+                [IO.File]::SetUnixFileMode(
+                    $targetPath, [IO.UnixFileMode]::UserRead)
+                $targetUnixModeBefore = [IO.File]::GetUnixFileMode($targetPath)
+            }
+            Set-GraphKitAuthTestTreeWritable -Path $linkSafetyRoot
+            if ($IsWindows) {
+                (Get-Acl -LiteralPath $targetPath).Sddl |
+                    Should -BeExactly $targetAclBefore
+                [IO.File]::GetAttributes($targetPath) |
+                    Should -Be $targetAttributesBefore
+            }
+            else {
+                [IO.File]::GetUnixFileMode($targetPath) |
+                    Should -Be $targetUnixModeBefore
+            }
+
+            Remove-Item -LiteralPath $linkSafetyRoot -Recurse -Force
+            (Test-Path -LiteralPath $hardLinkPath) | Should -BeFalse
+            (Test-Path -LiteralPath $targetPath -PathType Leaf) | Should -BeTrue
+        }
+        finally {
+            Remove-Item -LiteralPath $linkSafetyRoot -Recurse -Force `
+                -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+
+        $liveParityTestPath = Join-Path -Path $script:repoRoot `
+            -ChildPath 'tests/QA/GraphKitAuthLiveParity.tests.ps1'
+        $liveParityTest = Get-Content -LiteralPath $liveParityTestPath -Raw
+        $liveParityTest | Should -Match (
+            '(?s)IsNullOrEmpty\(\[string\]\s*\$item\.LinkType\).*?ReparsePoint')
+
+        $aliasVersion = Join-Path $TestDrive (
+            'acl-alias-version-' + [guid]::NewGuid().ToString('N'))
+        $outsideStage = Join-Path $TestDrive (
+            'acl-alias-target-' + [guid]::NewGuid().ToString('N'))
+        $stageAlias = Join-Path $aliasVersion 'stage'
+        $null = New-Item -ItemType Directory -Path $aliasVersion, (
+            Join-Path $outsideStage 'payload') -Force
+        try {
+            $outsideSecurityBefore = if ($IsWindows) {
+                (Get-Acl -LiteralPath $outsideStage).Sddl
+            }
+            else {
+                [IO.File]::GetUnixFileMode($outsideStage)
+            }
+            $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else {
+                'SymbolicLink'
+            }) -Path $stageAlias -Target $outsideStage -ErrorAction Stop
+
+            { Set-GraphKitAuthTestStageWritable -StagePath $stageAlias } |
+                Should -Throw '*refused a link or reparse root*'
+            if ($IsWindows) {
+                (Get-Acl -LiteralPath $outsideStage).Sddl |
+                    Should -BeExactly $outsideSecurityBefore
+            }
+            else {
+                [IO.File]::GetUnixFileMode($outsideStage) |
+                    Should -Be $outsideSecurityBefore
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $stageAlias -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $aliasVersion -Recurse -Force `
+                -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $outsideStage -Recurse -Force `
+                -ErrorAction SilentlyContinue
+        }
     }
 
     It 'reports an existing atomic destination as a collision and changes neither directory' {
@@ -2220,7 +2413,13 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $helper | Should -Match ([regex]::Escape($property + ' { get; init; }'))
             $task | Should -Match ([regex]::Escape('$Evidence.' + $property))
         }
-        $helper | Should -Match 'directory \? FileSystemRights\.ReadAndExecute : FileSystemRights\.Read'
+        $helper | Should -Match (
+            'FileSystemRights expectedRights\s*=\s*FileSystemRights\.ReadAndExecute\s*\|\s*FileSystemRights\.Synchronize')
+        $helper | Should -Match (
+            'writable\s*\?\s*FileSystemRights\.FullControl\s*:\s*FileSystemRights\.ReadAndExecute')
+        $task | Should -Not -Match "'windows-owner-read'"
+        $task | Should -Match (
+            "permissions\.file -cne .*?'windows-owner-read-execute'")
         $helper | Should -Match 'InheritanceFlags\.None'
         $helper | Should -Match ([regex]::Escape(
             'private const uint WriteDacAccess = 0x00040000;'))
@@ -2329,7 +2528,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
     It 'creates a Windows child with current-identity access and round trips repeated seal transitions' -ForEach $windowsInitialAccessCases -AllowNullOrEmptyForEach {
         Initialize-GraphKitAuthStageCapture
-        $root = Join-Path $TestDrive ('windows-initial-access-' + [guid]::NewGuid().ToString('N'))
+        $longParent = Join-Path $TestDrive ('windows-initial-access-' + ('a' * 120))
+        $root = Join-Path $longParent ('nested-' + ('b' * 120))
         $source = Join-Path $root 'source'
         $destination = Join-Path $root 'destination'
         $null = New-Item -ItemType Directory -Path $source, $destination -Force
@@ -2337,7 +2537,6 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $worldSid = [Security.Principal.SecurityIdentifier]::new(
             [Security.Principal.WellKnownSidType]::WorldSid, $null)
         $acl = [Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetOwner($currentSid)
         $acl.SetAccessRuleProtection($true, $false)
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             $currentSid, [Security.AccessControl.FileSystemRights]::FullControl,
@@ -2349,12 +2548,15 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             [Security.AccessControl.InheritanceFlags]::ObjectInherit,
             [Security.AccessControl.PropagationFlags]::None,
             [Security.AccessControl.AccessControlType]::Allow))
-        [Security.AccessControl.FileSystemAclExtensions]::SetAccessControl(
+        [IO.FileSystemAclExtensions]::SetAccessControl(
             [IO.DirectoryInfo]::new($destination), $acl)
         [IO.File]::WriteAllBytes((Join-Path $source 'candidate.dll'), [byte[]](1..32))
 
         $copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
             $source, 'candidate.dll', $destination, 'candidate.dll', $true)
+        $ordinaryBytes = [Text.Encoding]::UTF8.GetBytes('ordinary-long-path-write')
+        $ordinaryWrite = $script:GraphKitAuthStageCaptureType::WriteFileCreateNew(
+            $destination, 'ordinary.bin', $ordinaryBytes, $false)
 
         $copy.DestinationInitial.OwnerOnlyAccess | Should -BeTrue
         $copy.DestinationInitial.OwnerSid | Should -BeExactly $currentSid.Value
@@ -2362,6 +2564,26 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Should -BeExactly $currentSid.Value
         $copy.DestinationInitial.AccessRulesProtected | Should -BeTrue
         $copy.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
+        $copy.Destination.PhysicalPath.StartsWith('\\?\', [StringComparison]::Ordinal) |
+            Should -BeFalse
+        $ordinaryWrite.Destination.PhysicalPath.StartsWith(
+            '\\?\', [StringComparison]::Ordinal) | Should -BeFalse
+        $ordinaryWrite.Destination.Sha256 | Should -BeExactly (
+            [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($ordinaryBytes)).ToLowerInvariant())
+        { $script:GraphKitAuthStageCaptureType::WriteFileCreateNew(
+            $destination, 'ordinary.bin', $ordinaryBytes, $false) } |
+            Should -Throw '*Atomic file destination collision*'
+        $moveSource = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+            $root, 'move-source')
+        $moveDestination = Join-Path $root 'move-destination'
+        $script:GraphKitAuthStageCaptureType::MoveDirectoryCreateNew(
+            $moveSource.PhysicalPath, $moveDestination)
+        $moved = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+            $root, 'move-destination')
+        $moved.NativeIdentity | Should -BeExactly $moveSource.NativeIdentity
+        $moved.PhysicalPath.StartsWith('\\?\', [StringComparison]::Ordinal) |
+            Should -BeFalse
         $captured = Join-Path $destination 'candidate.dll'
         [IO.File]::SetAttributes($captured, [IO.FileAttributes]::Archive)
         $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $false)

@@ -88,7 +88,14 @@ public sealed class CompiledAdoptionTokenSource : IGraphTokenSource
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureAssembly -PathType Leaf)) {
             throw "Task 6 compiled sender fixture did not compile: $($compilerOutput | Out-String)"
         }
-        $null = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($fixtureAssembly)
+        $fixtureStream = [IO.MemoryStream]::new(
+            [IO.File]::ReadAllBytes($fixtureAssembly), $false)
+        try {
+            $null = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromStream($fixtureStream)
+        }
+        finally {
+            $fixtureStream.Dispose()
+        }
     }
 
     $script:VerifiedTenant = [guid] '00000000-0000-0000-0000-000000000001'
@@ -264,6 +271,8 @@ Describe 'Send-GraphHttpRequest (loopback through the real sender)' {
     }
 
     It 'adopts a shared compiled result only through the exact compiled source/result branch' {
+        [GraphKit.Tests.CompiledAdoptionTokenSource].Assembly.Location |
+            Should -BeNullOrEmpty
         $port = Get-FreePort
         $server = Start-GraphLoopback -Port $port -Handler {
             param($Context, $Listener, $Captured)

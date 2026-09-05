@@ -332,21 +332,42 @@ function Set-Task8FixtureOwnerWritable {
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][bool] $Directory)
     if ($IsWindows) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-        $acl = Get-Acl -LiteralPath $Path
-        $acl.SetOwner($identity)
+        $acl = if ($Directory) {
+            [Security.AccessControl.DirectorySecurity]::new()
+        }
+        else {
+            [Security.AccessControl.FileSecurity]::new()
+        }
         $acl.SetAccessRuleProtection($true, $false)
         $inheritance = if ($Directory) {
             [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
         }
         else { [Security.AccessControl.InheritanceFlags]::None }
-        $acl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             $identity,
             [Security.AccessControl.FileSystemRights]::FullControl,
             $inheritance,
             [Security.AccessControl.PropagationFlags]::None,
             [Security.AccessControl.AccessControlType]::Allow))
-        Set-Acl -LiteralPath $Path -AclObject $acl
-        if (-not $Directory) { (Get-Item -LiteralPath $Path).IsReadOnly = $false }
+        if ($Directory) {
+            [IO.FileSystemAclExtensions]::SetAccessControl(
+                [IO.DirectoryInfo]::new($Path), $acl)
+        }
+        else {
+            [IO.FileSystemAclExtensions]::SetAccessControl(
+                [IO.FileInfo]::new($Path), $acl)
+            $attributes = [IO.File]::GetAttributes($Path)
+            if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                $writableAttributes = [IO.FileAttributes](
+                    [int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
+                [IO.File]::SetAttributes(
+                    $Path,
+                    $(if ([int]$writableAttributes -eq 0) {
+                        [IO.FileAttributes]::Normal
+                    }
+                    else { $writableAttributes }))
+            }
+        }
     }
     else {
         [IO.File]::SetUnixFileMode(
@@ -1451,26 +1472,85 @@ finally {
             [IO.Path]::GetFileName($full) -notmatch '^graphkit-task8-') {
             throw 'Task 8 fixture cleanup refused a non-literal residual path.'
         }
+        $rootItem = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+        if (-not [string]::IsNullOrEmpty([string] $rootItem.LinkType) -or
+            ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+            return
+        }
+        $paths = @(
+            Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue |
+                Sort-Object { $_.FullName.Length } -Descending
+        ) + @($rootItem)
         if ($IsWindows) {
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-            $paths = @(
-                Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue |
-                    Sort-Object { $_.FullName.Length } -Descending
-            ) + @(Get-Item -LiteralPath $full -Force)
             foreach ($item in $paths) {
-                if (-not $item.PSIsContainer) { $item.IsReadOnly = $false }
-                $acl = Get-Acl -LiteralPath $item.FullName
+                if (-not [string]::IsNullOrEmpty([string] $item.LinkType) -or
+                    ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                $directory = [bool]$item.PSIsContainer
+                $acl = if ($directory) {
+                    [Security.AccessControl.DirectorySecurity]::new()
+                }
+                else {
+                    [Security.AccessControl.FileSecurity]::new()
+                }
                 $acl.SetAccessRuleProtection($true, $false)
-                $acl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $inheritance = if ($directory) {
+                    [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+                }
+                else {
+                    [Security.AccessControl.InheritanceFlags]::None
+                }
+                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                     $identity,
                     [Security.AccessControl.FileSystemRights]::FullControl,
+                    $inheritance,
+                    [Security.AccessControl.PropagationFlags]::None,
                     [Security.AccessControl.AccessControlType]::Allow))
-                Set-Acl -LiteralPath $item.FullName -AclObject $acl
+                if ($directory) {
+                    [IO.FileSystemAclExtensions]::SetAccessControl(
+                        [IO.DirectoryInfo]::new($item.FullName), $acl)
+                }
+                else {
+                    [IO.FileSystemAclExtensions]::SetAccessControl(
+                        [IO.FileInfo]::new($item.FullName), $acl)
+                    $attributes = [IO.File]::GetAttributes($item.FullName)
+                    if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                        $writableAttributes = [IO.FileAttributes](
+                            [int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
+                        [IO.File]::SetAttributes(
+                            $item.FullName,
+                            $(if ([int]$writableAttributes -eq 0) {
+                                [IO.FileAttributes]::Normal
+                            }
+                            else { $writableAttributes }))
+                    }
+                }
             }
         }
         else {
-            & chmod -R u+rwX $full
-            if ($LASTEXITCODE -ne 0) { throw 'Task 8 fixture cleanup could not restore owner access.' }
+            foreach ($item in $paths) {
+                if (-not [string]::IsNullOrEmpty([string] $item.LinkType) -or
+                    ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                $mode = [IO.File]::GetUnixFileMode($item.FullName)
+                $required = [IO.UnixFileMode]::UserRead -bor
+                    [IO.UnixFileMode]::UserWrite
+                $anyExecute = [IO.UnixFileMode]::UserExecute -bor
+                    [IO.UnixFileMode]::GroupExecute -bor
+                    [IO.UnixFileMode]::OtherExecute
+                if ($item.PSIsContainer -or
+                    (([int] $mode -band [int] $anyExecute) -ne 0)) {
+                    $required = $required -bor [IO.UnixFileMode]::UserExecute
+                }
+                [IO.File]::SetUnixFileMode(
+                    $item.FullName,
+                    [IO.UnixFileMode]([int] $mode -bor [int] $required))
+            }
         }
         Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
     }

@@ -694,7 +694,7 @@ function Test-GraphKitAuthSealedStage {
         throw 'The GraphKit.Auth manifest schema or version is invalid.'
     }
     if (($manifest.permissions.PSObject.Properties.Name -join '|') -cne 'file|directory' -or
-        [string]$manifest.permissions.file -cne $(if ($IsWindows) { 'windows-owner-read' } else { 'unix-0400' }) -or
+        [string]$manifest.permissions.file -cne $(if ($IsWindows) { 'windows-owner-read-execute' } else { 'unix-0400' }) -or
         [string]$manifest.permissions.directory -cne $(if ($IsWindows) { 'windows-owner-read-execute' } else { 'unix-0500' })) {
         throw 'The GraphKit.Auth manifest permission policy is invalid.'
     }
@@ -827,7 +827,7 @@ function New-GraphKitAuthSealedStage {
             schemaVersion = 1
             fullVersion = $FullVersion
             permissions = [ordered]@{
-                file = if ($IsWindows) { 'windows-owner-read' } else { 'unix-0400' }
+                file = if ($IsWindows) { 'windows-owner-read-execute' } else { 'unix-0400' }
                 directory = if ($IsWindows) { 'windows-owner-read-execute' } else { 'unix-0500' }
             }
             directories = [ordered]@{
