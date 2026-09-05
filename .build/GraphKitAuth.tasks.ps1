@@ -1118,9 +1118,12 @@ function Assert-GraphKitAuthAbiProjectedFileEvidence {
         [Parameter(Mandatory)] $Expected
     )
     Initialize-GraphKitAuthStageCapture
+    $repositoryRootEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath(
+        $RepositoryRoot)
     $actual = $script:GraphKitAuthStageCaptureType::InspectFile($RepositoryRoot, $RelativePath)
     if (-not $actual.IsRegularFile -or $actual.IsReparsePoint -or [long]$actual.LinkCount -ne 1 -or
-        -not (Test-GraphKitAuthContainedPhysicalPath $RepositoryRoot $actual.PhysicalPath) -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $repositoryRootEvidence.PhysicalPath $actual.PhysicalPath) -or
         [string]$actual.PhysicalPath -cne [string]$Expected.PhysicalPath -or
         [string]$actual.NativeIdentity -cne [string]$Expected.NativeIdentity -or
         [string]$actual.Sha256 -cne [string]$Expected.Sha256 -or

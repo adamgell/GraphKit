@@ -1896,6 +1896,34 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew($source, 'candidate.dll', $destination, 'candidate.dll')
         { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $root `
             -RelativePath 'destination/candidate.dll' -Expected $copy.Destination } | Should -Not -Throw
+        if ($Kind -ceq 'byte mutation') {
+            $physicalAncestor = Join-Path $TestDrive ('projection-physical-ancestor-' + [guid]::NewGuid().ToString('N'))
+            $physicalRepository = Join-Path $physicalAncestor 'nested/repository'
+            $aliasAncestor = Join-Path $TestDrive ('projection-alias-ancestor-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path (
+                Join-Path $physicalRepository 'source'), (Join-Path $physicalRepository 'destination') -Force
+            $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
+                -Path $aliasAncestor -Target $physicalAncestor -ErrorAction Stop
+            $aliasRepository = Join-Path $aliasAncestor 'nested/repository'
+            [IO.File]::WriteAllBytes((Join-Path $aliasRepository 'source/candidate.dll'), [byte[]](1..32))
+            $aliasCopy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
+                (Join-Path $aliasRepository 'source'), 'candidate.dll',
+                (Join-Path $aliasRepository 'destination'), 'candidate.dll')
+
+            { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $aliasRepository `
+                -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
+                Should -Not -Throw -Because (
+                    'containment must compare the resolved physical repository root when an ' +
+                    'otherwise physical repository has an aliased ancestor')
+
+            $repositoryAlias = Join-Path $TestDrive (
+                'projection-repository-alias-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
+                -Path $repositoryAlias -Target $physicalRepository -ErrorAction Stop
+            { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $repositoryAlias `
+                -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
+                Should -Throw -Because 'the repository root itself must remain one no-follow directory'
+        }
         $candidate = Join-Path $destination 'candidate.dll'
         switch ($Kind) {
             'byte mutation' { [IO.File]::WriteAllBytes($candidate, [byte[]](33..64)) }

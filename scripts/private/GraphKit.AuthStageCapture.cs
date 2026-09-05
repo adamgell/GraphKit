@@ -82,6 +82,18 @@ public static class GraphKitAuthStageCapture
     public static GraphKitAuthPathEvidence InspectDirectory(string rootPath, string relativePath)
         => Inspect(rootPath, relativePath, expectDirectory: true, hashContent: false);
 
+    public static GraphKitAuthPathEvidence InspectDirectoryPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ArgumentException("A directory path is required.", nameof(path));
+        }
+        string fullPath = Path.GetFullPath(path);
+        using SafeFileHandle handle = OpenReadNoFollow(fullPath, directory: true);
+        return EvidenceFromHandle(
+            handle, fullPath, string.Empty, expectDirectory: true, hashContent: false);
+    }
+
     public static bool HasInitialOwnerOnlyAccess(GraphKitAuthPathEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(evidence);

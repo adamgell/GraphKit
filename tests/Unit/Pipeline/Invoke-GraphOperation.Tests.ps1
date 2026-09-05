@@ -124,11 +124,26 @@ Describe 'Invoke-GraphOperation' {
         }
 
         It 'does not apply descriptor auth-mode policy to a raw request' {
+            $rawOnlyContext = [PSCustomObject]@{}
+            foreach ($property in $script:Context.PSObject.Properties) {
+                $rawOnlyContext | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+            $rawOnlyContext.TokenSource = [PSCustomObject]@{ AuthMode = 'RawOnlyTestMode' }
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                throw 'raw mode must not resolve a descriptor'
+            }
+            Mock Assert-GraphOperationAuthMode -ModuleName GraphKit {
+                throw 'raw mode must not apply descriptor auth-mode policy'
+            }
             Mock Invoke-GraphRetry -ModuleName GraphKit { return (New-FakeEnvelope) }
 
-            $result = Invoke-GraphOperation -Context $script:Context -Uri 'https://graph.microsoft.com/v1.0/me' -Method GET
+            $result = Invoke-GraphOperation -Context $rawOnlyContext `
+                -Uri 'https://graph.microsoft.com/v1.0/me' -Method GET
 
             $result.Outcome | Should -Be 'Succeeded'
+            Should-NotInvoke Get-GraphOperation -ModuleName GraphKit
+            Should-NotInvoke Assert-GraphOperationAuthMode -ModuleName GraphKit
             Should-Invoke Invoke-GraphRetry -ModuleName GraphKit -Times 1 -Exactly
         }
     }
