@@ -68,6 +68,57 @@ $linuxCaseSensitiveStageAliasCases = if ($IsLinux) { @(@{}) } else { @() }
 
 BeforeAll {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (-not ('GraphKitAuthPackageLinkFixture' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public static class GraphKitAuthPackageLinkFixture
+{
+    private const int SymbolicLinkFlagAllowUnprivilegedCreate = 0x2;
+
+    public static void CreateHardLink(string linkPath, string existingPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The native package hard-link fixture is Windows-only.");
+        if (!CreateHardLinkW(ToExtendedWindowsPath(linkPath), ToExtendedWindowsPath(existingPath), IntPtr.Zero))
+            throw new IOException($"Native package hard-link creation failed (Win32 {Marshal.GetLastWin32Error()}).");
+    }
+
+    public static void CreateFileSymbolicLink(string linkPath, string targetPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The native package symbolic-link fixture is Windows-only.");
+        if (!CreateSymbolicLinkW(ToExtendedWindowsPath(linkPath), ToExtendedWindowsPath(targetPath),
+                SymbolicLinkFlagAllowUnprivilegedCreate))
+            throw new IOException($"Native package symbolic-link creation failed (Win32 {Marshal.GetLastWin32Error()}).");
+    }
+
+    public static bool IsReparsePoint(string path)
+    {
+        return (File.GetAttributes(ToExtendedWindowsPath(path)) & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private static string ToExtendedWindowsPath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal)) return fullPath;
+        if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+            return @"\\?\UNC\" + fullPath.Substring(2);
+        return @"\\?\" + fullPath;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern bool CreateHardLinkW(
+        string fileName, string existingFileName, IntPtr securityAttributes);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern bool CreateSymbolicLinkW(
+        string symbolicFileName, string targetFileName, int flags);
+}
+"@
+    }
     $script:requiredGraphKitAuthFiles = @(
         'GraphKit.Auth.Contracts.dll'
         'GraphKit.Auth.dll'
@@ -159,6 +210,81 @@ BeforeAll {
             (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
     }
 
+    function New-GraphKitAuthTestHardLink {
+        param(
+            [Parameter(Mandatory)][string] $LinkPath,
+            [Parameter(Mandatory)][string] $TargetPath
+        )
+        if ($IsWindows) {
+            [GraphKitAuthPackageLinkFixture]::CreateHardLink($LinkPath, $TargetPath)
+        }
+        else {
+            $null = New-Item -ItemType HardLink -Path $LinkPath -Target $TargetPath `
+                -ErrorAction Stop
+        }
+    }
+
+    function New-GraphKitAuthTestFileSymbolicLink {
+        param(
+            [Parameter(Mandatory)][string] $LinkPath,
+            [Parameter(Mandatory)][string] $TargetPath
+        )
+        if ($IsWindows) {
+            [GraphKitAuthPackageLinkFixture]::CreateFileSymbolicLink($LinkPath, $TargetPath)
+        }
+        else {
+            $null = New-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath `
+                -ErrorAction Stop
+        }
+    }
+
+    function Remove-GraphKitAuthTestMutationArtifacts {
+        param(
+            [Parameter(Mandatory)]
+            [AllowEmptyCollection()]
+            [Collections.Generic.List[object]] $Artifacts
+        )
+        for ($index = $Artifacts.Count - 1; $index -ge 0; $index--) {
+            $artifact = $Artifacts[$index]
+            if (-not [bool] $artifact.Created) { continue }
+            $path = [string] $artifact.Path
+            $isDirectory = [bool] $artifact.Directory
+            $isLink = [bool] $artifact.Link
+            $restorePath = [string] $artifact.RestorePath
+            if ($isLink) {
+                $parent = [IO.Path]::GetDirectoryName($path)
+                if ($IsWindows) {
+                    Set-GraphKitAuthTestWindowsPathWritable -Path $parent -Directory $true
+                    if (-not [string]::IsNullOrWhiteSpace($restorePath)) {
+                        Set-GraphKitAuthTestWindowsPathWritable -Path $path -Directory $false
+                    }
+                }
+                else {
+                    Set-GraphKitAuthTestUnixPathWritable -Path $parent -Directory $true
+                }
+                if ($isDirectory) { [IO.Directory]::Delete($path, $false) }
+                else { [IO.File]::Delete($path) }
+                if (-not [string]::IsNullOrWhiteSpace($restorePath)) {
+                    $script:GraphKitAuthStageCaptureType::SetOwnerOnly(
+                        $restorePath, $false, $false)
+                }
+            }
+            elseif ($isDirectory) {
+                if ([IO.Directory]::Exists($path)) {
+                    Set-GraphKitAuthTestTreeWritable -Path $path
+                    [IO.Directory]::Delete($path, $true)
+                }
+            }
+            elseif ([IO.File]::Exists($path)) {
+                if ($IsWindows) {
+                    Set-GraphKitAuthTestWindowsPathWritable -Path $path -Directory $false
+                }
+                [IO.File]::Delete($path)
+            }
+        }
+        $Artifacts.Clear()
+    }
+
     function Set-GraphKitAuthTestStageWritable {
         param([Parameter(Mandatory)] [string] $StagePath)
         $versionPath = Split-Path $StagePath -Parent
@@ -172,8 +298,12 @@ BeforeAll {
             Get-ChildItem -LiteralPath $StagePath -Recurse -Force -ErrorAction Stop |
                 Sort-Object { $_.FullName.Length } -Descending
         ) + @($stageItem, $versionItem)
+        if (@($items | Where-Object {
+            -not (Test-GraphKitAuthTestAclMutationSafe -Item $_)
+        }).Count -gt 0) {
+            throw 'GraphKit.Auth test stage cleanup refused a link or reparse entry.'
+        }
         foreach ($item in $items) {
-            if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $item)) { continue }
             $directory = [bool] $item.PSIsContainer
             if ($IsWindows) {
                 Set-GraphKitAuthTestWindowsPathWritable `
@@ -233,13 +363,10 @@ BeforeAll {
             [Security.AccessControl.FileSecurity]::new()
         }
         $security.SetAccessRuleProtection($true, $false)
-        $inheritance = if ($Directory) {
-            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                [Security.AccessControl.InheritanceFlags]::ObjectInherit
-        }
-        else {
-            [Security.AccessControl.InheritanceFlags]::None
-        }
+        # Every descendant is transitioned explicitly by the bounded cleanup walkers.
+        # A propagating ACE here could follow an in-tree hard-link name and mutate the
+        # caller-owned file object outside the requested tree.
+        $inheritance = [Security.AccessControl.InheritanceFlags]::None
         $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             $identity,
             [Security.AccessControl.FileSystemRights]::FullControl,
@@ -295,13 +422,19 @@ BeforeAll {
         param([Parameter(Mandatory)][string] $Path)
         if (-not (Test-Path -LiteralPath $Path)) { return }
         $rootItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-        if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $rootItem)) { return }
+        if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $rootItem)) {
+            throw 'GraphKit.Auth test tree cleanup refused a link or reparse root.'
+        }
         $items = @(
-            Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+            Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop |
                 Sort-Object { $_.FullName.Length } -Descending
         ) + @($rootItem)
+        if (@($items | Where-Object {
+            -not (Test-GraphKitAuthTestAclMutationSafe -Item $_)
+        }).Count -gt 0) {
+            throw 'GraphKit.Auth test tree cleanup refused a link or reparse entry.'
+        }
         foreach ($item in $items) {
-            if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $item)) { continue }
             $directory = [bool] $item.PSIsContainer
             if ($IsWindows) {
                 Set-GraphKitAuthTestWindowsPathWritable `
@@ -325,7 +458,13 @@ BeforeAll {
     }
 
     function Invoke-GraphKitAuthStageMutation {
-        param([string] $Kind, [string] $StagePath)
+        param(
+            [string] $Kind,
+            [string] $StagePath,
+            [Parameter(Mandatory)]
+            [AllowEmptyCollection()]
+            [Collections.Generic.List[object]] $CleanupArtifacts
+        )
         Set-GraphKitAuthTestStageWritable -StagePath $StagePath
         $payloadPath = Join-Path $StagePath 'payload'
         $targetPath = Join-Path $payloadPath 'GraphKit.Auth.dll'
@@ -344,12 +483,54 @@ BeforeAll {
             }
             'hard-link' {
                 $outsideLink = Join-Path $TestDrive ('GraphKit.Auth.hardlink-' + [guid]::NewGuid().ToString('N') + '.dll')
-                $null = New-Item -ItemType HardLink -Path $outsideLink -Target $targetPath -ErrorAction Stop
+                $linkArtifact = [pscustomobject]@{
+                    Path = $outsideLink; Directory = $false; Link = $true
+                    RestorePath = $targetPath; Created = $false
+                }
+                $CleanupArtifacts.Add($linkArtifact) | Out-Null
+                New-GraphKitAuthTestHardLink -LinkPath $outsideLink -TargetPath $targetPath
+                $linkArtifact.Created = $true
+                $linked = $script:GraphKitAuthStageCaptureType::InspectFile(
+                    $payloadPath, 'GraphKit.Auth.dll')
+                if ([long] $linked.LinkCount -ne 2) {
+                    throw 'The package hard-link fixture did not establish an exact two-link file.'
+                }
             }
             'escaped-link' {
                 $outsidePath = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N') + '.dll')
-                [IO.File]::WriteAllText($outsidePath, 'outside'); [IO.File]::Delete($targetPath)
-                $null = New-Item -ItemType SymbolicLink -Path $targetPath -Target $outsidePath -ErrorAction Stop
+                $outsideArtifact = [pscustomobject]@{
+                    Path = $outsidePath; Directory = $false; Link = $false
+                    RestorePath = $null; Created = $false
+                }
+                $CleanupArtifacts.Add($outsideArtifact) | Out-Null
+                $outsideStream = $null
+                try {
+                    $outsideStream = [IO.File]::Open(
+                        $outsidePath, [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $outsideArtifact.Created = $true
+                    $outsideBytes = [Text.Encoding]::UTF8.GetBytes('outside')
+                    $outsideStream.Write($outsideBytes, 0, $outsideBytes.Length)
+                }
+                finally {
+                    if ($null -ne $outsideStream) { $outsideStream.Dispose() }
+                }
+                [IO.File]::Delete($targetPath)
+                $linkArtifact = [pscustomobject]@{
+                    Path = $targetPath; Directory = $false; Link = $true
+                    RestorePath = $null; Created = $false
+                }
+                $CleanupArtifacts.Add($linkArtifact) | Out-Null
+                New-GraphKitAuthTestFileSymbolicLink -LinkPath $targetPath -TargetPath $outsidePath
+                $linkArtifact.Created = $true
+                if ($IsWindows) {
+                    if (-not [GraphKitAuthPackageLinkFixture]::IsReparsePoint($targetPath)) {
+                        throw 'The package symbolic-link fixture did not create a reparse point.'
+                    }
+                }
+                elseif ((Get-Item -LiteralPath $targetPath -Force).LinkType -ne 'SymbolicLink') {
+                    throw 'The package symbolic-link fixture did not create a symbolic link.'
+                }
             }
             'case-alias' {
                 $temporary = Join-Path $payloadPath ('.case-' + [guid]::NewGuid().ToString('N'))
@@ -376,13 +557,25 @@ BeforeAll {
             }
             'platform-directory-alias' {
                 $outsidePayload = Join-Path $TestDrive ('payload-alias-target-' + [guid]::NewGuid().ToString('N'))
-                $null = New-Item -ItemType Directory -Path $outsidePayload
+                $outsideArtifact = [pscustomobject]@{
+                    Path = $outsidePayload; Directory = $true; Link = $false
+                    RestorePath = $null; Created = $false
+                }
+                $CleanupArtifacts.Add($outsideArtifact) | Out-Null
+                $null = New-Item -ItemType Directory -Path $outsidePayload -ErrorAction Stop
+                $outsideArtifact.Created = $true
                 foreach ($file in @(Get-ChildItem -LiteralPath $payloadPath -File -Force)) {
                     [IO.File]::Copy($file.FullName, (Join-Path $outsidePayload $file.Name))
                 }
                 Remove-Item -LiteralPath $payloadPath -Recurse -Force
                 $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                $linkArtifact = [pscustomobject]@{
+                    Path = $payloadPath; Directory = $true; Link = $true
+                    RestorePath = $null; Created = $false
+                }
+                $CleanupArtifacts.Add($linkArtifact) | Out-Null
                 $null = New-Item -ItemType $kind -Path $payloadPath -Target $outsidePayload -ErrorAction Stop
+                $linkArtifact.Created = $true
             }
             default { throw "Unknown mutation '$Kind'." }
         }
@@ -799,8 +992,10 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         @{ Kind='platform-directory-alias'; ExpectedDiagnostic='not the required no-follow directory|without following a link|without following a reparse point' }
     ) {
         $fixture = New-GraphKitAuthStageFixture -Name $Kind
+        $cleanupArtifacts = [Collections.Generic.List[object]]::new()
         try {
-            Invoke-GraphKitAuthStageMutation -Kind $Kind -StagePath $fixture.StagePath
+            Invoke-GraphKitAuthStageMutation -Kind $Kind -StagePath $fixture.StagePath `
+                -CleanupArtifacts $cleanupArtifacts
             $failure = $null
             try { $null = Test-GraphKitAuthSealedStage -StagePath $fixture.StagePath -FullVersion $fixture.FullVersion }
             catch { $failure = $_.Exception.Message }
@@ -808,6 +1003,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $failure | Should -Not -Match 'version, envelope, or manifest is writable'
         }
         finally {
+            Remove-GraphKitAuthTestMutationArtifacts -Artifacts $cleanupArtifacts
             Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
         }
     }
@@ -829,17 +1025,28 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
     It 'rejects a manifest hard link without an extra stage entry masking link count' {
         $fixture = New-GraphKitAuthStageFixture -Name 'manifest-hard-link'
+        $cleanupArtifacts = [Collections.Generic.List[object]]::new()
         try {
             Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
             $manifestPath = Join-Path $fixture.StagePath 'manifest.json'
             $outsideLink = Join-Path $TestDrive ('manifest-hard-link-' + [guid]::NewGuid().ToString('N') + '.json')
-            $null = New-Item -ItemType HardLink -Path $outsideLink -Target $manifestPath -ErrorAction Stop
+            $linkArtifact = [pscustomobject]@{
+                Path = $outsideLink; Directory = $false; Link = $true
+                RestorePath = $manifestPath; Created = $false
+            }
+            $cleanupArtifacts.Add($linkArtifact) | Out-Null
+            New-GraphKitAuthTestHardLink -LinkPath $outsideLink -TargetPath $manifestPath
+            $linkArtifact.Created = $true
+            $linked = $script:GraphKitAuthStageCaptureType::InspectFile(
+                $fixture.StagePath, 'manifest.json')
+            [long] $linked.LinkCount | Should -Be 2
             Set-GraphKitAuthTestStageSealed -StagePath $fixture.StagePath
 
             { Test-GraphKitAuthSealedStage -StagePath $fixture.StagePath -FullVersion $fixture.FullVersion } |
                 Should -Throw '*manifest is not link-count one*'
         }
         finally {
+            Remove-GraphKitAuthTestMutationArtifacts -Artifacts $cleanupArtifacts
             Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
         }
     }
@@ -2003,7 +2210,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                     $targetPath, [IO.UnixFileMode]::UserRead)
                 $targetUnixModeBefore = [IO.File]::GetUnixFileMode($targetPath)
             }
-            Set-GraphKitAuthTestTreeWritable -Path $linkSafetyRoot
+            { Set-GraphKitAuthTestTreeWritable -Path $linkSafetyRoot } |
+                Should -Throw '*refused a link or reparse entry*'
             if ($IsWindows) {
                 (Get-Acl -LiteralPath $targetPath).Sddl |
                     Should -BeExactly $targetAclBefore
@@ -2192,7 +2400,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $null = New-Item -ItemType Junction -Path $linkPath -Target $external
         try {
             { New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput -FullVersion "0.4.0-r8.fixture.junction-$RootKind" `
-                -PayloadSourceRoot (Join-Path $script:stagePath 'payload') } | Should -Throw '*without following*'
+                -PayloadSourceRoot (Join-Path $script:stagePath 'payload') } |
+                Should -Throw '*not the required no-follow directory*'
 
             (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash | Should -BeExactly $hashBefore
             (Get-Acl -LiteralPath $external).Sddl | Should -BeExactly $aclBefore
@@ -2652,13 +2861,15 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $openReadNoFollow | Should -Not -BeNullOrEmpty
         $getNativeFacts | Should -Not -BeNullOrEmpty
         $raceHandle = $openReadNoFollow.Invoke(
-            $null, [object[]] @($raceOriginal, $false))
+            $null, [object[]] @([string] $raceOriginal, [bool] $false))
         try {
             [IO.File]::Move($raceOriginal, $raceParked)
             [IO.File]::Move($raceReplacement, $raceOriginal)
             [IO.File]::SetAttributes($raceOriginal, [IO.FileAttributes]::ReadOnly)
             $handleFacts = $getNativeFacts.Invoke(
-                $null, [object[]] @($raceHandle, $raceOriginal))
+                $null, [object[]] @(
+                    [Microsoft.Win32.SafeHandles.SafeFileHandle] $raceHandle,
+                    [string] $raceOriginal))
             $factsType = $handleFacts.GetType()
             $instanceNonPublic = [Reflection.BindingFlags]'Instance, NonPublic'
             $factsType.GetProperty('Identity', $instanceNonPublic).GetValue($handleFacts) |

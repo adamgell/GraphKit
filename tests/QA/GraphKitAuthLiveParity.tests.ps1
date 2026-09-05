@@ -601,13 +601,68 @@ function New-Task8FixtureHardLink {
     )
     $targetPath = Join-Path $State.RootPath (
         $RelativePath -replace '/', [IO.Path]::DirectorySeparatorChar)
-    [GraphKitTask8HardLinkFixture]::Create($LinkPath, $targetPath)
     $evidenceType = $State.RootEvidence.GetType()
     $nativeType = $evidenceType.Assembly.GetType(
         $evidenceType.Namespace + '.GraphKitAuthStageCapture', $true, $false)
-    $linked = $nativeType::InspectFile($State.RootPath, $RelativePath)
-    if ([long]$linked.LinkCount -ne 2) {
-        throw 'The native fixture did not establish an exact two-link file.'
+    $failures = [Collections.Generic.List[Exception]]::new()
+    $sourceDirectory = $null
+    $linkCreated = $false
+    if ($IsWindows) {
+        $sourceDirectory = [IO.Path]::GetDirectoryName($targetPath)
+        try {
+            Set-Task8FixtureOwnerWritable -Path $sourceDirectory -Directory $true
+        }
+        catch { $failures.Add($_.Exception) | Out-Null }
+        if ($failures.Count -eq 0) {
+            try {
+                [GraphKitTask8HardLinkFixture]::Create($LinkPath, $targetPath)
+                $linkCreated = $true
+            }
+            catch { $failures.Add($_.Exception) | Out-Null }
+        }
+        try {
+            $nativeType::SetOwnerOnly($sourceDirectory, $true, $false)
+        }
+        catch { $failures.Add($_.Exception) | Out-Null }
+    }
+    else {
+        try {
+            [GraphKitTask8HardLinkFixture]::Create($LinkPath, $targetPath)
+            $linkCreated = $true
+        }
+        catch { $failures.Add($_.Exception) | Out-Null }
+    }
+    if ($failures.Count -eq 0) {
+        try {
+            $linked = $nativeType::InspectFile($State.RootPath, $RelativePath)
+            if ([long]$linked.LinkCount -ne 2) {
+                throw 'The native fixture did not establish an exact two-link file.'
+            }
+        }
+        catch { $failures.Add($_.Exception) | Out-Null }
+    }
+    if ($failures.Count -gt 0) {
+        if ($linkCreated) {
+            if ($IsWindows) {
+                try {
+                    Set-Task8FixtureOwnerWritable -Path $targetPath -Directory $false
+                }
+                catch { $failures.Add($_.Exception) | Out-Null }
+            }
+            try { [IO.File]::Delete($LinkPath) }
+            catch { $failures.Add($_.Exception) | Out-Null }
+            if ($IsWindows) {
+                try { $nativeType::SetOwnerOnly($targetPath, $false, $false) }
+                catch { $failures.Add($_.Exception) | Out-Null }
+            }
+        }
+        if ($IsWindows -and $null -ne $sourceDirectory) {
+            try { $nativeType::SetOwnerOnly($sourceDirectory, $true, $false) }
+            catch { $failures.Add($_.Exception) | Out-Null }
+        }
+        throw [AggregateException]::new(
+            'The native hard-link fixture failed; bounded cleanup was attempted.',
+            $failures.ToArray())
     }
 }
 
