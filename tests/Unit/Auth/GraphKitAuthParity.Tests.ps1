@@ -874,7 +874,7 @@ public sealed class Task7LegacyAuthenticationResult
             [Parameter(Mandatory)] $Row
         )
         $key = 'task7-parity-' + [guid]::NewGuid().ToString('N')
-        $jobs = @()
+        $workers = [Collections.Generic.List[object]]::new()
         $outerTokens = [string[]] @($Row.input.tokens)
         $outerExpiries = [DateTimeOffset[]] @($Row.input.expiresOnUtc | ForEach-Object {
             ConvertFrom-Task7TimestampLiteral ([string] $_)
@@ -888,54 +888,93 @@ public sealed class Task7LegacyAuthenticationResult
         )
         $waitersObserved = $false
         try {
-            $jobs = @(
-                1..4 | ForEach-Object {
-                    Start-ThreadJob -ScriptBlock {
-                        param($Manifest, $Key)
+            # Start-ThreadJob shares a process-global throttle. Prepare dedicated
+            # runspaces synchronously so this test measures token-flight fan-out,
+            # not ambient job-scheduler capacity.
+            1..4 | ForEach-Object {
+                $runspace = [runspacefactory]::CreateRunspace()
+                $worker = [pscustomobject] @{
+                    PowerShell = $null
+                    Runspace = $runspace
+                    Async = $null
+                    Received = $false
+                }
+                $workers.Add($worker)
+                $runspace.ThreadOptions =
+                    [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+                $runspace.Open()
+
+                $initializer = [powershell]::Create()
+                try {
+                    $initializer.Runspace = $runspace
+                    $null = $initializer.AddCommand('Import-Module').
+                        AddParameter('Name', $script:BuiltManifest).
+                        AddParameter('Force', $true).
+                        AddParameter('ErrorAction', 'Stop').Invoke()
+                    if ($initializer.HadErrors) {
+                        $messages = @($initializer.Streams.Error | ForEach-Object {
+                            $_.Exception.Message
+                        }) -join '; '
+                        throw "Dedicated Task 7 worker failed to import GraphKit: $messages"
+                    }
+                }
+                finally {
+                    $initializer.Dispose()
+                }
+
+                $pipeline = [powershell]::Create()
+                $worker.PowerShell = $pipeline
+                $pipeline.Runspace = $runspace
+                $null = $pipeline.AddScript({
+                    param($Key)
+                    $module = Get-Module -Name GraphKit
+                    $state = $null
+                    $outcome = $null
+                    try {
+                        $state = & $module { $script:GraphKitModuleLifecycle }
+                        [GraphKit.Tests.Task7LegacyHarness]::ParticipantReadyAndWait()
+                        $result = & $module {
+                            param($Key)
+                            Invoke-GraphTokenSingleFlight -Key $Key -AcquireScript {
+                                $auth = [GraphKit.Tests.Task7LegacyHarness]::AcquireOuter()
+                                $token = [GraphTokenResult]::new()
+                                $token.AccessToken = $auth.AccessToken
+                                $token.ExpiresOnUtc = $auth.ExpiresOn
+                                $token.ReceivedOnUtc = [DateTimeOffset]::UtcNow
+                                $token.TokenType = 'Bearer'
+                                $token.Scopes = [string[]] @('https://graph.microsoft.com/.default')
+                                $token.VerifiedTenantId = $null
+                                $token.TokenFingerprint = Get-GraphFingerprint -Value $auth.AccessToken
+                                $token.CredentialGeneration = 'task7-generation'
+                                return $token
+                            }
+                        } $Key
+                        $outcome = [pscustomobject] @{ Failed = $false; Result = $result }
+                    }
+                    catch {
+                        [GraphKit.Tests.Task7LegacyHarness]::RecordOuterFailure($_.Exception)
+                        $outcome = [pscustomobject] @{
+                            Failed = $true
+                            Message = $_.Exception.Message
+                            ErrorText = ($_ | Out-String)
+                        }
+                    }
+                    finally {
+                        if ($null -ne $module) {
+                            Remove-Module $module -Force -ErrorAction SilentlyContinue
+                        }
+                        $cleaned = $null -ne $state -and $state.WaitForCleanup(5000)
                         $module = $null
                         $state = $null
-                        $outcome = $null
-                        try {
-                            $module = Import-Module $Manifest -Force -PassThru -ErrorAction Stop
-                            $state = & $module { $script:GraphKitModuleLifecycle }
-                            [GraphKit.Tests.Task7LegacyHarness]::ParticipantReadyAndWait()
-                            $result = & $module {
-                                param($Key)
-                                Invoke-GraphTokenSingleFlight -Key $Key -AcquireScript {
-                                    $auth = [GraphKit.Tests.Task7LegacyHarness]::AcquireOuter()
-                                    $token = [GraphTokenResult]::new()
-                                    $token.AccessToken = $auth.AccessToken
-                                    $token.ExpiresOnUtc = $auth.ExpiresOn
-                                    $token.ReceivedOnUtc = [DateTimeOffset]::UtcNow
-                                    $token.TokenType = 'Bearer'
-                                    $token.Scopes = [string[]] @('https://graph.microsoft.com/.default')
-                                    $token.VerifiedTenantId = $null
-                                    $token.TokenFingerprint = Get-GraphFingerprint -Value $auth.AccessToken
-                                    $token.CredentialGeneration = 'task7-generation'
-                                    return $token
-                                }
-                            } $Key
-                            $outcome = [pscustomobject] @{ Failed = $false; Result = $result }
-                        }
-                        catch {
-                            [GraphKit.Tests.Task7LegacyHarness]::RecordOuterFailure($_.Exception)
-                            $outcome = [pscustomobject] @{
-                                Failed = $true
-                                Message = $_.Exception.Message
-                                ErrorText = ($_ | Out-String)
-                            }
-                        }
-                        finally {
-                            if ($null -ne $module) { Remove-Module $module -Force -ErrorAction SilentlyContinue }
-                            $cleaned = $null -ne $state -and $state.WaitForCleanup(5000)
-                            $module = $null
-                            $state = $null
-                        }
-                        $outcome | Add-Member NoteProperty ChildCleanup $cleaned
-                        return $outcome
-                    } -ArgumentList $script:BuiltManifest, $key
-                }
-            )
+                    }
+                    $outcome | Add-Member NoteProperty ChildCleanup $cleaned
+                    return $outcome
+                }).AddArgument($key)
+            }
+
+            foreach ($worker in $workers) {
+                $worker.Async = $worker.PowerShell.BeginInvoke()
+            }
             [GraphKit.Tests.Task7LegacyHarness]::WaitReady(5000) | Should -BeTrue
             [GraphKit.Tests.Task7LegacyHarness]::Go()
             [GraphKit.Tests.Task7LegacyHarness]::WaitEntered(5000) | Should -BeTrue
@@ -944,9 +983,14 @@ public sealed class Task7LegacyAuthenticationResult
                 5000
             )
             [GraphKit.Tests.Task7LegacyHarness]::ReleaseOuter()
-            $completed = @($jobs | Wait-Job -Timeout 10)
-            $completed.Count | Should -Be 4
-            $outcomes = @($jobs | Receive-Job)
+            $outcomes = @(
+                foreach ($worker in $workers) {
+                    $worker.Async.AsyncWaitHandle.WaitOne(10000) |
+                        Should -BeTrue -Because 'each dedicated Task 7 worker must complete'
+                    $worker.Received = $true
+                    $worker.PowerShell.EndInvoke($worker.Async)
+                }
+            )
             $outcomes.Count | Should -Be 4
             @($outcomes | Where-Object Failed).Count | Should -Be 4
             $actualFailures = @([GraphKit.Tests.Task7LegacyHarness]::OuterFailures)
@@ -986,8 +1030,20 @@ public sealed class Task7LegacyAuthenticationResult
         }
         finally {
             [GraphKit.Tests.Task7LegacyHarness]::CancelOuter()
-            foreach ($job in $jobs) {
-                Remove-Job $job -Force -ErrorAction SilentlyContinue
+            foreach ($worker in $workers) {
+                if ($null -ne $worker.Async -and -not $worker.Received) {
+                    if ($worker.Async.AsyncWaitHandle.WaitOne(10000)) {
+                        try { $null = $worker.PowerShell.EndInvoke($worker.Async) } catch { }
+                    }
+                    else {
+                        try { $worker.PowerShell.Stop() } catch { }
+                    }
+                }
+                if ($null -ne $worker.PowerShell) { $worker.PowerShell.Dispose() }
+                if ($null -ne $worker.Runspace) {
+                    try { $worker.Runspace.Close() } catch { }
+                    $worker.Runspace.Dispose()
+                }
             }
         }
     }
