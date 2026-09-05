@@ -825,7 +825,7 @@ Describe 'Canonical tested release proof' {
             $script:fixture.PackagePath,
             [System.IO.Compression.ZipArchiveMode]::Update)
         try {
-            Add-GraphKitFixtureArchiveText -Archive $archive -EntryName "Data/probé.ps1" -Content 'composed'
+            Add-GraphKitFixtureArchiveText -Archive $archive -EntryName "Data/prob$([char]0x00E9).ps1" -Content 'composed'
             Add-GraphKitFixtureArchiveText -Archive $archive -EntryName "Data/probe$([char]0x0301).ps1" -Content 'decomposed'
         }
         finally {
@@ -913,7 +913,7 @@ Describe 'Canonical tested release proof' {
         $proof = Get-Content -LiteralPath $script:fixture.ProofPath -Raw | ConvertFrom-Json
         $hash = ('d' * 64) -join ''
         $proof.module.files = @($proof.module.files) + @(
-            [pscustomobject] @{ path = "Data/probé.ps1"; sha256 = $hash }
+            [pscustomobject] @{ path = "Data/prob$([char]0x00E9).ps1"; sha256 = $hash }
             [pscustomobject] @{ path = "Data/probe$([char]0x0301).ps1"; sha256 = $hash }
         )
         $proof | ConvertTo-Json -Depth 10 |

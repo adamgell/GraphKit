@@ -42,7 +42,8 @@ BeforeAll {
     function Get-R8TrainVersionWithTimeout {
         param(
             [Parameter(Mandatory)] [string] $RepositoryRoot,
-            [Parameter(Mandatory)] [int] $TimeoutMilliseconds
+            [Parameter(Mandatory)] [int] $TimeoutMilliseconds,
+            [string] $VersionScript = $script:versionScript
         )
 
         $start = [Diagnostics.ProcessStartInfo]::new()
@@ -53,21 +54,38 @@ BeforeAll {
         $null = $start.ArgumentList.Add('-NoLogo')
         $null = $start.ArgumentList.Add('-NoProfile')
         $null = $start.ArgumentList.Add('-File')
-        $null = $start.ArgumentList.Add($script:versionScript)
+        $null = $start.ArgumentList.Add($VersionScript)
         $null = $start.ArgumentList.Add('-RepositoryRoot')
         $null = $start.ArgumentList.Add($RepositoryRoot)
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $start
-        $null = $process.Start()
-        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            $process.Kill($true)
-            $process.WaitForExit()
-            return [pscustomobject] @{ Running = $true; ExitCode = $null; Output = '' }
+        try {
+            $null = $process.Start()
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            $timedOut = -not $process.WaitForExit($TimeoutMilliseconds)
+            if ($timedOut) {
+                try {
+                    $process.Kill($true)
+                }
+                catch [System.InvalidOperationException] {
+                    # The process exited between the bounded wait and kill.
+                }
+                $process.WaitForExit()
+            }
+            $output = ($stdoutTask.GetAwaiter().GetResult() +
+                $stderrTask.GetAwaiter().GetResult()).Trim()
+            if ($timedOut) {
+                return [pscustomobject] @{ Running = $true; ExitCode = $null; Output = $output }
+            }
+            return [pscustomobject] @{
+                Running = $false
+                ExitCode = $process.ExitCode
+                Output = $output
+            }
         }
-        [pscustomobject] @{
-            Running = $false
-            ExitCode = $process.ExitCode
-            Output = ($process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()).Trim()
+        finally {
+            $process.Dispose()
         }
     }
 
@@ -606,6 +624,32 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
             -Because 'stdout and stderr must drain concurrently even when stderr exceeds the pipe buffer'
         $floodResult.ExitCode | Should -Be 0 -Because $floodResult.Output
         $floodResult.Output | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
+
+        $parentFloodScript = Join-Path $TestDrive 'parent-process-stream-flood.ps1'
+        Set-Content -LiteralPath $parentFloodScript -NoNewline -Encoding utf8NoBOM -Value @'
+param([string] $RepositoryRoot)
+[Console]::Out.Write([string]::new('o', 131072))
+[Console]::Error.Write([string]::new('e', 131072))
+'@
+        $parentFloodResult = Get-R8TrainVersionWithTimeout -RepositoryRoot $root `
+            -TimeoutMilliseconds 5000 -VersionScript $parentFloodScript
+        $parentFloodResult.Running | Should -BeFalse `
+            -Because 'the timeout helper must drain both redirected streams before waiting for child exit'
+        $parentFloodResult.ExitCode | Should -Be 0
+        $parentFloodResult.Output.Length | Should -BeGreaterThan 200000
+
+        $timeoutOutputScript = Join-Path $TestDrive 'parent-process-timeout-output.ps1'
+        Set-Content -LiteralPath $timeoutOutputScript -NoNewline -Encoding utf8NoBOM -Value @'
+param([string] $RepositoryRoot)
+[Console]::Out.Write('captured-before-timeout')
+[Console]::Out.Flush()
+Start-Sleep -Seconds 30
+'@
+        $timeoutOutputResult = Get-R8TrainVersionWithTimeout -RepositoryRoot $root `
+            -TimeoutMilliseconds 3000 -VersionScript $timeoutOutputScript
+        $timeoutOutputResult.Running | Should -BeTrue
+        $timeoutOutputResult.ExitCode | Should -BeNullOrEmpty
+        $timeoutOutputResult.Output | Should -Match 'captured-before-timeout'
 
         $bidirectionalRoot = New-R8TrainVersionFixture
         $ignoredRoot = Join-Path $bidirectionalRoot 'output'
