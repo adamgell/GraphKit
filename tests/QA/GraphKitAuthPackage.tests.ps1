@@ -2207,7 +2207,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         [IO.File]::ReadAllText($unrecorded) | Should -BeExactly 'partial-unregistered'
     }
 
-    It 'declares and consumes the exact Windows owner-only ACL evidence schema' {
+    It 'declares exact Windows ACL evidence and preserves handle-bound mutation ordering' {
         $helper = Get-Content -LiteralPath (
             Join-Path $script:repoRoot 'scripts/private/GraphKit.AuthStageCapture.cs') -Raw
         $task = Get-Content -LiteralPath $script:taskPath -Raw
@@ -2222,6 +2222,45 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
         $helper | Should -Match 'directory \? FileSystemRights\.ReadAndExecute : FileSystemRights\.Read'
         $helper | Should -Match 'InheritanceFlags\.None'
+        $helper | Should -Match ([regex]::Escape(
+            'private const uint WriteDacAccess = 0x00040000;'))
+        $helper | Should -Match ([regex]::Escape(
+            'private const uint WriteOwnerAccess = 0x00080000;'))
+        @([regex]::Matches($helper,
+            'SetOwnerOnlyWritableFile\(\s*destinationStream,\s*destinationPath\)')).Count |
+            Should -Be 2
+        $handleSetter = [regex]::Match($helper,
+            '(?ms)^    private static void SetOwnerOnlyWritableFile\(.*?(?=^    private static )').Value
+        $handleSetter | Should -Not -BeNullOrEmpty
+        $handleSetter | Should -Match (
+            'FileSystemAclExtensions\.SetAccessControl\(\s*stream,\s*security\)')
+        $handleSetter | Should -Not -Match 'SetOwnerOnlyWindows|new FileInfo|File\.SetAttributes'
+        $openDestination = [regex]::Match($helper,
+            '(?ms)^    private static FileStream OpenDestinationCreateNew\(.*?(?=^    private static )').Value
+        $openDestination | Should -Match (
+            'GenericRead \| GenericWrite \| DeleteAccess \| WriteDacAccess \| WriteOwnerAccess')
+        $openDestination | Should -Match '(?s)CreateFileWithSecurityW\(.*?ShareRead,'
+        $openDestination | Should -Match '(?s)CreateFileW\(.*?ShareRead,'
+        $openDestination | Should -Not -Match 'ShareWrite|ShareDelete'
+        $pathSetter = [regex]::Match($helper,
+            '(?ms)^    private static void SetOwnerOnlyWindows\(.*?(?=^    private )').Value
+        $pathSetter | Should -Match (
+            '(?s)if \(!currentOwner\.Equals\(currentIdentity\)\).*?throw new IOException')
+        $pathSetter | Should -Match (
+            'CreateOwnerOnlyWindowsSecurity\(\s*directory,\s*writable,\s*setOwner: false\)')
+        $pathSetter | Should -Not -Match 'security\.SetOwner|setOwner\s*='
+        $sealAttributes = $pathSetter.IndexOf('if (!directory && !writable &&')
+        $applyAcl = $pathSetter.IndexOf('FileSystemAclExtensions.SetAccessControl')
+        $unsealAttributes = $pathSetter.IndexOf('if (!directory && writable &&')
+        $pathSetter | Should -Match (
+            'FileAttributes attributes = directory \? default : File\.GetAttributes\(path\);')
+        $pathSetter | Should -Match (
+            '(?s)!writable.*?== 0.*?File\.SetAttributes\(\s*path,\s*\(attributes & ~FileAttributes\.Normal\) \|\s*FileAttributes\.ReadOnly\)')
+        $pathSetter | Should -Match (
+            '(?s)writable.*?!= 0.*?FileAttributes writableAttributes =\s*attributes & ~FileAttributes\.ReadOnly;.*?writableAttributes == 0 \? FileAttributes\.Normal : writableAttributes')
+        $sealAttributes | Should -BeGreaterOrEqual 0
+        $applyAcl | Should -BeGreaterThan $sealAttributes
+        $unsealAttributes | Should -BeGreaterThan $applyAcl
     }
 
     It 'orders owner-only parent security before child creation and records initial child access' {
@@ -2288,7 +2327,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $copy.Destination.UnixMode | Should -Be 0x180
     }
 
-    It 'creates a Windows child with only current-identity access before explicit reseal' -ForEach $windowsInitialAccessCases -AllowNullOrEmptyForEach {
+    It 'creates a Windows child with current-identity access and round trips repeated seal transitions' -ForEach $windowsInitialAccessCases -AllowNullOrEmptyForEach {
         Initialize-GraphKitAuthStageCapture
         $root = Join-Path $TestDrive ('windows-initial-access-' + [guid]::NewGuid().ToString('N'))
         $source = Join-Path $root 'source'
@@ -2324,6 +2363,27 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $copy.DestinationInitial.AccessRulesProtected | Should -BeTrue
         $copy.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
         $captured = Join-Path $destination 'candidate.dll'
+        [IO.File]::SetAttributes($captured, [IO.FileAttributes]::Archive)
+        $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $false)
+        $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $false)
+        $sealed = $script:GraphKitAuthStageCaptureType::InspectFile($destination, 'candidate.dll')
+        $sealed.OwnerSid | Should -BeExactly $currentSid.Value
+        $sealed.ExactOwnerOnlyAccess | Should -BeTrue
+        $sealed.OwnerWritable | Should -BeFalse
+        $sealed.FileReadOnly | Should -BeTrue
+        ([IO.File]::GetAttributes($captured) -band [IO.FileAttributes]::Archive) |
+            Should -Be ([IO.FileAttributes]::Archive)
+        $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $true)
+        $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $true)
+        $unsealed = $script:GraphKitAuthStageCaptureType::InspectFile($destination, 'candidate.dll')
+        $unsealed.OwnerSid | Should -BeExactly $currentSid.Value
+        $unsealed.AccessRulesProtected | Should -BeTrue
+        $unsealed.HasInheritedAccessRules | Should -BeFalse
+        $unsealed.OwnerOnlyAccess | Should -BeTrue
+        $unsealed.OwnerWritable | Should -BeTrue
+        $unsealed.FileReadOnly | Should -BeFalse
+        ([IO.File]::GetAttributes($captured) -band [IO.FileAttributes]::Archive) |
+            Should -Be ([IO.FileAttributes]::Archive)
         $renamed = Join-Path $destination 'candidate-renamed.dll'
         [IO.File]::Move($captured, $renamed)
         [IO.File]::Delete($renamed)
@@ -2360,6 +2420,11 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $ordinary = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
             $source, 'candidate.dll', $destination, 'candidate.dll', $false)
         $ordinary.DestinationInitial.OwnerOnlyAccess | Should -BeFalse
+        $ordinary.Destination.OwnerSid | Should -BeExactly $currentSid.Value
+        $ordinary.Destination.AccessRulesProtected | Should -BeTrue
+        $ordinary.Destination.HasInheritedAccessRules | Should -BeFalse
+        $ordinary.Destination.OwnerOnlyAccess | Should -BeTrue
+        $ordinary.Destination.OwnerWritable | Should -BeTrue
 
         $sealed = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
             $source, 'candidate.dll', $sealedDestination, 'candidate.dll', $true)
@@ -2367,6 +2432,11 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Should -BeTrue
         $sealed.DestinationInitial.AccessRulesProtected | Should -BeTrue
         $sealed.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
+        $sealed.Destination.OwnerSid | Should -BeExactly $currentSid.Value
+        $sealed.Destination.AccessRulesProtected | Should -BeTrue
+        $sealed.Destination.HasInheritedAccessRules | Should -BeFalse
+        $sealed.Destination.OwnerOnlyAccess | Should -BeTrue
+        $sealed.Destination.OwnerWritable | Should -BeTrue
 
         $sealedPath = Join-Path $sealedDestination 'candidate.dll'
         $sealedHash = (Get-FileHash -LiteralPath $sealedPath -Algorithm SHA256).Hash

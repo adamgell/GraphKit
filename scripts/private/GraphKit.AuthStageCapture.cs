@@ -52,6 +52,8 @@ public static class GraphKitAuthStageCapture
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint DeleteAccess = 0x00010000;
+    private const uint WriteDacAccess = 0x00040000;
+    private const uint WriteOwnerAccess = 0x00080000;
     private const uint ShareRead = 0x00000001;
     private const uint ShareWrite = 0x00000002;
     private const uint ShareDelete = 0x00000004;
@@ -296,7 +298,7 @@ public static class GraphKitAuthStageCapture
             {
                 throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
             }
-            SetOwnerOnly(destinationHandle, destinationPath, directory: false, writable: true);
+            SetOwnerOnlyWritableFile(destinationStream, destinationPath);
             byte[] buffer = new byte[131072];
             long offset = 0;
             while (offset < sourceBefore.Length)
@@ -459,7 +461,7 @@ public static class GraphKitAuthStageCapture
             {
                 throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
             }
-            SetOwnerOnly(destinationHandle, destinationPath, directory: false, writable: true);
+            SetOwnerOnlyWritableFile(destinationStream, destinationPath);
             RandomAccess.Write(destinationHandle, content, 0);
             RandomAccess.FlushToDisk(destinationHandle);
             GraphKitAuthPathEvidence destination = EvidenceFromHandle(
@@ -506,23 +508,20 @@ public static class GraphKitAuthStageCapture
         File.SetUnixFileMode(path, mode);
     }
 
-    private static void SetOwnerOnly(
-        SafeFileHandle handle,
-        string absolutePath,
-        bool directory,
-        bool writable)
+    private static void SetOwnerOnlyWritableFile(
+        FileStream stream,
+        string absolutePath)
     {
         if (OperatingSystem.IsWindows())
         {
-            // The create handle omits FILE_SHARE_DELETE, so the path cannot be
-            // renamed or replaced while its ACL is applied.
-            SetOwnerOnlyWindows(absolutePath, directory, writable);
+            FileSecurity security = (FileSecurity)CreateOwnerOnlyWindowsSecurity(
+                directory: false, writable: true, setOwner: true);
+            FileSystemAclExtensions.SetAccessControl(stream, security);
             return;
         }
 
-        uint mode = directory
-            ? (writable ? 0x1C0u : 0x140u) // 0700 / 0500
-            : (writable ? 0x180u : 0x100u); // 0600 / 0400
+        SafeFileHandle handle = stream.SafeFileHandle;
+        const uint mode = 0x180u; // 0600
         if (fchmod(handle.DangerousGetHandle().ToInt32(), mode) != 0)
         {
             throw new IOException(
@@ -857,7 +856,7 @@ public static class GraphKitAuthStageCapture
                     };
                     handle = CreateFileWithSecurityW(
                         destinationPath,
-                        GenericRead | GenericWrite | DeleteAccess,
+                        GenericRead | GenericWrite | DeleteAccess | WriteDacAccess | WriteOwnerAccess,
                         ShareRead,
                         ref attributes,
                         CreateNew,
@@ -873,7 +872,7 @@ public static class GraphKitAuthStageCapture
             {
                 handle = CreateFileW(
                     destinationPath,
-                    GenericRead | GenericWrite | DeleteAccess,
+                    GenericRead | GenericWrite | DeleteAccess | WriteDacAccess | WriteOwnerAccess,
                     ShareRead,
                     IntPtr.Zero,
                     CreateNew,
@@ -1194,10 +1193,56 @@ public static class GraphKitAuthStageCapture
 
     private static void SetOwnerOnlyWindows(string path, bool directory, bool writable)
     {
+        FileSystemSecurity currentSecurity = directory
+            ? FileSystemAclExtensions.GetAccessControl(
+                new DirectoryInfo(path), AccessControlSections.Owner)
+            : FileSystemAclExtensions.GetAccessControl(
+                new FileInfo(path), AccessControlSections.Owner);
+        SecurityIdentifier currentOwner = (SecurityIdentifier)currentSecurity.GetOwner(
+            typeof(SecurityIdentifier));
+        SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
+            ?? throw new IOException("The current Windows identity has no SID.");
+        if (!currentOwner.Equals(currentIdentity))
+        {
+            throw new IOException(
+                $"Owner-only access refused for '{path}' because its owner is not the current Windows identity.");
+        }
+        FileSystemSecurity security = CreateOwnerOnlyWindowsSecurity(
+            directory, writable, setOwner: false);
+        FileAttributes attributes = directory ? default : File.GetAttributes(path);
+        if (!directory && !writable &&
+            (attributes & FileAttributes.ReadOnly) == 0)
+        {
+            File.SetAttributes(
+                path,
+                (attributes & ~FileAttributes.Normal) | FileAttributes.ReadOnly);
+        }
+        if (directory)
+            FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), (DirectorySecurity)security);
+        else
+            FileSystemAclExtensions.SetAccessControl(new FileInfo(path), (FileSecurity)security);
+        if (!directory && writable &&
+            (attributes & FileAttributes.ReadOnly) != 0)
+        {
+            FileAttributes writableAttributes = attributes & ~FileAttributes.ReadOnly;
+            File.SetAttributes(
+                path,
+                writableAttributes == 0 ? FileAttributes.Normal : writableAttributes);
+        }
+    }
+
+    private static FileSystemSecurity CreateOwnerOnlyWindowsSecurity(
+        bool directory,
+        bool writable,
+        bool setOwner)
+    {
         WindowsIdentity identity = WindowsIdentity.GetCurrent();
         SecurityIdentifier owner = identity.User ?? throw new IOException("The current Windows identity has no SID.");
         FileSystemSecurity security = directory ? new DirectorySecurity() : new FileSecurity();
-        security.SetOwner(owner);
+        if (setOwner)
+        {
+            security.SetOwner(owner);
+        }
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         FileSystemRights rights = writable
             ? FileSystemRights.FullControl
@@ -1205,14 +1250,7 @@ public static class GraphKitAuthStageCapture
         InheritanceFlags inheritance = directory && writable ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None;
         security.AddAccessRule(new FileSystemAccessRule(owner, rights, inheritance,
             PropagationFlags.None, AccessControlType.Allow));
-        if (directory)
-            FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), (DirectorySecurity)security);
-        else
-            FileSystemAclExtensions.SetAccessControl(new FileInfo(path), (FileSecurity)security);
-        if (!directory)
-        {
-            File.SetAttributes(path, writable ? FileAttributes.Normal : FileAttributes.ReadOnly);
-        }
+        return security;
     }
 
     private sealed class WindowsPermissionFacts
