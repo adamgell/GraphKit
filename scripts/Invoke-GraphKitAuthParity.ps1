@@ -35,6 +35,7 @@ $script:GraphKitAuthParityExpectedPublicAbiSha256 =
 $script:GraphKitAuthParityExpectedNativeSourceSha256 =
     'c4132fbc857e8c96e741c6f0eda371f62ec59bd61c669573faaab18d998a3808'
 $script:GraphKitAuthParityNativeType = $null
+$script:GraphKitAuthParityProcessTreeType = $null
 $script:GraphKitAuthParityMaxEntries = 4096
 $script:GraphKitAuthParityMaxPackageBytes = 512MB
 $script:GraphKitAuthParityMaxEntryBytes = 64MB
@@ -44,6 +45,10 @@ $script:GraphKitAuthParityMaxCompressionRatio = 200
 $script:GraphKitAuthParityMarkerName = '.graphkit-auth-parity-runner'
 $script:GraphKitAuthParitySnapshotName = 'candidate.nupkg'
 $script:GraphKitAuthParityModuleName = 'module'
+$script:GraphKitAuthParityWorkerKind = 'GraphKit.Task8.ParityWorkerRequest/1'
+$script:GraphKitAuthParityWorkerResultKind = 'GraphKit.Task8.ParityWorkerResult/1'
+$script:GraphKitAuthParityMaxWorkerRequestBytes = 16MB
+$script:GraphKitAuthParityMaxWorkerStreamBytes = 64KB
 
 function Get-GraphKitAuthParityAbiTypeDisplayName {
     param([Parameter(Mandatory)][Type] $Type)
@@ -1989,10 +1994,1297 @@ function Invoke-GraphKitAuthParityLiveCore {
     }
 }
 
+function ConvertTo-GraphKitAuthParityWorkerEvidence {
+    param([Parameter(Mandatory)] $Evidence)
+    return [pscustomobject][ordered]@{
+        RelativePath = [string]$Evidence.RelativePath
+        PhysicalPath = [string]$Evidence.PhysicalPath
+        NativeIdentity = [string]$Evidence.NativeIdentity
+        Sha256 = [string]$Evidence.Sha256
+        Length = [long]$Evidence.Length
+        LinkCount = [long]$Evidence.LinkCount
+        UnixMode = [int]$Evidence.UnixMode
+        OwnerUid = [uint32]$Evidence.OwnerUid
+        EffectiveUid = [uint32]$Evidence.EffectiveUid
+        PermissionEvidence = [string]$Evidence.PermissionEvidence
+        IsDirectory = [bool]$Evidence.IsDirectory
+        IsRegularFile = [bool]$Evidence.IsRegularFile
+        IsReparsePoint = [bool]$Evidence.IsReparsePoint
+        OwnerWritable = [bool]$Evidence.OwnerWritable
+        OwnerSid = [string]$Evidence.OwnerSid
+        CurrentIdentitySid = [string]$Evidence.CurrentIdentitySid
+        CurrentOwnerSid = [string]$Evidence.CurrentOwnerSid
+        AccessRulesProtected = [bool]$Evidence.AccessRulesProtected
+        HasInheritedAccessRules = [bool]$Evidence.HasInheritedAccessRules
+        OwnerOnlyAccess = [bool]$Evidence.OwnerOnlyAccess
+        ExactOwnerOnlyAccess = [bool]$Evidence.ExactOwnerOnlyAccess
+        ExactWritableOwnerOnlyDirectoryAccess =
+            [bool]$Evidence.ExactWritableOwnerOnlyDirectoryAccess
+        FileReadOnly = [bool]$Evidence.FileReadOnly
+    }
+}
+
+function ConvertFrom-GraphKitAuthParityWorkerEvidence {
+    param([Parameter(Mandatory)] $Evidence)
+    $names = @(
+        'RelativePath','PhysicalPath','NativeIdentity','Sha256','Length','LinkCount','UnixMode',
+        'OwnerUid','EffectiveUid','PermissionEvidence','IsDirectory','IsRegularFile',
+        'IsReparsePoint','OwnerWritable','OwnerSid','CurrentIdentitySid','CurrentOwnerSid',
+        'AccessRulesProtected','HasInheritedAccessRules','OwnerOnlyAccess',
+        'ExactOwnerOnlyAccess','ExactWritableOwnerOnlyDirectoryAccess','FileReadOnly')
+    if (-not (Test-GraphKitAuthParityExactProperties -Value $Evidence -Names $names)) {
+        throw [InvalidOperationException]::new('The protected parity worker evidence schema is invalid.')
+    }
+    foreach ($name in @(
+        'RelativePath','PhysicalPath','NativeIdentity','Sha256','PermissionEvidence','OwnerSid',
+        'CurrentIdentitySid','CurrentOwnerSid')) {
+        if ($null -eq $Evidence.$name -or $Evidence.$name.GetType() -ne [string]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker evidence contains an invalid string.')
+        }
+    }
+    foreach ($name in @(
+        'IsDirectory','IsRegularFile','IsReparsePoint','OwnerWritable','AccessRulesProtected',
+        'HasInheritedAccessRules','OwnerOnlyAccess','ExactOwnerOnlyAccess',
+        'ExactWritableOwnerOnlyDirectoryAccess','FileReadOnly')) {
+        if ($null -eq $Evidence.$name -or $Evidence.$name.GetType() -ne [bool]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker evidence contains an invalid Boolean.')
+        }
+    }
+    if ($Evidence.Length.GetType() -notin @([long],[int]) -or
+        $Evidence.LinkCount.GetType() -notin @([long],[int]) -or
+        $Evidence.UnixMode.GetType() -notin @([long],[int]) -or
+        $Evidence.OwnerUid.GetType() -notin @([long],[int]) -or
+        $Evidence.EffectiveUid.GetType() -notin @([long],[int])) {
+        throw [InvalidOperationException]::new(
+            'The protected parity worker evidence contains an invalid integer.')
+    }
+    return [pscustomobject][ordered]@{
+        RelativePath = [string]$Evidence.RelativePath
+        PhysicalPath = [string]$Evidence.PhysicalPath
+        NativeIdentity = [string]$Evidence.NativeIdentity
+        Sha256 = [string]$Evidence.Sha256
+        Length = [long]$Evidence.Length
+        LinkCount = [long]$Evidence.LinkCount
+        UnixMode = [int]$Evidence.UnixMode
+        OwnerUid = [uint32]$Evidence.OwnerUid
+        EffectiveUid = [uint32]$Evidence.EffectiveUid
+        PermissionEvidence = [string]$Evidence.PermissionEvidence
+        IsDirectory = [bool]$Evidence.IsDirectory
+        IsRegularFile = [bool]$Evidence.IsRegularFile
+        IsReparsePoint = [bool]$Evidence.IsReparsePoint
+        OwnerWritable = [bool]$Evidence.OwnerWritable
+        OwnerSid = [string]$Evidence.OwnerSid
+        CurrentIdentitySid = [string]$Evidence.CurrentIdentitySid
+        CurrentOwnerSid = [string]$Evidence.CurrentOwnerSid
+        AccessRulesProtected = [bool]$Evidence.AccessRulesProtected
+        HasInheritedAccessRules = [bool]$Evidence.HasInheritedAccessRules
+        OwnerOnlyAccess = [bool]$Evidence.OwnerOnlyAccess
+        ExactOwnerOnlyAccess = [bool]$Evidence.ExactOwnerOnlyAccess
+        ExactWritableOwnerOnlyDirectoryAccess =
+            [bool]$Evidence.ExactWritableOwnerOnlyDirectoryAccess
+        FileReadOnly = [bool]$Evidence.FileReadOnly
+    }
+}
+
+function New-GraphKitAuthParityWorkerRequest {
+    param(
+        [Parameter(Mandatory)] $State,
+        [Parameter(Mandatory)][string] $Nonce,
+        [Parameter(Mandatory)][string] $Execution,
+        [Parameter(Mandatory)][string] $Mode,
+        [AllowEmptyString()][string] $ProfileId,
+        [AllowEmptyString()][string] $StorePath,
+        [Parameter(Mandatory)][bool] $StorePathBound
+    )
+    $fileEvidence = foreach ($relative in $State.ExpectedFiles) {
+        [pscustomobject][ordered]@{
+            relativePath = [string]$relative
+            evidence = ConvertTo-GraphKitAuthParityWorkerEvidence `
+                -Evidence $State.FileEvidence[$relative]
+        }
+    }
+    $directoryEvidence = foreach ($relative in $State.ExpectedDirectories) {
+        [pscustomobject][ordered]@{
+            relativePath = [string]$relative
+            evidence = ConvertTo-GraphKitAuthParityWorkerEvidence `
+                -Evidence $State.DirectoryEvidence[$relative]
+        }
+    }
+    return [pscustomobject][ordered]@{
+        recordKind = $script:GraphKitAuthParityWorkerKind
+        nonce = $Nonce
+        execution = $Execution
+        authMode = $Mode
+        packageSha256 = [string]$State.CandidateSha256
+        moduleVersion = [string]$State.ModuleVersion
+        profileId = $(if ($Execution -ceq 'Live') { $ProfileId } else { '' })
+        storePathBound = $StorePathBound
+        storePath = $(if ($StorePathBound) { $StorePath } else { '' })
+        state = [pscustomobject][ordered]@{
+            tempParentPath = [string]$State.TempParentPath
+            tempParentParent = [string]$State.TempParentParent
+            tempParentName = [string]$State.TempParentName
+            tempParentEvidence = ConvertTo-GraphKitAuthParityWorkerEvidence `
+                -Evidence $State.TempParentEvidence
+            rootName = [string]$State.RootName
+            rootPath = [string]$State.RootPath
+            rootEvidence = ConvertTo-GraphKitAuthParityWorkerEvidence `
+                -Evidence $State.RootEvidence
+            moduleRoot = [string]$State.ModuleRoot
+            extractedManifestPath = [string]$State.ExtractedManifestPath
+            extractedModulePath = [string]$State.ExtractedModulePath
+            sealed = [bool]$State.Sealed
+            expectedFiles = [string[]]@($State.ExpectedFiles)
+            expectedDirectories = [string[]]@($State.ExpectedDirectories)
+            fileEvidence = [object[]]@($fileEvidence)
+            directoryEvidence = [object[]]@($directoryEvidence)
+        }
+    }
+}
+
+function Assert-GraphKitAuthParityJsonHasNoDuplicateProperties {
+    param([Parameter(Mandatory)][Text.Json.JsonElement] $Element)
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw [InvalidOperationException]::new(
+                    'The protected parity worker JSON contains a duplicate property.')
+            }
+            Assert-GraphKitAuthParityJsonHasNoDuplicateProperties -Element $property.Value
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-GraphKitAuthParityJsonHasNoDuplicateProperties -Element $item
+        }
+    }
+}
+
+function ConvertFrom-GraphKitAuthParityWorkerJson {
+    param(
+        [Parameter(Mandatory)][string] $Json,
+        [Parameter(Mandatory)][long] $MaximumBytes
+    )
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    if ($utf8.GetByteCount($Json) -gt $MaximumBytes) {
+        throw [InvalidOperationException]::new('The protected parity worker JSON exceeded its bound.')
+    }
+    $document = [Text.Json.JsonDocument]::Parse($Json)
+    try {
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker JSON root is invalid.')
+        }
+        Assert-GraphKitAuthParityJsonHasNoDuplicateProperties -Element $document.RootElement
+    }
+    finally { $document.Dispose() }
+    return $Json | ConvertFrom-Json -Depth 32 -NoEnumerate -ErrorAction Stop
+}
+
+function ConvertFrom-GraphKitAuthParityWorkerState {
+    param([Parameter(Mandatory)] $Request)
+    $topNames = @(
+        'recordKind','nonce','execution','authMode','packageSha256','moduleVersion','profileId',
+        'storePathBound','storePath','state')
+    $stateNames = @(
+        'tempParentPath','tempParentParent','tempParentName','tempParentEvidence','rootName',
+        'rootPath','rootEvidence','moduleRoot','extractedManifestPath','extractedModulePath',
+        'sealed','expectedFiles','expectedDirectories','fileEvidence','directoryEvidence')
+    if (-not (Test-GraphKitAuthParityExactProperties -Value $Request -Names $topNames) -or
+        -not (Test-GraphKitAuthParityExactProperties -Value $Request.state -Names $stateNames)) {
+        throw [InvalidOperationException]::new('The protected parity worker request schema is invalid.')
+    }
+    foreach ($name in @(
+        'recordKind','nonce','execution','authMode','packageSha256','moduleVersion','profileId',
+        'storePath')) {
+        if ($null -eq $Request.$name -or $Request.$name.GetType() -ne [string]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker request contains an invalid string.')
+        }
+    }
+    if ($Request.storePathBound.GetType() -ne [bool] -or
+        $Request.recordKind -cne $script:GraphKitAuthParityWorkerKind -or
+        $Request.nonce -cnotmatch '^[0-9a-f]{64}$' -or
+        $Request.execution -cnotin @('DryRun','Live') -or
+        $Request.authMode -cnotin $script:GraphKitAuthParityModes -or
+        $Request.packageSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Request.moduleVersion -cnotmatch '^\d+\.\d+\.\d+-[0-9A-Za-z][0-9A-Za-z.-]*$' -or
+        ($Request.execution -ceq 'DryRun' -and
+            (-not [string]::IsNullOrEmpty($Request.profileId) -or
+                [bool]$Request.storePathBound -or
+                -not [string]::IsNullOrEmpty($Request.storePath))) -or
+        ($Request.execution -ceq 'Live' -and
+            $Request.profileId -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') -or
+        ([bool]$Request.storePathBound -ne
+            (-not [string]::IsNullOrEmpty([string]$Request.storePath))) -or
+        $Request.state.sealed.GetType() -ne [bool] -or -not [bool]$Request.state.sealed) {
+        throw [InvalidOperationException]::new('The protected parity worker request scalar is invalid.')
+    }
+    foreach ($collectionName in @(
+        'expectedFiles','expectedDirectories','fileEvidence','directoryEvidence')) {
+        if ($Request.state.$collectionName -isnot [Array]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker request collection shape is invalid.')
+        }
+    }
+    foreach ($name in @(
+        'tempParentPath','tempParentParent','tempParentName','rootName','rootPath','moduleRoot',
+        'extractedManifestPath','extractedModulePath')) {
+        if ($null -eq $Request.state.$name -or
+            $Request.state.$name.GetType() -ne [string] -or
+            [string]::IsNullOrWhiteSpace([string]$Request.state.$name)) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker state contains an invalid path component.')
+        }
+    }
+    $expectedFiles = [Collections.Generic.List[string]]::new()
+    $expectedDirectories = [Collections.Generic.List[string]]::new()
+    foreach ($value in @($Request.state.expectedFiles)) {
+        if ($value.GetType() -ne [string] -or [string]::IsNullOrWhiteSpace($value)) {
+            throw [InvalidOperationException]::new('The protected parity worker file set is invalid.')
+        }
+        $expectedFiles.Add([string]$value)
+    }
+    foreach ($value in @($Request.state.expectedDirectories)) {
+        if ($value.GetType() -ne [string] -or [string]::IsNullOrWhiteSpace($value)) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker directory set is invalid.')
+        }
+        $expectedDirectories.Add([string]$value)
+    }
+    if ($expectedFiles.Count -eq 0 -or $expectedDirectories.Count -eq 0 -or
+        ([Collections.Generic.HashSet[string]]::new(
+            [string[]]$expectedFiles, [StringComparer]::Ordinal)).Count -ne $expectedFiles.Count -or
+        ([Collections.Generic.HashSet[string]]::new(
+            [string[]]$expectedDirectories, [StringComparer]::Ordinal)).Count -ne
+            $expectedDirectories.Count) {
+        throw [InvalidOperationException]::new('The protected parity worker expected set is invalid.')
+    }
+    $files = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($entry in @($Request.state.fileEvidence)) {
+        if (-not (Test-GraphKitAuthParityExactProperties -Value $entry `
+            -Names @('relativePath','evidence')) -or
+            $entry.relativePath.GetType() -ne [string] -or
+            -not $expectedFiles.Contains([string]$entry.relativePath)) {
+            throw [InvalidOperationException]::new('The protected parity worker file evidence is invalid.')
+        }
+        $evidence = ConvertFrom-GraphKitAuthParityWorkerEvidence -Evidence $entry.evidence
+        if ([string]$evidence.RelativePath -cne [string]$entry.relativePath) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker file evidence path is invalid.')
+        }
+        $files.Add([string]$entry.relativePath, $evidence)
+    }
+    $directories = [Collections.Generic.Dictionary[string,object]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($entry in @($Request.state.directoryEvidence)) {
+        if (-not (Test-GraphKitAuthParityExactProperties -Value $entry `
+            -Names @('relativePath','evidence')) -or
+            $entry.relativePath.GetType() -ne [string] -or
+            -not $expectedDirectories.Contains([string]$entry.relativePath)) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker directory evidence is invalid.')
+        }
+        $evidence = ConvertFrom-GraphKitAuthParityWorkerEvidence -Evidence $entry.evidence
+        $expectedLeaf = [IO.Path]::GetFileName(
+            ([string]$entry.relativePath -replace '/', [IO.Path]::DirectorySeparatorChar))
+        if ([string]$evidence.RelativePath -cne $expectedLeaf) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker directory evidence path is invalid.')
+        }
+        $directories.Add([string]$entry.relativePath, $evidence)
+    }
+    if ($files.Count -ne $expectedFiles.Count -or
+        $directories.Count -ne $expectedDirectories.Count) {
+        throw [InvalidOperationException]::new(
+            'The protected parity worker evidence set is incomplete.')
+    }
+    $snapshotEvidence = $files[$script:GraphKitAuthParitySnapshotName]
+    if ($null -eq $snapshotEvidence -or
+        [string]$snapshotEvidence.Sha256 -cne [string]$Request.packageSha256) {
+        throw [InvalidOperationException]::new(
+            'The protected parity worker package digest binding is invalid.')
+    }
+    $pathComparison = if ($IsWindows) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else { [StringComparison]::Ordinal }
+    $tempParentEvidence = ConvertFrom-GraphKitAuthParityWorkerEvidence `
+        -Evidence $Request.state.tempParentEvidence
+    $rootEvidence = ConvertFrom-GraphKitAuthParityWorkerEvidence `
+        -Evidence $Request.state.rootEvidence
+    $derivedTempParentParent = [IO.Path]::GetFullPath(
+        [string]$Request.state.tempParentParent)
+    $derivedTempParent = [IO.Path]::GetFullPath((Join-Path `
+        $derivedTempParentParent $Request.state.tempParentName))
+    $derivedRoot = [IO.Path]::GetFullPath((Join-Path `
+        $derivedTempParent $Request.state.rootName))
+    $derivedModule = [IO.Path]::GetFullPath((Join-Path `
+        $derivedRoot $script:GraphKitAuthParityModuleName))
+    $derivedManifest = [IO.Path]::GetFullPath((Join-Path $derivedModule 'GraphKit.psd1'))
+    $derivedModuleScript = [IO.Path]::GetFullPath((Join-Path $derivedModule 'GraphKit.psm1'))
+    if ([IO.Path]::IsPathRooted([string]$Request.state.tempParentName) -or
+        [IO.Path]::GetFileName([string]$Request.state.tempParentName) -cne
+            [string]$Request.state.tempParentName -or
+        [string]$Request.state.rootName -cnotmatch '^graphkit-task8-[0-9a-f]{32}$' -or
+        [string]$tempParentEvidence.RelativePath -cne [string]$Request.state.tempParentName -or
+        [string]$rootEvidence.RelativePath -cne [string]$Request.state.rootName -or
+        -not [string]::Equals(
+            $derivedTempParentParent, [string]$Request.state.tempParentParent,
+            $pathComparison) -or
+        -not [string]::Equals(
+            $derivedTempParent, [string]$Request.state.tempParentPath,
+            $pathComparison) -or
+        -not [string]::Equals(
+            $derivedRoot, [string]$Request.state.rootPath, $pathComparison) -or
+        -not [string]::Equals(
+            $derivedModule, [string]$Request.state.moduleRoot, $pathComparison) -or
+        -not [string]::Equals(
+            $derivedManifest, [string]$Request.state.extractedManifestPath,
+            $pathComparison) -or
+        -not [string]::Equals(
+            $derivedModuleScript, [string]$Request.state.extractedModulePath,
+            $pathComparison)) {
+        throw [InvalidOperationException]::new(
+            'The protected parity worker state path derivation was rejected.')
+    }
+    return [pscustomobject]@{
+        Request = $Request
+        State = [pscustomobject]@{
+            TempParentPath = $derivedTempParent
+            TempParentParent = $derivedTempParentParent
+            TempParentName = [string]$Request.state.tempParentName
+            TempParentEvidence = $tempParentEvidence
+            RootName = [string]$Request.state.rootName
+            RootPath = $derivedRoot
+            RootEvidence = $rootEvidence
+            RootPermissionEvidence = $null
+            CandidateSha256 = [string]$Request.packageSha256
+            SnapshotPath = Join-Path $derivedRoot $script:GraphKitAuthParitySnapshotName
+            ModuleRoot = $derivedModule
+            ExtractedManifestPath = $derivedManifest
+            ExtractedModulePath = $derivedModuleScript
+            ImportedManifestPath = $null
+            ImportedModulePath = $null
+            ModuleVersion = [string]$Request.moduleVersion
+            Sealed = $true
+            FileEvidence = $files
+            FilePermissionEvidence = [Collections.Generic.Dictionary[string,object]]::new(
+                [StringComparer]::Ordinal)
+            DirectoryEvidence = $directories
+            DirectoryPermissionEvidence = [Collections.Generic.Dictionary[string,object]]::new(
+                [StringComparer]::Ordinal)
+            ExpectedFiles = $expectedFiles
+            ExpectedDirectories = $expectedDirectories
+        }
+    }
+}
+
+function Test-GraphKitAuthParityWorkerResult {
+    param(
+        [Parameter(Mandatory)] $Result,
+        [Parameter(Mandatory)] $Request,
+        [Parameter(Mandatory)][string] $RequestSha256
+    )
+    $names = @(
+        'recordKind','nonce','requestSha256','execution','authMode','packageSha256',
+        'moduleVersion','state','failureStage','failureCode','exactImport','adapter',
+        'contextMatched','sourceMatched','tenantProofVerified','readAttempted','readSucceeded',
+        'rowCount','workerTeardownVerified')
+    if (-not (Test-GraphKitAuthParityExactProperties -Value $Result -Names $names) -or
+        $Result.recordKind.GetType() -ne [string] -or
+        $Result.recordKind -cne $script:GraphKitAuthParityWorkerResultKind -or
+        $Result.nonce.GetType() -ne [string] -or $Result.nonce -cne [string]$Request.nonce -or
+        $Result.requestSha256.GetType() -ne [string] -or
+        $Result.requestSha256 -cne $RequestSha256 -or
+        $Result.execution.GetType() -ne [string] -or
+        $Result.execution -cne [string]$Request.execution -or
+        $Result.authMode.GetType() -ne [string] -or
+        $Result.authMode -cne [string]$Request.authMode -or
+        $Result.packageSha256.GetType() -ne [string] -or
+        $Result.packageSha256 -cne [string]$Request.packageSha256 -or
+        $Result.moduleVersion.GetType() -ne [string] -or
+        $Result.moduleVersion -cne [string]$Request.moduleVersion -or
+        $Result.state.GetType() -ne [string] -or
+        $Result.state -cnotin @('Passed','Failed') -or
+        $Result.failureStage.GetType() -ne [string] -or
+        $Result.failureStage -cnotin $script:GraphKitAuthParityFailureStages -or
+        $Result.failureCode.GetType() -ne [string] -or
+        $Result.failureCode -cnotin $script:GraphKitAuthParityFailureCodes) {
+        throw [InvalidOperationException]::new('The protected parity worker result scalar is invalid.')
+    }
+    foreach ($name in @(
+        'exactImport','contextMatched','sourceMatched','tenantProofVerified','readAttempted',
+        'readSucceeded','workerTeardownVerified')) {
+        if ($Result.$name.GetType() -ne [bool]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker result contains an invalid Boolean.')
+        }
+    }
+    if ($Result.rowCount.GetType() -ne [long] -or [long]$Result.rowCount -lt 0 -or
+        -not (Test-GraphKitAuthParityExactProperties -Value $Result.adapter `
+            -Names $script:GraphKitAuthParityAdapterChecks)) {
+        throw [InvalidOperationException]::new('The protected parity worker result shape is invalid.')
+    }
+    foreach ($property in $Result.adapter.PSObject.Properties) {
+        if ($property.Value.GetType() -ne [bool]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker adapter result is invalid.')
+        }
+    }
+    $failureMap = @{
+        Import='ImportRejected'; Context='ContextRejected'; Acquisition='AcquisitionFailed'
+        Read='ReadFailed'; Diagnostics='DiagnosticsRejected'; Cleanup='CleanupFailed'
+    }
+    if (($Result.state -ceq 'Passed') -ne
+        ($Result.failureStage -ceq 'None' -and $Result.failureCode -ceq 'None') -or
+        ($Result.state -ceq 'Failed' -and
+            (-not $failureMap.ContainsKey([string]$Result.failureStage) -or
+                $failureMap[[string]$Result.failureStage] -cne [string]$Result.failureCode)) -or
+        ([bool]$Result.workerTeardownVerified -ne
+            ([string]$Result.failureStage -cne 'Cleanup')) -or
+        ($Result.state -ceq 'Passed' -and
+            (-not [bool]$Result.exactImport -or
+                @($Result.adapter.PSObject.Properties.Value | Where-Object { -not $_ }).Count -ne 0)) -or
+        ($Result.execution -ceq 'DryRun' -and
+            ($Result.contextMatched -or $Result.sourceMatched -or
+                $Result.tenantProofVerified -or $Result.readAttempted -or
+                $Result.readSucceeded -or [long]$Result.rowCount -ne 0)) -or
+        ($Result.execution -ceq 'Live' -and $Result.state -ceq 'Passed' -and
+            (-not $Result.contextMatched -or -not $Result.sourceMatched -or
+                -not $Result.tenantProofVerified -or -not $Result.readAttempted -or
+                -not $Result.readSucceeded))) {
+        throw [InvalidOperationException]::new('The protected parity worker result is inconsistent.')
+    }
+    foreach ($value in @(
+        $Result.recordKind,$Result.nonce,$Result.requestSha256,$Result.execution,$Result.authMode,
+        $Result.packageSha256,$Result.moduleVersion,$Result.state,$Result.failureStage,
+        $Result.failureCode)) {
+        if (Test-GraphKitAuthParityForbiddenString -Value $value) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker result contains a forbidden string.')
+        }
+    }
+    return $true
+}
+
+# This lifecycle boundary is not a hostile-process sandbox. On Windows the
+# kill-on-close Job Object and active-process count prove this exact job empty.
+# On Unix the trusted worker and descendants that remain in its new session and
+# process group are bounded there; stdout/stderr EOF is an additional cleanup
+# gate. A deliberate setsid/setpgid escape with closed IPC is outside the stated
+# same-identity, non-adversarial boundary. Retained IPC prevents confirmation and
+# preserves the sealed stage rather than authorizing cleanup.
+function Initialize-GraphKitAuthParityProcessTreeNative {
+    if ($null -ne $script:GraphKitAuthParityProcessTreeType) { return }
+    $namespaceMarker = '__GRAPHKIT_AUTH_PARITY_PROCESS_TREE_NAMESPACE__'
+    $sourceTemplate = @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
+
+namespace __GRAPHKIT_AUTH_PARITY_PROCESS_TREE_NAMESPACE__
+{
+    public sealed class GraphKitAuthParityProcessTreeLease : IDisposable
+    {
+        public const string ContractMarker = "GraphKit.Task8.ProcessTree/1";
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const int JobObjectBasicAccountingInformationClass = 1;
+        private const int JobObjectExtendedLimitInformationClass = 9;
+        private const int SigTerm = 15;
+        private const int SigKill = 9;
+        private const int Esrch = 3;
+        private const int Eperm = 1;
+
+        private SafeJobHandle _job;
+        private int _processId;
+        private bool _assigned;
+        private bool _ownershipEstablished;
+        private bool _emptyConfirmed;
+        private bool _disposed;
+
+        private GraphKitAuthParityProcessTreeLease(SafeJobHandle job)
+        {
+            _job = job;
+        }
+
+        public static GraphKitAuthParityProcessTreeLease Create()
+        {
+            if (!OperatingSystem.IsWindows())
+                return new GraphKitAuthParityProcessTreeLease(null);
+
+            SafeJobHandle job = CreateJobObjectW(IntPtr.Zero, null);
+            if (job == null || job.IsInvalid)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            try
+            {
+                var limits = new JobObjectExtendedLimitInformation();
+                limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+                int size = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
+                IntPtr memory = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(limits, memory, false);
+                    if (!SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformationClass,
+                        memory,
+                        (uint)size))
+                        throw new Win32Exception(Marshal.GetLastPInvokeError());
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(memory);
+                }
+                return new GraphKitAuthParityProcessTreeLease(job);
+            }
+            catch
+            {
+                job.Dispose();
+                throw;
+            }
+        }
+
+        public static void EnterUnixWorkerSession()
+        {
+            if (OperatingSystem.IsWindows()) return;
+            int pid = Environment.ProcessId;
+            int group = getpgid(0);
+            if (group < 0)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            int session = getsid(0);
+            if (session < 0)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            if (group == pid && session == pid) return;
+
+            int createdSession = setsid();
+            if (createdSession < 0)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            int establishedGroup = getpgid(0);
+            if (establishedGroup < 0)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            int establishedSession = getsid(0);
+            if (establishedSession < 0)
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            if (createdSession != pid || establishedGroup != pid || establishedSession != pid)
+                throw new InvalidOperationException("The protected parity worker session was not exact.");
+        }
+
+        public void Assign(Process process)
+        {
+            if (process == null) throw new ArgumentNullException(nameof(process));
+            if (_disposed || _assigned) throw new InvalidOperationException("Process-tree lease state is invalid.");
+            _processId = process.Id;
+            if (OperatingSystem.IsWindows())
+            {
+                if (_job == null || _job.IsInvalid || _job.IsClosed)
+                    throw new InvalidOperationException("The protected parity job is unavailable.");
+                if (!AssignProcessToJobObject(_job, process.Handle))
+                    throw new Win32Exception(Marshal.GetLastPInvokeError());
+                if (!IsProcessInJob(process.Handle, _job, out bool assigned))
+                    throw new Win32Exception(Marshal.GetLastPInvokeError());
+                if (!assigned)
+                    throw new InvalidOperationException("The protected parity worker is outside its job.");
+                _ownershipEstablished = true;
+            }
+            _assigned = true;
+        }
+
+        public bool IsOwnershipEstablished()
+        {
+            if (!_assigned || _disposed || _processId <= 1) return false;
+            if (OperatingSystem.IsWindows()) return _ownershipEstablished;
+            if (_ownershipEstablished) return true;
+            int group = getpgid(_processId);
+            if (group < 0)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                if (error == Esrch) return false;
+                throw new Win32Exception(error);
+            }
+            int session = getsid(_processId);
+            if (session < 0)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                if (error == Esrch) return false;
+                throw new Win32Exception(error);
+            }
+            if (group == _processId && session == _processId)
+                _ownershipEstablished = true;
+            return _ownershipEstablished;
+        }
+
+        public bool IsTreeEmpty()
+        {
+            if (!_assigned || !_ownershipEstablished || _disposed || _processId <= 1)
+                return false;
+            if (_emptyConfirmed) return true;
+            if (OperatingSystem.IsWindows())
+            {
+                if (_job == null || _job.IsInvalid || _job.IsClosed)
+                    throw new InvalidOperationException("The protected parity job is unavailable.");
+                if (!QueryInformationJobObject(
+                    _job,
+                    JobObjectBasicAccountingInformationClass,
+                    out JobObjectBasicAccounting info,
+                    (uint)Marshal.SizeOf<JobObjectBasicAccounting>(),
+                    IntPtr.Zero))
+                    throw new Win32Exception(Marshal.GetLastPInvokeError());
+                _emptyConfirmed = info.ActiveProcesses == 0;
+                return _emptyConfirmed;
+            }
+            int result = kill(-_processId, 0);
+            if (result == 0) return false;
+            int error = Marshal.GetLastPInvokeError();
+            if (error == Esrch)
+            {
+                _emptyConfirmed = true;
+                return true;
+            }
+            if (error == Eperm) return false;
+            throw new Win32Exception(error);
+        }
+
+        public bool RequestTerminate()
+        {
+            return RequestSignal(SigTerm);
+        }
+
+        public bool RequestKill()
+        {
+            return RequestSignal(SigKill);
+        }
+
+        private bool RequestSignal(int signal)
+        {
+            if (!_assigned || !_ownershipEstablished || _disposed || _processId <= 1)
+                throw new InvalidOperationException("Process-tree ownership is not established.");
+            if (IsTreeEmpty()) return false;
+            if (OperatingSystem.IsWindows())
+            {
+                if (!TerminateJobObject(_job, 1))
+                {
+                    int error = Marshal.GetLastPInvokeError();
+                    if (IsTreeEmpty()) return false;
+                    throw new Win32Exception(error);
+                }
+                return true;
+            }
+            int result = kill(-_processId, signal);
+            if (result == 0) return true;
+            int signalError = Marshal.GetLastPInvokeError();
+            if (signalError == Esrch)
+            {
+                _emptyConfirmed = true;
+                return false;
+            }
+            if (signalError == Eperm)
+                throw new UnauthorizedAccessException("The protected parity process group refused termination.");
+            throw new Win32Exception(signalError);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            if (OperatingSystem.IsWindows())
+            {
+                if (_job != null) _job.Dispose();
+            }
+            else if (_assigned && _ownershipEstablished && !_emptyConfirmed && _processId > 1)
+            {
+                try { RequestKill(); } catch { }
+            }
+            _disposed = true;
+        }
+
+        private sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            private SafeJobHandle() : base(true) { }
+            protected override bool ReleaseHandle() { return CloseHandle(handle); }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicLimitInformation
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectExtendedLimitInformation
+        {
+            public JobObjectBasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicAccounting
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern SafeJobHandle CreateJobObjectW(IntPtr attributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            SafeJobHandle job, int infoClass, IntPtr info, uint infoLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(SafeJobHandle job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool IsProcessInJob(IntPtr process, SafeJobHandle job, out bool result);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            SafeJobHandle job, int infoClass, out JobObjectBasicAccounting info,
+            uint infoLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(SafeJobHandle job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int setsid();
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int getpgid(int processId);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int getsid(int processId);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int kill(int processId, int signal);
+    }
+}
+'@
+    if (($sourceTemplate.Split(
+            [string[]]@($namespaceMarker), [StringSplitOptions]::None).Length - 1) -ne 1) {
+        throw [InvalidOperationException]::new(
+            'The protected parity process-tree namespace marker is invalid.')
+    }
+    $sourceHash = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false, $true).GetBytes($sourceTemplate))).ToLowerInvariant()
+    $namespace = "GraphKit.R8.Parity.H$sourceHash"
+    $expectedType = "$namespace.GraphKitAuthParityProcessTreeLease"
+    $existing = $expectedType -as [type]
+    if ($null -ne $existing) {
+        if ([string]$existing::ContractMarker -cne 'GraphKit.Task8.ProcessTree/1') {
+            throw [InvalidOperationException]::new(
+                'A stale protected parity process-tree type is already loaded.')
+        }
+        $script:GraphKitAuthParityProcessTreeType = $existing
+        return
+    }
+    $source = $sourceTemplate.Replace($namespaceMarker, $namespace)
+    $types = @(Add-Type -TypeDefinition $source -PassThru -ErrorAction Stop)
+    $match = @($types | Where-Object FullName -CEQ $expectedType)
+    $loadedType = if ($match.Count -eq 1) { $match[0] } else { $null }
+    if ($null -eq $loadedType -or
+        [string]$loadedType::ContractMarker -cne 'GraphKit.Task8.ProcessTree/1') {
+        throw [InvalidOperationException]::new(
+            'The protected parity process-tree helper did not load exactly once.')
+    }
+    $script:GraphKitAuthParityProcessTreeType = $loadedType
+}
+
+function Add-GraphKitAuthParityBoundedBytes {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[byte]] $Destination,
+        [Parameter(Mandatory)][byte[]] $Buffer,
+        [Parameter(Mandatory)][int] $Count,
+        [Parameter(Mandatory)][long] $MaximumBytes
+    )
+    if ($Count -lt 0 -or [long]$Destination.Count + $Count -gt $MaximumBytes) {
+        throw [InvalidOperationException]::new(
+            'A protected parity worker stream exceeded its byte bound.')
+    }
+    if ($Count -eq 0) { return }
+    $chunk = [byte[]]::new($Count)
+    [Array]::Copy($Buffer, 0, $chunk, 0, $Count)
+    $Destination.AddRange($chunk)
+}
+
+function Invoke-GraphKitAuthParityWorkerProcess {
+    param(
+        [Parameter(Mandatory)][string] $WorkerPath,
+        [Parameter(Mandatory)][string] $RequestJson,
+        [Parameter(Mandatory)] $Request,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [AllowNull()] $Hooks
+    )
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $requestBytes = $utf8.GetBytes($RequestJson)
+    if ($requestBytes.LongLength -gt $script:GraphKitAuthParityMaxWorkerRequestBytes) {
+        throw [InvalidOperationException]::new('The protected parity worker request exceeded its bound.')
+    }
+    $requestSha256 = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($requestBytes)).ToLowerInvariant()
+    $worker = [IO.Path]::GetFullPath($WorkerPath)
+    if (-not [IO.File]::Exists($worker) -or [string]::IsNullOrWhiteSpace([Environment]::ProcessPath)) {
+        throw [InvalidOperationException]::new('The protected parity worker executable is unavailable.')
+    }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [Environment]::ProcessPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in @('-NoLogo','-NoProfile','-NonInteractive','-File',$worker)) {
+        $null = $startInfo.ArgumentList.Add($argument)
+    }
+    Invoke-GraphKitAuthParityHook -Hooks $Hooks -Name ConfigureWorkerStartInfo `
+        -Arguments @($startInfo, $worker)
+
+    Initialize-GraphKitAuthParityProcessTreeNative
+    $treeType = $script:GraphKitAuthParityProcessTreeType
+    $treeLease = $treeType::Create()
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    $ownershipEstablished = $false
+    $requestReleased = $false
+    $rootExitConfirmed = $false
+    $treeExitConfirmed = $false
+    $streamsDrained = $false
+    $treeEmpty = $false
+    $timedOut = $false
+    $terminationRequested = $false
+    $residualTreeDetected = $false
+    $workerProcessId = 0
+    $stdoutBytes = [Collections.Generic.List[byte]]::new()
+    $stderrBytes = [Collections.Generic.List[byte]]::new()
+    $streamFailure = 'None'
+    $protocolFailure = 'None'
+    $workerFailurePoint = 'Start'
+    $fatalPostStartFailure = $false
+    $postStartHookInvoked = $false
+    $rootExitHookFired = $false
+    $treeExitHookFired = $false
+    $stdoutComplete = $false
+    $stderrComplete = $false
+    $writeComplete = $false
+    $writeFailed = $false
+    $overflow = $false
+    $stdoutCaptureDisabled = $false
+    $stderrCaptureDisabled = $false
+    $terminateSent = $false
+    $killSent = $false
+    $terminationStartedMilliseconds = 0L
+    $stdoutTask = $null
+    $stderrTask = $null
+    $writeTask = $null
+    $stdoutBuffer = [byte[]]::new(4096)
+    $stderrBuffer = [byte[]]::new(4096)
+    $clock = $null
+    $operationDeadlineMilliseconds = [long]$TimeoutSeconds * 1000L
+    $teardownAllowanceMilliseconds = [Math]::Min(
+        10000L, [Math]::Max(2000L, [long]($operationDeadlineMilliseconds / 4L)))
+    $hardDeadlineMilliseconds =
+        $operationDeadlineMilliseconds + $teardownAllowanceMilliseconds
+    $workerResult = $null
+    try {
+        try {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            if (-not $process.Start()) {
+                throw [InvalidOperationException]::new('The protected parity worker did not start.')
+            }
+            $started = $true
+            $workerProcessId = $process.Id
+
+            # The containment owner exists before Start. Assign the new root before
+            # releasing request bytes; the trusted worker performs no candidate work
+            # until its exact session/job ownership is observed by this parent.
+            $workerFailurePoint = 'TreeAssignment'
+            $treeLease.Assign($process)
+            $workerFailurePoint = 'CollectorSetup'
+            $stdoutTask = $process.StandardOutput.BaseStream.ReadAsync(
+                $stdoutBuffer, 0, $stdoutBuffer.Length)
+            $stderrTask = $process.StandardError.BaseStream.ReadAsync(
+                $stderrBuffer, 0, $stderrBuffer.Length)
+        }
+        catch {
+            if (-not $started) { throw }
+            $fatalPostStartFailure = $true
+            if ($null -eq $stdoutTask) {
+                try {
+                    $stdoutTask = $process.StandardOutput.BaseStream.ReadAsync(
+                        $stdoutBuffer, 0, $stdoutBuffer.Length)
+                }
+                catch { $streamFailure = 'StdoutRead' }
+            }
+            if ($null -eq $stderrTask) {
+                try {
+                    $stderrTask = $process.StandardError.BaseStream.ReadAsync(
+                        $stderrBuffer, 0, $stderrBuffer.Length)
+                }
+                catch { $streamFailure = 'StderrRead' }
+            }
+            try {
+                Invoke-GraphKitAuthParityHook -Hooks $Hooks -Name AfterWorkerProcessFailure `
+                    -Arguments @($workerFailurePoint)
+            }
+            catch {}
+        }
+
+        # Once Start succeeds this state machine is total. Every collector, hook,
+        # decoder, and process-control failure becomes bounded metadata; none can
+        # escape and let the caller confuse a live tree with a process that never ran.
+        while ($started -and -not $treeExitConfirmed) {
+            try {
+                $workerFailurePoint = 'LifecyclePoll'
+                Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                    -Name BeforeWorkerLifecyclePoll -Arguments @([pscustomobject]@{
+                        WorkerProcessId = $workerProcessId
+                        ElapsedMilliseconds = [long]$clock.ElapsedMilliseconds
+                    })
+                if (-not $stdoutComplete -and $null -ne $stdoutTask -and
+                    $stdoutTask.IsCompleted) {
+                    try { $count = $stdoutTask.GetAwaiter().GetResult() }
+                    catch { $count = -1; $streamFailure = 'StdoutRead' }
+                    if ($count -lt 0) { $overflow = $true }
+                    elseif ($count -eq 0) { $stdoutComplete = $true }
+                    else {
+                        if (-not $stdoutCaptureDisabled) { try {
+                            Add-GraphKitAuthParityBoundedBytes -Destination $stdoutBytes `
+                                -Buffer $stdoutBuffer -Count $count `
+                                -MaximumBytes $script:GraphKitAuthParityMaxWorkerStreamBytes
+                        }
+                        catch {
+                            $overflow = $true
+                            $stdoutCaptureDisabled = $true
+                            $streamFailure = 'StdoutBound'
+                        } }
+                        $stdoutTask = $process.StandardOutput.BaseStream.ReadAsync(
+                            $stdoutBuffer, 0, $stdoutBuffer.Length)
+                    }
+                }
+                if (-not $stderrComplete -and $null -ne $stderrTask -and
+                    $stderrTask.IsCompleted) {
+                    try { $count = $stderrTask.GetAwaiter().GetResult() }
+                    catch { $count = -1; $streamFailure = 'StderrRead' }
+                    if ($count -lt 0) { $overflow = $true }
+                    elseif ($count -eq 0) { $stderrComplete = $true }
+                    else {
+                        if (-not $stderrCaptureDisabled) { try {
+                            Add-GraphKitAuthParityBoundedBytes -Destination $stderrBytes `
+                                -Buffer $stderrBuffer -Count $count `
+                                -MaximumBytes $script:GraphKitAuthParityMaxWorkerStreamBytes
+                        }
+                        catch {
+                            $overflow = $true
+                            $stderrCaptureDisabled = $true
+                            $streamFailure = 'StderrBound'
+                        } }
+                        $stderrTask = $process.StandardError.BaseStream.ReadAsync(
+                            $stderrBuffer, 0, $stderrBuffer.Length)
+                    }
+                }
+
+                if (-not $ownershipEstablished -and -not $rootExitConfirmed) {
+                    $ownershipEstablished = $treeLease.IsOwnershipEstablished()
+                }
+                if ($ownershipEstablished -and -not $postStartHookInvoked -and
+                    -not $fatalPostStartFailure) {
+                    $postStartHookInvoked = $true
+                    $workerFailurePoint = 'PostStartHook'
+                    Invoke-GraphKitAuthParityHook -Hooks $Hooks -Name AfterWorkerStarted `
+                        -Arguments @($process)
+                }
+                if ($ownershipEstablished -and -not $requestReleased -and
+                    $postStartHookInvoked -and -not $fatalPostStartFailure -and
+                    -not $terminationRequested) {
+                    $workerFailurePoint = 'RequestWrite'
+                    try {
+                        $writeTask = $process.StandardInput.BaseStream.WriteAsync(
+                            $requestBytes, 0, $requestBytes.Length)
+                        $requestReleased = $true
+                    }
+                    catch {
+                        $writeFailed = $true
+                        $writeComplete = $true
+                        $fatalPostStartFailure = $true
+                    }
+                }
+                if ($requestReleased -and -not $writeComplete -and
+                    $null -ne $writeTask -and $writeTask.IsCompleted) {
+                    try { $null = $writeTask.GetAwaiter().GetResult() }
+                    catch { $writeFailed = $true }
+                    $writeComplete = $true
+                    try { $process.StandardInput.Close() } catch { $writeFailed = $true }
+                }
+
+                if (-not $rootExitConfirmed -and $process.HasExited) {
+                    $rootExitConfirmed = $process.WaitForExit(0)
+                    if ($rootExitConfirmed -and -not $rootExitHookFired) {
+                        $rootExitHookFired = $true
+                        Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                            -Name AfterWorkerRootExit -Arguments @([pscustomobject]@{
+                                WorkerProcessId = $workerProcessId
+                                OwnershipEstablished = $ownershipEstablished
+                                RequestReleased = $requestReleased
+                            })
+                    }
+                }
+                if ($rootExitConfirmed -and $ownershipEstablished) {
+                    $treeEmpty = $treeLease.IsTreeEmpty()
+                    if (-not $treeEmpty -and -not $terminationRequested) {
+                        $residualTreeDetected = $true
+                    }
+                }
+                $streamsDrained = $stdoutComplete -and $stderrComplete
+
+                $mustTerminate = $fatalPostStartFailure -or $overflow -or $writeFailed -or
+                    $residualTreeDetected -or
+                    ($clock.ElapsedMilliseconds -ge $operationDeadlineMilliseconds -and
+                        -not ($rootExitConfirmed -and $treeEmpty -and $streamsDrained))
+                if ($mustTerminate -and -not $terminationRequested) {
+                    $terminationRequested = $true
+                    $timedOut = -not $fatalPostStartFailure -and -not $overflow -and
+                        -not $writeFailed -and -not $residualTreeDetected
+                    try { $process.StandardInput.Close() } catch {}
+                    try {
+                        Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                            -Name BeforeWorkerTreeTermination -Arguments @([pscustomobject]@{
+                                WorkerProcessId = $workerProcessId
+                                OwnershipEstablished = $ownershipEstablished
+                                RootExitConfirmed = $rootExitConfirmed
+                                ResidualTreeDetected = $residualTreeDetected
+                                TimedOut = $timedOut
+                            })
+                    }
+                    catch { $fatalPostStartFailure = $true }
+                    if ($ownershipEstablished) {
+                        $null = $treeLease.RequestTerminate()
+                        $terminateSent = $true
+                        $terminationStartedMilliseconds = $clock.ElapsedMilliseconds
+                    }
+                    else {
+                        try { $process.Kill($true) } catch {}
+                    }
+                }
+
+                if ($terminationRequested -and $ownershipEstablished -and
+                    -not $treeEmpty -and -not $killSent -and
+                    ($clock.ElapsedMilliseconds - $terminationStartedMilliseconds) -ge 250L) {
+                    $null = $treeLease.RequestKill()
+                    $killSent = $true
+                }
+
+                if (-not $rootExitConfirmed -and $process.HasExited) {
+                    $rootExitConfirmed = $process.WaitForExit(0)
+                    if ($rootExitConfirmed -and -not $rootExitHookFired) {
+                        $rootExitHookFired = $true
+                        Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                            -Name AfterWorkerRootExit -Arguments @([pscustomobject]@{
+                                WorkerProcessId = $workerProcessId
+                                OwnershipEstablished = $ownershipEstablished
+                                RequestReleased = $requestReleased
+                            })
+                    }
+                }
+                if ($rootExitConfirmed -and $ownershipEstablished -and -not $treeEmpty) {
+                    $treeEmpty = $treeLease.IsTreeEmpty()
+                }
+                $streamsDrained = $stdoutComplete -and $stderrComplete
+                if ($rootExitConfirmed -and $ownershipEstablished -and $treeEmpty -and
+                    $streamsDrained) {
+                    $treeExitConfirmed = $true
+                    if (-not $treeExitHookFired) {
+                        $treeExitHookFired = $true
+                        Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                            -Name AfterWorkerTreeExit -Arguments @([pscustomobject]@{
+                                WorkerProcessId = $workerProcessId
+                                TerminationRequested = $terminationRequested
+                                ResidualTreeDetected = $residualTreeDetected
+                                StreamsDrained = $streamsDrained
+                            })
+                    }
+                    break
+                }
+                if ($clock.ElapsedMilliseconds -ge $hardDeadlineMilliseconds -or
+                    ($rootExitConfirmed -and -not $ownershipEstablished -and
+                        ($streamsDrained -or
+                            ($null -eq $stdoutTask -and $null -eq $stderrTask)))) {
+                    break
+                }
+            }
+            catch {
+                if (-not $fatalPostStartFailure) {
+                    $fatalPostStartFailure = $true
+                    try {
+                        Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                            -Name AfterWorkerProcessFailure -Arguments @($workerFailurePoint)
+                    }
+                    catch {}
+                }
+            }
+            if ($fatalPostStartFailure -and -not $treeExitConfirmed -and
+                -not $terminationRequested) {
+                $terminationRequested = $true
+                try { $process.StandardInput.Close() } catch {}
+                try {
+                    Invoke-GraphKitAuthParityHook -Hooks $Hooks `
+                        -Name BeforeWorkerTreeTermination -Arguments @([pscustomobject]@{
+                            WorkerProcessId = $workerProcessId
+                            OwnershipEstablished = $ownershipEstablished
+                            RootExitConfirmed = $rootExitConfirmed
+                            ResidualTreeDetected = $residualTreeDetected
+                            TimedOut = $false
+                        })
+                }
+                catch {}
+                if ($ownershipEstablished) {
+                    try {
+                        $null = $treeLease.RequestKill()
+                        $killSent = $true
+                    }
+                    catch {}
+                }
+                else {
+                    try { $process.Kill($true) } catch {}
+                }
+            }
+            # This check intentionally sits outside every fallible poll/control
+            # operation. A persistently throwing native predicate cannot bypass
+            # the hard bound and spin this verifier forever.
+            if ($clock.ElapsedMilliseconds -ge $hardDeadlineMilliseconds) { break }
+            if (-not $treeExitConfirmed) { Start-Sleep -Milliseconds 10 }
+        }
+
+        if (-not $treeExitConfirmed) {
+            try { $process.StandardInput.Close() } catch {}
+        }
+        if (-not $treeExitConfirmed) {
+            $protocolFailure = if (-not $ownershipEstablished) { 'Ownership' }
+                elseif (-not $rootExitConfirmed) { 'UnconfirmedRootExit' }
+                elseif (-not $treeEmpty) { 'UnconfirmedTree' }
+                elseif (-not $streamsDrained) { 'UnconfirmedStreams' }
+                else { $workerFailurePoint }
+        }
+        elseif ($fatalPostStartFailure) { $protocolFailure = $workerFailurePoint }
+        elseif ($streamFailure -cne 'None') { $protocolFailure = $streamFailure }
+        elseif ($timedOut) { $protocolFailure = 'Timeout' }
+        elseif ($writeFailed) { $protocolFailure = 'RequestWrite' }
+        elseif ($residualTreeDetected) { $protocolFailure = 'ResidualTree' }
+        else {
+            $workerFailurePoint = 'StreamDecode'
+            $stdout = $utf8.GetString($stdoutBytes.ToArray())
+            $stderr = $utf8.GetString($stderrBytes.ToArray())
+            Invoke-GraphKitAuthParityHook -Hooks $Hooks -Name InspectWorkerStreams `
+                -Arguments @([pscustomobject]@{
+                    WorkerProcessId = $workerProcessId
+                    ExitCode = $process.ExitCode
+                    StdoutByteCount = $stdoutBytes.Count
+                    StderrByteCount = $stderrBytes.Count
+                    StreamsDrained = $streamsDrained
+                })
+            $frame = [regex]::Match(
+                $stdout,
+                '\A(?<json>\{[^\r\n]*\})(?:\r\n|\n)\z',
+                [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            if (-not $requestReleased) { $protocolFailure = 'RequestWithheld' }
+            elseif ($process.ExitCode -ne 0) { $protocolFailure = 'ExitCode' }
+            elseif (-not [string]::IsNullOrEmpty($stderr)) { $protocolFailure = 'Stderr' }
+            elseif (-not $frame.Success) { $protocolFailure = 'Frame' }
+            else {
+                try {
+                    $workerFailurePoint = 'ProtocolValidation'
+                    $workerResult = ConvertFrom-GraphKitAuthParityWorkerJson `
+                        -Json $frame.Groups['json'].Value `
+                        -MaximumBytes $script:GraphKitAuthParityMaxWorkerStreamBytes
+                    $null = Test-GraphKitAuthParityWorkerResult -Result $workerResult `
+                        -Request $Request -RequestSha256 $requestSha256
+                    $protocolFailure = 'None'
+                }
+                catch { $protocolFailure = 'Validation'; $workerResult = $null }
+            }
+        }
+    }
+    catch {
+        if (-not $started) { throw }
+        # Protocol/hook work after a confirmed boundary cannot revoke the already
+        # established root/tree/EOF proof. It does invalidate the worker record.
+        $protocolFailure = $workerFailurePoint
+    }
+    finally {
+        try { $treeLease.Dispose() } catch {}
+        try { $process.Dispose() } catch {}
+    }
+
+    $elapsedMilliseconds = if ($null -eq $clock) { 0L }
+        else { [long]$clock.ElapsedMilliseconds }
+    $protocolValid = $treeExitConfirmed -and $protocolFailure -ceq 'None' -and
+        $null -ne $workerResult
+    return [pscustomobject]@{
+        Started = $started
+        OwnershipEstablished = $ownershipEstablished
+        RequestReleased = $requestReleased
+        RootExitConfirmed = $rootExitConfirmed
+        TreeExitConfirmed = $treeExitConfirmed
+        StreamsDrained = $streamsDrained
+        ConfirmedExit = $treeExitConfirmed
+        TimedOut = $timedOut
+        TerminationRequested = $terminationRequested
+        ForcedTermination = $terminationRequested
+        ProtocolValid = $protocolValid
+        WorkerProcessId = $workerProcessId
+        ElapsedMilliseconds = $elapsedMilliseconds
+        OperationDeadlineMilliseconds = $operationDeadlineMilliseconds
+        HardDeadlineMilliseconds = $hardDeadlineMilliseconds
+        StreamFailure = $streamFailure
+        ProtocolFailure = $protocolFailure
+        Result = $(if ($protocolValid) { $workerResult } else { $null })
+    }
+}
+
 $task8Hooks = if ($MyInvocation.InvocationName -ceq '.') {
     Get-GraphKitAuthParityTestHooks
 }
 else { $null }
+if ($MyInvocation.InvocationName -ceq '.' -and $null -eq $task8Hooks) {
+    return
+}
 if ($null -ne $task8Hooks -and
     $null -ne $task8Hooks.PSObject.Properties['ExportFunctionsOnly'] -and
     [bool]$task8Hooks.ExportFunctionsOnly) {
@@ -2004,27 +3296,13 @@ $task8Execution = if ($PSCmdlet.ParameterSetName -ceq 'DryRun') { 'DryRun' } els
 $task8Record = New-GraphKitAuthParityModeRecord -Execution $task8Execution `
     -Mode $AuthMode -StartedUtc $task8StartedUtc
 $task8State = $null
-$task8ImportedModule = $null
-$task8Imported = $null
-$task8Context = $null
-$task8ContextCommand = $null
-$task8ContextResult = $null
-$task8ContextParameters = $null
-$task8ReadResult = $null
-$task8ReadCommand = $null
-$task8ReadResultRecords = $null
-$task8GetContextAction = $null
-$task8ReadAction = $null
-$task8LiveCoreResult = $null
 $task8StorePathBound = $false
-$task8Diagnostics = $null
-$task8ProviderWeakReference = $null
+$task8WorkerStarted = $false
+$task8WorkerTreeExitConfirmed = $false
+$task8WorkerTeardownFailed = $false
 $task8PrimaryFailed = $false
 $task8FailureStage = 'Artifact'
 $task8FailureCode = 'ArtifactRejected'
-$task8HadModulePath = Test-Path -LiteralPath Env:PSModulePath
-$task8SavedModulePath = if ($task8HadModulePath) { [string]$env:PSModulePath } else { $null }
-$task8ModulePathChanged = $false
 
 try {
     if ([string]::IsNullOrWhiteSpace($PackagePath) -or
@@ -2166,106 +3444,80 @@ try {
 
     $task8FailureStage = 'Import'
     $task8FailureCode = 'ImportRejected'
-    $env:PSModulePath = if ($task8HadModulePath -and
-        -not [string]::IsNullOrEmpty($task8SavedModulePath)) {
-        $task8State.ModuleRoot + [IO.Path]::PathSeparator + $task8SavedModulePath
-    }
-    else { $task8State.ModuleRoot }
-    $task8ModulePathChanged = $true
     Invoke-GraphKitAuthParityHook -Hooks $task8Hooks -Name BeforeFinalImportRecheck `
         -Arguments @($task8State)
     Assert-GraphKitAuthParityState -State $task8State -Purpose Import
-    $task8Imported = Invoke-GraphKitAuthParityCaptured -ExpectedCount 1 -Action {
-        Import-Module -Name $task8State.ExtractedManifestPath -PassThru -Force -ErrorAction Stop
+    $task8StorePathBound = $task8Execution -ceq 'Live' -and
+        $PSBoundParameters.ContainsKey('StorePath')
+    $task8WorkerNonce = [Convert]::ToHexString(
+        [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
+    $task8WorkerRequest = New-GraphKitAuthParityWorkerRequest -State $task8State `
+        -Nonce $task8WorkerNonce -Execution $task8Execution -Mode $AuthMode `
+        -ProfileId $(if ($task8Execution -ceq 'Live') { $ProfileId } else { '' }) `
+        -StorePath $(if ($task8StorePathBound) { $StorePath } else { '' }) `
+        -StorePathBound:$task8StorePathBound
+    $task8WorkerRequestOverride = Invoke-GraphKitAuthParityHook -Hooks $task8Hooks `
+        -Name MutateWorkerRequest -Arguments @($task8WorkerRequest) -PassThru
+    if ($null -ne $task8WorkerRequestOverride) {
+        $task8WorkerRequest = $task8WorkerRequestOverride
     }
-    $task8ImportedModule = $task8Imported[0]
-    $task8LocationComparison = if ($IsWindows) {
-        [StringComparison]::OrdinalIgnoreCase
+    $task8WorkerJson = $task8WorkerRequest | ConvertTo-Json -Compress -Depth 12
+    $task8WorkerJsonOverride = Invoke-GraphKitAuthParityHook -Hooks $task8Hooks `
+        -Name MutateWorkerRequestJson -Arguments @($task8WorkerJson) -PassThru
+    if ($null -ne $task8WorkerJsonOverride) {
+        if ($task8WorkerJsonOverride.GetType() -ne [string]) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker request-frame seam was rejected.')
+        }
+        $task8WorkerJson = [string]$task8WorkerJsonOverride
     }
-    else { [StringComparison]::Ordinal }
-    if ($task8ImportedModule.Name -cne 'GraphKit' -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath($task8ImportedModule.ModuleBase),
-            [IO.Path]::GetFullPath($task8State.ModuleRoot),
-            $task8LocationComparison) -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath($task8ImportedModule.Path),
-            [IO.Path]::GetFullPath($task8State.ExtractedModulePath),
-            $task8LocationComparison) -or
-        "$($task8ImportedModule.Version)-$($task8ImportedModule.PrivateData.PSData.Prerelease)" -cne
-            $task8Record.moduleVersion) {
-        throw [InvalidOperationException]::new('The exact extracted GraphKit module was not imported.')
-    }
-    $task8State.ImportedManifestPath = $task8State.ExtractedManifestPath
-    $task8State.ImportedModulePath = $task8ImportedModule.Path
-    $task8Record.checks.exactImport = $true
-    Invoke-GraphKitAuthParityHook -Hooks $task8Hooks -Name AfterImport `
-        -Arguments @($task8State)
-
+    $task8WorkerPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot `
+        'private/Invoke-GraphKitAuthParityWorker.ps1'))
     $task8FailureStage = 'Diagnostics'
     $task8FailureCode = 'DiagnosticsRejected'
-    $task8Diagnostics = Get-GraphKitAuthParityDiagnostics `
-        -Module $task8ImportedModule -State $task8State
-    $task8ProviderWeakReference = $task8Diagnostics.ProviderWeakReference
-    foreach ($property in $task8Diagnostics.Checks.PSObject.Properties) {
+    $task8WorkerTimeoutSeconds = if ($task8Execution -ceq 'Live') { 360 } else { 60 }
+    $task8WorkerTimeoutOverride = Invoke-GraphKitAuthParityHook -Hooks $task8Hooks `
+        -Name SelectWorkerTimeoutSeconds -Arguments @($task8WorkerTimeoutSeconds) -PassThru
+    if ($null -ne $task8WorkerTimeoutOverride) {
+        if ($task8WorkerTimeoutOverride.GetType() -ne [int] -or
+            [int]$task8WorkerTimeoutOverride -lt 1 -or
+            [int]$task8WorkerTimeoutOverride -gt $task8WorkerTimeoutSeconds) {
+            throw [InvalidOperationException]::new(
+                'The protected parity worker timeout seam was rejected.')
+        }
+        $task8WorkerTimeoutSeconds = [int]$task8WorkerTimeoutOverride
+    }
+    $task8WorkerRun = Invoke-GraphKitAuthParityWorkerProcess -WorkerPath $task8WorkerPath `
+        -RequestJson $task8WorkerJson -Request $task8WorkerRequest `
+        -TimeoutSeconds $task8WorkerTimeoutSeconds `
+        -Hooks $task8Hooks
+    $task8WorkerStarted = [bool]$task8WorkerRun.Started
+    $task8WorkerTreeExitConfirmed = [bool]$task8WorkerRun.TreeExitConfirmed
+    if ($task8WorkerTreeExitConfirmed) {
+        Invoke-GraphKitAuthParityHook -Hooks $task8Hooks -Name AfterWorkerExit `
+            -Arguments @($task8State, [int]$task8WorkerRun.WorkerProcessId, $task8WorkerRun)
+    }
+    if (-not $task8WorkerTreeExitConfirmed -or -not [bool]$task8WorkerRun.ProtocolValid) {
+        throw [InvalidOperationException]::new('The protected parity worker result was rejected.')
+    }
+    $task8WorkerResult = $task8WorkerRun.Result
+    $task8Record.checks.exactImport = [bool]$task8WorkerResult.exactImport
+    foreach ($property in $task8WorkerResult.adapter.PSObject.Properties) {
         $task8Record.adapter.$($property.Name) = [bool]$property.Value
     }
-    if (@($task8Record.adapter.PSObject.Properties.Value | Where-Object {
-        -not [bool]$_
-    }).Count -ne 0) {
-        throw [InvalidOperationException]::new('The GraphKit.Auth adapter diagnostics were rejected.')
+    $task8Record.checks.contextMatched = [bool]$task8WorkerResult.contextMatched
+    $task8Record.checks.sourceMatched = [bool]$task8WorkerResult.sourceMatched
+    $task8Record.checks.tenantProofVerified = [bool]$task8WorkerResult.tenantProofVerified
+    $task8Record.read.attempted = [bool]$task8WorkerResult.readAttempted
+    $task8Record.read.succeeded = [bool]$task8WorkerResult.readSucceeded
+    $task8Record.read.rowCount = [long]$task8WorkerResult.rowCount
+    if (-not [bool]$task8WorkerResult.workerTeardownVerified) {
+        $task8WorkerTeardownFailed = $true
     }
-
-    if ($task8Execution -ceq 'Live') {
-        $task8StorePathBound = $PSBoundParameters.ContainsKey('StorePath')
-        Invoke-GraphKitAuthParityHook -Hooks $task8Hooks -Name PrepareLiveModule `
-            -Arguments @(
-                $task8ImportedModule, $task8State, $task8Route, $ProfileId,
-                $(if ($task8StorePathBound) { $StorePath } else { $null }),
-                $task8StorePathBound)
-        Assert-GraphKitAuthParityState -State $task8State -Purpose Import
-        $task8ContextCommand = @(Get-Command -Name Get-GraphContext -Module GraphKit `
-            -CommandType Function -ErrorAction Stop)
-        $task8ReadCommand = @(Get-Command -Name Get-GraphObject -Module GraphKit `
-            -CommandType Function -ErrorAction Stop)
-        if ($task8ContextCommand.Count -ne 1 -or
-            -not [object]::ReferenceEquals($task8ContextCommand[0].Module, $task8ImportedModule) -or
-            $task8ReadCommand.Count -ne 1 -or
-            -not [object]::ReferenceEquals($task8ReadCommand[0].Module, $task8ImportedModule)) {
-            throw [InvalidOperationException]::new('The exact public live commands were not found.')
-        }
-        $task8GetContextAction = {
-            param($requestedProfileId, $requestedStorePath, $route)
-            $parameters = @{ ProfileId = $requestedProfileId; ErrorAction = 'Stop' }
-            if ($task8StorePathBound) { $parameters.StorePath = $requestedStorePath }
-            $records = Invoke-GraphKitAuthParityCaptured -ExpectedCount 1 -Action {
-                & $task8ContextCommand[0] @parameters
-            }
-            return $records[0]
-        }.GetNewClosure()
-        $task8ReadAction = {
-            param($context, $type, $operation, $passThruResult)
-            $records = Invoke-GraphKitAuthParityCaptured -ExpectedCount 1 -Action {
-                & $task8ReadCommand[0] -Context $context -Type $type `
-                    -Operation $operation -PassThruResult:$passThruResult -ErrorAction Stop
-            }
-            return $records[0]
-        }.GetNewClosure()
-        $task8LiveCoreResult = Invoke-GraphKitAuthParityLiveCore -Route $task8Route `
-            -Diagnostics $task8Diagnostics -ProfileId $ProfileId -StorePath $StorePath `
-            -StorePathBound:$task8StorePathBound -GetContextAction $task8GetContextAction `
-            -ReadAction $task8ReadAction
-        $task8Record.checks.contextMatched = [bool]$task8LiveCoreResult.contextMatched
-        $task8Record.checks.sourceMatched = [bool]$task8LiveCoreResult.sourceMatched
-        $task8Record.checks.tenantProofVerified = [bool]$task8LiveCoreResult.tenantProofVerified
-        $task8Record.read.attempted = [bool]$task8LiveCoreResult.readAttempted
-        $task8Record.read.succeeded = [bool]$task8LiveCoreResult.readSucceeded
-        $task8Record.read.rowCount = [long]$task8LiveCoreResult.rowCount
-        if ($task8LiveCoreResult.state -cne 'Passed') {
-            $task8FailureStage = [string]$task8LiveCoreResult.failureStage
-            $task8FailureCode = [string]$task8LiveCoreResult.failureCode
-            throw [InvalidOperationException]::new('The protected parity live core was rejected.')
-        }
+    if ($task8WorkerResult.state -cne 'Passed') {
+        $task8FailureStage = [string]$task8WorkerResult.failureStage
+        $task8FailureCode = [string]$task8WorkerResult.failureCode
+        throw [InvalidOperationException]::new('The protected parity worker operation was rejected.')
     }
 }
 catch {
@@ -2274,45 +3526,10 @@ catch {
         -Stage $task8FailureStage -Code $task8FailureCode
 }
 finally {
-    $task8LiveCoreResult = $null
-    $task8GetContextAction = $null
-    $task8ReadAction = $null
-    $task8ReadResult = $null
-    $task8ReadResultRecords = $null
-    $task8ReadCommand = $null
-    $task8Context = $null
-    $task8ContextResult = $null
-    $task8ContextCommand = $null
-    $task8ContextParameters = $null
-    $task8Diagnostics = $null
-    $task8Imported = $null
-    $task8CleanupFailed = $false
-    if ($null -ne $task8ImportedModule) {
-        try {
-            $null = Invoke-GraphKitAuthParityCaptured -ExpectedCount 0 -Action {
-                Remove-Module -ModuleInfo $task8ImportedModule -Force -ErrorAction Stop
-            }
-        }
-        catch { $task8CleanupFailed = $true }
-        $task8ImportedModule = $null
-    }
-    if ($null -ne $task8ProviderWeakReference) {
-        for ($task8GcAttempt = 0;
-            $task8GcAttempt -lt 30 -and $task8ProviderWeakReference.IsAlive;
-            $task8GcAttempt++) {
-            [GC]::Collect()
-            [GC]::WaitForPendingFinalizers()
-            [GC]::Collect()
-        }
-        if ($task8ProviderWeakReference.IsAlive) { $task8CleanupFailed = $true }
-        $task8ProviderWeakReference = $null
-    }
-    if ($task8ModulePathChanged) {
-        if ($task8HadModulePath) { $env:PSModulePath = $task8SavedModulePath }
-        else { Remove-Item -LiteralPath Env:PSModulePath -ErrorAction SilentlyContinue }
-        $task8ModulePathChanged = $false
-    }
-    if ($null -ne $task8State) {
+    $task8CleanupFailed = $task8WorkerTeardownFailed -or
+        ($task8WorkerStarted -and -not $task8WorkerTreeExitConfirmed)
+    if ($null -ne $task8State -and
+        (-not $task8WorkerStarted -or $task8WorkerTreeExitConfirmed)) {
         try {
             Invoke-GraphKitAuthParityHook -Hooks $task8Hooks -Name BeforeCleanup `
                 -Arguments @($task8State)

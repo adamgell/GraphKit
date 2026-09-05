@@ -127,6 +127,8 @@ $task8EvidenceMutationCases = @(
 BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
     $script:runnerPath = Join-Path $script:repoRoot 'scripts/Invoke-GraphKitAuthParity.ps1'
+    $script:workerPath = Join-Path $script:repoRoot `
+        'scripts/private/Invoke-GraphKitAuthParityWorker.ps1'
     $script:task8ModeNames = @('Certificate','ClientSecret','ManagedIdentity','BearerToken')
 
     function New-Task8SparseFile {
@@ -293,12 +295,72 @@ public static class GraphKitTask8SparseFileFixtureV1
             [string] $StorePath,
             [string] $HookKind = 'None',
             [string] $MutationValue = '',
-            [switch] $OrdinaryExecution
+            [switch] $OrdinaryExecution,
+            [ValidateRange(1, 2)] [int] $Repeat = 1
         )
 
         $nonce = [guid]::NewGuid().ToString('N')
         $wrapperPath = Join-Path $TestDrive "task8-wrapper-$nonce.ps1"
         $tracePath = Join-Path $TestDrive "task8-trace-$nonce.jsonl"
+        $grandchildPath = Join-Path $TestDrive "task8-grandchild-$nonce.ps1"
+        [IO.File]::WriteAllText($grandchildPath, @'
+param(
+    [Parameter(Mandatory)][string] $HeldPath,
+    [Parameter(Mandatory)][string] $ReadyPath,
+    [Parameter(Mandatory)][string] $EscapeSessionText
+)
+$ErrorActionPreference = 'Stop'
+$escapedSession = $false
+if ($EscapeSessionText -ceq 'true' -and -not $IsWindows) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class GraphKitTask8EscapedSessionFixture
+{
+    public static void Enter()
+    {
+        int pid = Environment.ProcessId;
+        int session = setsid();
+        if (session < 0) throw new Win32Exception(Marshal.GetLastPInvokeError());
+        if (session != pid || getpgid(0) != pid || getsid(0) != pid)
+            throw new InvalidOperationException("Fixture session escape failed.");
+    }
+    [DllImport("libc", SetLastError = true)] private static extern int setsid();
+    [DllImport("libc", SetLastError = true)] private static extern int getpgid(int pid);
+    [DllImport("libc", SetLastError = true)] private static extern int getsid(int pid);
+}
+"@
+    [GraphKitTask8EscapedSessionFixture]::Enter()
+    $escapedSession = $true
+}
+$held = [IO.FileStream]::new(
+    $HeldPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    $readyRecord = [ordered]@{
+        processId = [Environment]::ProcessId
+        startTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks
+        heldPath = $HeldPath
+        escapedSession = $escapedSession
+    } | ConvertTo-Json -Compress -Depth 3
+    $readyTemporaryPath = $ReadyPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText(
+            $readyTemporaryPath,
+            $readyRecord,
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($readyTemporaryPath, $ReadyPath)
+    }
+    finally {
+        if ([IO.File]::Exists($readyTemporaryPath)) {
+            [IO.File]::Delete($readyTemporaryPath)
+        }
+    }
+    Start-Sleep -Seconds 30
+}
+finally { $held.Dispose() }
+'@, [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($wrapperPath, @'
 param(
     [Parameter(Mandatory)][string] $RunnerPath,
@@ -311,11 +373,16 @@ param(
     [Parameter(Mandatory)][string] $HookKind,
     [string] $MutationValue,
     [Parameter(Mandatory)][string] $OrdinaryExecutionText,
-    [Parameter(Mandatory)][string] $TracePath
+    [Parameter(Mandatory)][int] $RepeatCount,
+    [Parameter(Mandatory)][string] $TracePath,
+    [Parameter(Mandatory)][string] $GrandchildPath,
+    [string] $WorkerPath = '',
+    [string] $InternalWorkerText = 'false'
 )
 $ErrorActionPreference = 'Stop'
 $UseDryRun = $UseDryRunText -ceq 'true'
 $UseOrdinaryExecution = $OrdinaryExecutionText -ceq 'true'
+$UseInternalWorker = $InternalWorkerText -ceq 'true'
 $fixturePackagePath = $PackagePath
 $fixturePackageSha256 = $PackageSha256
 $fixtureAuthMode = $AuthMode
@@ -326,6 +393,38 @@ function Write-Task8Trace {
     param([Parameter(Mandatory)][string] $Event, [hashtable] $Data = @{})
     $line = [ordered]@{ event = $Event; data = $Data } | ConvertTo-Json -Compress -Depth 4
     [IO.File]::AppendAllText($TracePath, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+function Import-Task8FixtureContractsFromPackage {
+    param([Parameter(Mandatory)][string] $Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $stream = [IO.FileStream]::new(
+        $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $archive = [IO.Compression.ZipArchive]::new(
+            $stream, [IO.Compression.ZipArchiveMode]::Read, $false)
+        try {
+            $entries = @($archive.Entries | Where-Object {
+                $_.FullName -ceq 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            })
+            if ($entries.Count -ne 1 -or $entries[0].Length -le 0 -or
+                $entries[0].Length -gt 16MB) {
+                throw 'The exact package contracts fixture entry was rejected.'
+            }
+            $entryStream = $entries[0].Open()
+            $memory = [IO.MemoryStream]::new()
+            try {
+                $entryStream.CopyTo($memory)
+                return [Reflection.Assembly]::Load($memory.ToArray())
+            }
+            finally {
+                $memory.Dispose()
+                $entryStream.Dispose()
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
 }
 
 function Set-Task8FixtureOwnerWritable {
@@ -408,8 +507,55 @@ function Move-Task8FixtureDirectoryIdentityPreservingChildren {
 
 Add-Type -TypeDefinition @"
 using System;
+using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
+
+public static class GraphKitTask8HardLinkFixture
+{
+    private const int AtFdcwd = -100;
+
+    public static void Create(string linkPath, string existingPath)
+    {
+        string link = Path.GetFullPath(linkPath);
+        string target = Path.GetFullPath(existingPath);
+        if (OperatingSystem.IsWindows())
+        {
+            if (!CreateHardLinkW(ToExtendedWindowsPath(link), ToExtendedWindowsPath(target), IntPtr.Zero))
+            {
+                throw new IOException($"Native fixture hard-link creation failed (Win32 {Marshal.GetLastWin32Error()}).");
+            }
+            return;
+        }
+        if (linkat(AtFdcwd, target, AtFdcwd, link, 0) != 0)
+        {
+            throw new IOException($"Native fixture hard-link creation failed (errno {Marshal.GetLastWin32Error()}).");
+        }
+    }
+
+    private static string ToExtendedWindowsPath(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path;
+        if (path.StartsWith(@"\\", StringComparison.Ordinal))
+            return @"\\?\UNC\" + path.Substring(2);
+        return @"\\?\" + path;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateHardLinkW(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int linkat(
+        int oldDirectory,
+        string oldPath,
+        int newDirectory,
+        string newPath,
+        int flags);
+}
 
 public class GraphKitTask8TokenSourceProxy : DispatchProxy
 {
@@ -446,6 +592,24 @@ public class GraphKitTask8TokenSourceProxy : DispatchProxy
     }
 }
 "@
+
+function New-Task8FixtureHardLink {
+    param(
+        [Parameter(Mandatory)] $State,
+        [Parameter(Mandatory)][string] $RelativePath,
+        [Parameter(Mandatory)][string] $LinkPath
+    )
+    $targetPath = Join-Path $State.RootPath (
+        $RelativePath -replace '/', [IO.Path]::DirectorySeparatorChar)
+    [GraphKitTask8HardLinkFixture]::Create($LinkPath, $targetPath)
+    $evidenceType = $State.RootEvidence.GetType()
+    $nativeType = $evidenceType.Assembly.GetType(
+        $evidenceType.Namespace + '.GraphKitAuthStageCapture', $true, $false)
+    $linked = $nativeType::InspectFile($State.RootPath, $RelativePath)
+    if ([long]$linked.LinkCount -ne 2) {
+        throw 'The native fixture did not establish an exact two-link file.'
+    }
+}
 
 function New-Task8SourceProxy {
     param(
@@ -507,11 +671,169 @@ $hooks.AfterExtraction = {
 $hooks.AfterImport = {
     param($state)
     Write-Task8Trace -Event 'imported' -Data @{
+        processId = [Environment]::ProcessId
         manifestPath = [string] $state.ImportedManifestPath
         modulePath = [string] $state.ImportedModulePath
         moduleVersion = [string] $state.ModuleVersion
     }
 }.GetNewClosure()
+$hooks.BeforeCleanup = {
+    param($state)
+    Write-Task8Trace -Event 'cleanup-started' -Data @{
+        processId = [Environment]::ProcessId
+        root = [string] $state.RootPath
+    }
+}.GetNewClosure()
+$workerWrapperPath = [IO.Path]::GetFullPath($PSCommandPath)
+$hooks.ConfigureWorkerStartInfo = {
+    param($startInfo, $workerPath)
+    $startInfo.ArgumentList.Clear()
+    foreach ($argument in @(
+        '-NoLogo','-NoProfile','-NonInteractive','-File',$workerWrapperPath,
+        '-RunnerPath',$RunnerPath,
+        '-PackagePath','unused.nupkg',
+        '-PackageSha256',('0' * 64),
+        '-AuthMode','Certificate',
+        '-UseDryRunText','true',
+        '-ProfileId','',
+        '-StorePath','',
+        '-HookKind',$(if ($HookKind -cin @(
+            'PackageLiveSuccess','WorkerExtraBlankFrame','WorkerBomFrame',
+            'WorkerSecondFrame','WorkerMissingTerminator','WorkerEmptyFrame',
+            'WorkerInvalidUtf8','WorkerStderr','WorkerStdoutOverflow',
+            'WorkerStderrOverflow','WorkerNonzeroExit','WorkerNoRead',
+            'WorkerGrandchild','WorkerSessionEscape')) {
+            $HookKind
+        } else { 'None' }),
+        '-MutationValue','',
+        '-OrdinaryExecutionText','false',
+        '-RepeatCount','1',
+        '-TracePath',$TracePath,
+        '-GrandchildPath',$GrandchildPath,
+        '-WorkerPath',$workerPath,
+        '-InternalWorkerText','true'
+    )) {
+        $null = $startInfo.ArgumentList.Add([string]$argument)
+    }
+}.GetNewClosure()
+$hooks.AfterWorkerExit = {
+    param($state, $workerProcessId, $workerRun)
+    Write-Task8Trace -Event 'worker-exited' -Data @{
+        processId = [Environment]::ProcessId
+        workerProcessId = [int]$workerProcessId
+        root = [string]$state.RootPath
+        forcedTermination = [bool]$workerRun.ForcedTermination
+        protocolValid = [bool]$workerRun.ProtocolValid
+        workerState = $(if ($null -eq $workerRun.Result) { '' } else {
+            [string]$workerRun.Result.state
+        })
+        workerFailureStage = $(if ($null -eq $workerRun.Result) { '' } else {
+            [string]$workerRun.Result.failureStage
+        })
+        protocolFailure = [string]$workerRun.ProtocolFailure
+        ownershipEstablished = [bool]$workerRun.OwnershipEstablished
+        requestReleased = [bool]$workerRun.RequestReleased
+        rootExitConfirmed = [bool]$workerRun.RootExitConfirmed
+        treeExitConfirmed = [bool]$workerRun.TreeExitConfirmed
+        streamsDrained = [bool]$workerRun.StreamsDrained
+        elapsedMilliseconds = [long]$workerRun.ElapsedMilliseconds
+        operationDeadlineMilliseconds = [long]$workerRun.OperationDeadlineMilliseconds
+        hardDeadlineMilliseconds = [long]$workerRun.HardDeadlineMilliseconds
+    }
+}.GetNewClosure()
+$hooks.AfterWorkerRootExit = {
+    param($metadata)
+    Write-Task8Trace -Event 'worker-root-exited' -Data @{
+        workerProcessId = [int]$metadata.WorkerProcessId
+        ownershipEstablished = [bool]$metadata.OwnershipEstablished
+        requestReleased = [bool]$metadata.RequestReleased
+    }
+}.GetNewClosure()
+$hooks.BeforeWorkerTreeTermination = {
+    param($metadata)
+    Write-Task8Trace -Event 'worker-tree-termination-requested' -Data @{
+        workerProcessId = [int]$metadata.WorkerProcessId
+        rootExitConfirmed = [bool]$metadata.RootExitConfirmed
+        residualTreeDetected = [bool]$metadata.ResidualTreeDetected
+    }
+}.GetNewClosure()
+$hooks.AfterWorkerTreeExit = {
+    param($metadata)
+    Write-Task8Trace -Event 'worker-tree-exit-confirmed' -Data @{
+        workerProcessId = [int]$metadata.WorkerProcessId
+        terminationRequested = [bool]$metadata.TerminationRequested
+        residualTreeDetected = [bool]$metadata.ResidualTreeDetected
+        streamsDrained = [bool]$metadata.StreamsDrained
+    }
+}.GetNewClosure()
+$hooks.AfterWorkerProcessFailure = {
+    param($failurePoint)
+    Write-Task8Trace -Event 'worker-process-failure' -Data @{
+        failurePoint = [string]$failurePoint
+    }
+}.GetNewClosure()
+
+if ($HookKind -ceq 'PostStartSetupFailure') {
+    $hooks.AfterWorkerStarted = {
+        param($workerProcess)
+        Write-Task8Trace -Event 'worker-setup-started' -Data @{
+            processId = [int]$workerProcess.Id
+        }
+        throw 'The injected post-start collector setup failed.'
+    }.GetNewClosure()
+}
+if ($HookKind -cin @('WorkerNoRead','WorkerPermanentPollFailure')) {
+    $hooks.SelectWorkerTimeoutSeconds = { param($defaultSeconds) [int]3 }
+}
+if ($HookKind -ceq 'WorkerSessionEscape') {
+    # The child receives a separate five-second readiness bound only after this
+    # worker has bootstrapped and imported the candidate. Keep the collector's
+    # enclosing deadline strictly larger so the parent cannot terminate the
+    # original group after setsid but before readiness is published.
+    $hooks.SelectWorkerTimeoutSeconds = { param($defaultSeconds) [int]15 }
+}
+if ($HookKind -ceq 'WorkerPermanentPollFailure') {
+    $hooks.BeforeWorkerLifecyclePoll = {
+        param($metadata)
+        throw 'The injected lifecycle poll failed permanently.'
+    }.GetNewClosure()
+}
+if ($HookKind -ceq 'WorkerPathMismatch') {
+    $hooks.MutateWorkerRequest = {
+        param($request)
+        $request.state.moduleRoot = Join-Path $request.state.rootPath 'different-module'
+        return $request
+    }.GetNewClosure()
+}
+if ($HookKind -ceq 'WorkerRequestVersionMismatch') {
+    $hooks.MutateWorkerRequest = {
+        param($request)
+        $request.moduleVersion = '0.4.0-r8.other'
+        return $request
+    }.GetNewClosure()
+}
+if ($HookKind -ceq 'WorkerRequestTrailingLf') {
+    $hooks.MutateWorkerRequestJson = {
+        param($json)
+        return [string]$json + "`n"
+    }.GetNewClosure()
+}
+if ($HookKind -ceq 'WorkerRequestBom') {
+    $hooks.MutateWorkerRequestJson = {
+        param($json)
+        return [string][char]0xFEFF + [string]$json
+    }.GetNewClosure()
+}
+if ($HookKind -ceq 'StreamSentinel') {
+    $hooks.MutateWorkerRequest = {
+        param($request)
+        [IO.File]::WriteAllText(
+            ($TracePath + '.worker-request.json'),
+            ($request | ConvertTo-Json -Compress -Depth 12),
+            [Text.UTF8Encoding]::new($false))
+        return $request
+    }.GetNewClosure()
+}
 
 $preloadedRoot = $null
 $preloadedModule = $null
@@ -616,7 +938,7 @@ switch ($HookKind) {
             }
         }.GetNewClosure()
     }
-    'OutsideSentinel' {
+    { $_ -cin @('OutsideSentinel','WorkerGrandchild','WorkerSessionEscape') } {
         $hooks.AfterRootCreated = {
             param($state)
             Write-Task8Trace -Event 'root-created' -Data @{ root = [string] $state.RootPath }
@@ -624,6 +946,71 @@ switch ($HookKind) {
                 'graphkit-task8-outside-' + [guid]::NewGuid().ToString('N'))
             [IO.File]::WriteAllText($outside, 'outside-sentinel')
             Write-Task8Trace -Event 'outside-created' -Data @{ path = $outside }
+        }.GetNewClosure()
+    }
+    { $_ -cin @('WorkerGrandchild','WorkerSessionEscape') } {
+        $hooks.AfterImport = {
+            param($state)
+            Write-Task8Trace -Event 'imported' -Data @{
+                processId = [Environment]::ProcessId
+                manifestPath = [string] $state.ImportedManifestPath
+                modulePath = [string] $state.ImportedModulePath
+                moduleVersion = [string] $state.ModuleVersion
+            }
+            $heldPath = Join-Path $state.ModuleRoot `
+                'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            $readyPath = $TracePath + '.grandchild-ready'
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = [Environment]::ProcessPath
+            $startInfo.UseShellExecute = $false
+            foreach ($argument in @(
+                '-NoLogo','-NoProfile','-NonInteractive','-File',$GrandchildPath,
+                '-HeldPath',$heldPath,'-ReadyPath',$readyPath,
+                '-EscapeSessionText',$(if ($HookKind -ceq 'WorkerSessionEscape') {
+                    'true'
+                } else { 'false' }))) {
+                $null = $startInfo.ArgumentList.Add([string]$argument)
+            }
+            $child = [Diagnostics.Process]::new()
+            $child.StartInfo = $startInfo
+            try {
+                if (-not $child.Start()) {
+                    throw 'The Task 8 residual-tree fixture did not start.'
+                }
+                $deadline = [DateTime]::UtcNow.AddSeconds(5)
+                while (-not [IO.File]::Exists($readyPath) -and
+                    [DateTime]::UtcNow -lt $deadline -and -not $child.HasExited) {
+                    Start-Sleep -Milliseconds 10
+                }
+                $ready = if ([IO.File]::Exists($readyPath)) {
+                    [IO.File]::ReadAllText($readyPath) |
+                        ConvertFrom-Json -ErrorAction Stop
+                }
+                else { $null }
+                $expectedEscape = $HookKind -ceq 'WorkerSessionEscape'
+                if ($null -eq $ready -or $child.HasExited -or
+                    @($ready.PSObject.Properties).Count -ne 4 -or
+                    (@($ready.PSObject.Properties.Name | Sort-Object) -join ',') -cne
+                        'escapedSession,heldPath,processId,startTimeUtcTicks' -or
+                    $ready.processId.GetType() -ne [long] -or
+                    [long]$ready.processId -ne [long]$child.Id -or
+                    $ready.startTimeUtcTicks.GetType() -ne [long] -or
+                    [long]$ready.startTimeUtcTicks -le 0 -or
+                    $ready.heldPath.GetType() -ne [string] -or
+                    [string]$ready.heldPath -cne $heldPath -or
+                    $ready.escapedSession.GetType() -ne [bool] -or
+                    [bool]$ready.escapedSession -ne $expectedEscape) {
+                    try { $child.Kill($true) } catch {}
+                    throw 'The Task 8 residual-tree fixture did not become ready.'
+                }
+                Write-Task8Trace -Event 'grandchild-ready' -Data @{
+                    processId = [long]$ready.processId
+                    startTimeUtcTicks = [long]$ready.startTimeUtcTicks
+                    heldPath = [string]$ready.heldPath
+                    escapedSession = [bool]$ready.escapedSession
+                }
+            }
+            finally { $child.Dispose() }
         }.GetNewClosure()
     }
     'ExtractedMutation' {
@@ -665,7 +1052,8 @@ switch ($HookKind) {
                 'FinalImportHardLinkMutation' {
                     $outside = Join-Path (Split-Path $state.RootPath -Parent) (
                         'graphkit-task8-link-target-' + [guid]::NewGuid().ToString('N'))
-                    $null = New-Item -ItemType HardLink -Path $outside -Target $path -ErrorAction Stop
+                    New-Task8FixtureHardLink -State $state `
+                        -RelativePath 'module/GraphKit.psm1' -LinkPath $outside
                     Write-Task8Trace -Event 'mutation-outside-created' -Data @{ path = $outside }
                 }
             }
@@ -699,7 +1087,8 @@ switch ($HookKind) {
                 'CleanupHardLinkMutation' {
                     $outside = Join-Path (Split-Path $state.RootPath -Parent) (
                         'graphkit-task8-link-target-' + [guid]::NewGuid().ToString('N'))
-                    $null = New-Item -ItemType HardLink -Path $outside -Target $path -ErrorAction Stop
+                    New-Task8FixtureHardLink -State $state `
+                        -RelativePath 'module/GraphKit.psm1' -LinkPath $outside
                     Write-Task8Trace -Event 'mutation-outside-created' -Data @{ path = $outside }
                 }
             }
@@ -1171,7 +1560,100 @@ try {
         $parameters.ProfileId = $ProfileId
         if (-not [string]::IsNullOrEmpty($StorePath)) { $parameters.StorePath = $StorePath }
     }
-    if ($HookKind -like 'Live*') {
+    if ($UseInternalWorker) {
+        # The production worker enters its own Unix session before reading stdin.
+        # This wrapper is the actual test worker root, so establish the identical
+        # ownership boundary before a no-read seam or before invoking the worker.
+        $treeBootstrapHooks = [pscustomobject]@{
+            ContractMarker = 'GraphKit.Task8.ParityTestHooks/1'
+            ExportFunctionsOnly = $true
+        }
+        [AppDomain]::CurrentDomain.SetData(
+            'GraphKit.Task8.ParityTestHooks/1', $treeBootstrapHooks)
+        try {
+            . $RunnerPath -PackagePath 'unused.nupkg' -PackageSha256 ('0' * 64) `
+                -AuthMode Certificate -DryRun
+        }
+        finally {
+            [AppDomain]::CurrentDomain.SetData('GraphKit.Task8.ParityTestHooks/1', $null)
+        }
+        Initialize-GraphKitAuthParityProcessTreeNative
+        $script:GraphKitAuthParityProcessTreeType::EnterUnixWorkerSession()
+        if ($HookKind -ceq 'WorkerNoRead') {
+            Start-Sleep -Seconds 30
+        }
+        else {
+            [AppDomain]::CurrentDomain.SetData(
+                'GraphKit.Task8.ParityTestHooks/1', [pscustomobject] $hooks)
+            if ($HookKind -cin @(
+                'WorkerBomFrame','WorkerSecondFrame','WorkerMissingTerminator',
+                'WorkerEmptyFrame','WorkerInvalidUtf8','WorkerStderr',
+                'WorkerStdoutOverflow','WorkerStderrOverflow','WorkerNonzeroExit')) {
+                $savedWriter = [Console]::Out
+                $captureWriter = [IO.StringWriter]::new(
+                    [Globalization.CultureInfo]::InvariantCulture)
+                try {
+                    [Console]::SetOut($captureWriter)
+                    & $WorkerPath
+                }
+                finally { [Console]::SetOut($savedWriter) }
+                $payloadText = $captureWriter.ToString()
+                $captureWriter.Dispose()
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $payload = $utf8.GetBytes($payloadText)
+                $outputStream = [Console]::OpenStandardOutput()
+                $errorStream = [Console]::OpenStandardError()
+                switch ($HookKind) {
+                    'WorkerBomFrame' {
+                        $outputStream.Write([byte[]]@(0xEF,0xBB,0xBF), 0, 3)
+                        $outputStream.Write($payload, 0, $payload.Length)
+                    }
+                    'WorkerSecondFrame' {
+                        $outputStream.Write($payload, 0, $payload.Length)
+                        $outputStream.Write($payload, 0, $payload.Length)
+                    }
+                    'WorkerMissingTerminator' {
+                        $unterminated = $utf8.GetBytes(
+                            $payloadText.TrimEnd([char[]]@("`r","`n")))
+                        $outputStream.Write($unterminated, 0, $unterminated.Length)
+                    }
+                    'WorkerEmptyFrame' {}
+                    'WorkerInvalidUtf8' {
+                        $invalid = [byte[]]@(0xFF,0x0A)
+                        $outputStream.Write($invalid, 0, $invalid.Length)
+                    }
+                    'WorkerStderr' {
+                        $outputStream.Write($payload, 0, $payload.Length)
+                        $errorBytes = $utf8.GetBytes("task8-secret-sentinel`n")
+                        $errorStream.Write($errorBytes, 0, $errorBytes.Length)
+                    }
+                    'WorkerStdoutOverflow' {
+                        $overflowBytes = $utf8.GetBytes(
+                            'task8-secret-sentinel' + ('x' * 66000) + "`n")
+                        $outputStream.Write($overflowBytes, 0, $overflowBytes.Length)
+                    }
+                    'WorkerStderrOverflow' {
+                        $outputStream.Write($payload, 0, $payload.Length)
+                        $overflowBytes = $utf8.GetBytes(('x' * 66000) + "`n")
+                        $errorStream.Write($overflowBytes, 0, $overflowBytes.Length)
+                    }
+                    'WorkerNonzeroExit' {
+                        $outputStream.Write($payload, 0, $payload.Length)
+                    }
+                }
+                $outputStream.Flush()
+                $errorStream.Flush()
+                if ($HookKind -ceq 'WorkerNonzeroExit') { exit 7 }
+            }
+            else {
+                & $WorkerPath
+            }
+            if ($HookKind -ceq 'WorkerExtraBlankFrame') {
+                [Console]::Out.WriteLine('')
+            }
+        }
+    }
+    elseif ($HookKind -like 'Live*') {
         $dryOutput = @(& $RunnerPath -PackagePath $fixturePackagePath `
             -PackageSha256 $fixturePackageSha256 -AuthMode $fixtureAuthMode -DryRun)
         $dryParsedState = if ($dryOutput.Count -eq 1) {
@@ -1194,11 +1676,12 @@ try {
         finally {
             [AppDomain]::CurrentDomain.SetData('GraphKit.Task8.ParityTestHooks/1', $null)
         }
+        $null = Import-Task8FixtureContractsFromPackage -Path $fixturePackagePath
         $contracts = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
             $_.GetName().Name -ceq 'GraphKit.Auth.Contracts'
         })
         if ($contracts.Count -ne 1) {
-            throw 'The exact package did not leave one contracts assembly for the test core.'
+            throw 'The exact package did not load one contracts assembly for the test core.'
         }
         $diagnostics = [pscustomobject]@{
             InterfaceType = $contracts[0].GetType('GraphKit.Auth.IGraphTokenSource', $true, $false)
@@ -1214,8 +1697,17 @@ try {
     else {
         [AppDomain]::CurrentDomain.SetData(
             'GraphKit.Task8.ParityTestHooks/1', [pscustomobject] $hooks)
-        if ($UseOrdinaryExecution) { & $RunnerPath @parameters }
-        else { . $RunnerPath @parameters }
+        for ($runIndex = 0; $runIndex -lt $RepeatCount; $runIndex++) {
+            if ($UseOrdinaryExecution) { & $RunnerPath @parameters }
+            else { . $RunnerPath @parameters }
+            Write-Task8Trace -Event 'parent-after-run' -Data @{
+                processId = [Environment]::ProcessId
+                graphKitCount = @(Get-Module -Name GraphKit -All).Count
+                contractsCount = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
+                    $_.GetName().Name -ceq 'GraphKit.Auth.Contracts'
+                }).Count
+            }
+        }
     }
 }
 finally {
@@ -1253,13 +1745,16 @@ finally {
         [AppDomain]::CurrentDomain.SetData($script:task8PackageLiveHolderKey, $null)
         $script:task8PackageLiveHolderKey = $null
     }
-    $modulePathPresent = Test-Path -LiteralPath Env:PSModulePath
-    Write-Task8Trace -Event 'wrapper-finished' -Data @{
-        modulePathRestored = ($modulePathPresent -eq $beforeModulePathPresent -and
-            (-not $beforeModulePathPresent -or [string] $env:PSModulePath -ceq $beforeModulePath))
-        modulePathPresent = $modulePathPresent
-        graphKitLoaded = (@(Get-Module -Name GraphKit -All).Count -ne 0)
-        preloadedStillLoaded = ($null -ne $preloadedModule -and @(Get-Module -Name GraphKit -All).Count -ne 0)
+    if (-not $UseInternalWorker) {
+        $modulePathPresent = Test-Path -LiteralPath Env:PSModulePath
+        Write-Task8Trace -Event 'wrapper-finished' -Data @{
+            modulePathRestored = ($modulePathPresent -eq $beforeModulePathPresent -and
+                (-not $beforeModulePathPresent -or [string] $env:PSModulePath -ceq $beforeModulePath))
+            modulePathPresent = $modulePathPresent
+            graphKitLoaded = (@(Get-Module -Name GraphKit -All).Count -ne 0)
+            preloadedStillLoaded = ($null -ne $preloadedModule -and
+                @(Get-Module -Name GraphKit -All).Count -ne 0)
+        }
     }
     if ($null -ne $preloadedModule) {
         Remove-Module -ModuleInfo $preloadedModule -Force -ErrorAction SilentlyContinue
@@ -1288,7 +1783,9 @@ finally {
             '-HookKind',$HookKind,
             '-MutationValue',$MutationValue,
             '-OrdinaryExecutionText',([string][bool] $OrdinaryExecution).ToLowerInvariant(),
-            '-TracePath',$tracePath
+            '-RepeatCount',([string] $Repeat),
+            '-TracePath',$tracePath,
+            '-GrandchildPath',$grandchildPath
         )) {
             $null = $startInfo.ArgumentList.Add([string] $argument)
         }
@@ -1314,24 +1811,39 @@ finally {
             }
             $stdout = $stdoutTask.GetAwaiter().GetResult()
             $stderr = $stderrTask.GetAwaiter().GetResult()
-            $outputLines = @($stdout -split "`r?`n" | Where-Object {
-                -not [string]::IsNullOrWhiteSpace($_)
-            })
-            $parsed = $null
-            $jsonCount = 0
-            if ($outputLines.Count -eq 1) {
-                try {
-                    $parsed = ConvertFrom-Task8JsonText -Json $outputLines[0]
-                    $jsonCount = 1
-                }
-                catch { $parsed = $null }
+            $frames = [regex]::Matches(
+                $stdout,
+                '\G(?<json>\{[^\r\n]*\})(?:\r\n|\n)',
+                [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            $capturedLength = [long]0
+            foreach ($frame in $frames) { $capturedLength += $frame.Length }
+            $publicFramesValid = $frames.Count -gt 0 -and
+                $capturedLength -eq $stdout.Length
+            $outputLines = if ($publicFramesValid) {
+                @($frames | ForEach-Object { $_.Groups['json'].Value })
             }
+            else { @() }
+            $parsedRecords = @()
+            $parseFailed = -not $publicFramesValid
+            foreach ($line in $outputLines) {
+                try {
+                    $parsedRecords += ConvertFrom-Task8JsonText -Json $line
+                }
+                catch {
+                    $parseFailed = $true
+                    $parsedRecords = @()
+                    break
+                }
+            }
+            $jsonCount = if ($parseFailed) { 0 } else { $parsedRecords.Count }
+            $parsed = if ($jsonCount -eq 1) { $parsedRecords[0] } else { $null }
             return [pscustomobject]@{
                 ExitCode = $process.ExitCode
                 StdOut = $stdout
                 StdErr = $stderr
                 Output = $stdout + $stderr
                 Data = $parsed
+                DataRecords = @($parsedRecords)
                 JsonCount = $jsonCount
                 OutputLineCount = $outputLines.Count
                 TracePath = $tracePath
@@ -1753,6 +2265,7 @@ finally {
 Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
     It 'provides the verification-only runner at the approved literal path' {
         $script:runnerPath | Should -Exist
+        $script:workerPath | Should -Exist
     }
 
     It 'declares the exact public parameter contract and required private helpers' {
@@ -1767,6 +2280,42 @@ Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
             [ref] $tokens,
             [ref] $errors)
         @($errors).Count | Should -Be 0
+        $workerTokens = $null
+        $workerErrors = $null
+        $workerAst = [Management.Automation.Language.Parser]::ParseFile(
+            $script:workerPath,
+            [ref] $workerTokens,
+            [ref] $workerErrors)
+        @($workerErrors).Count | Should -Be 0
+        @($workerAst.ParamBlock.Parameters).Count | Should -Be 0
+
+        $workerVersionGuards = @($workerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Extent.Text -cmatch 'Get-GraphKitAuthParityFullVersion' -and
+                $node.Extent.Text -cmatch '\$request\.moduleVersion\b'
+        }, $true))
+        $workerImports = @($workerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Import-Module'
+        }, $true))
+        $workerVersionGuards.Count | Should -Be 1
+        $workerImports.Count | Should -Be 1
+        @($workerVersionGuards[0].FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.BinaryExpressionAst] -and
+                $node.Operator -eq [Management.Automation.Language.TokenKind]::Cne
+        }, $true)).Count | Should -Be 1
+        $workerVersionThrows = @($workerVersionGuards[0].FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.ThrowStatementAst]
+        }, $true))
+        $workerVersionThrows.Count | Should -Be 1
+        $workerVersionThrows[0].Extent.Text |
+            Should -Match 'protected parity worker version was rejected'
+        $workerVersionGuards[0].Extent.EndOffset |
+            Should -BeLessThan $workerImports[0].Extent.StartOffset
 
         @($ast.ParamBlock.Parameters.Name.VariablePath.UserPath) -join '|' |
             Should -BeExactly 'PackagePath|PackageSha256|AuthMode|ProfileId|StorePath|DryRun'
@@ -1782,6 +2331,27 @@ Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
         $functionNames | Should -Contain 'Get-GraphKitAuthParityPublicAbiSha256'
 
         $runnerText = [IO.File]::ReadAllText($script:runnerPath)
+        $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        . (Join-Path $script:repoRoot 'scripts/private/Test-GraphKitPackagePrivacy.ps1')
+        $moduleManifest = Import-PowerShellDataFile -Path (
+            Join-Path $script:repoRoot 'source/GraphKit.psd1')
+        $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet `
+            -ModuleGuid ([guid]$moduleManifest.GUID)
+        $privacyFindings = [Collections.Generic.List[object]]::new()
+        $privacyKeys = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal)
+        foreach ($task8Script in @($script:runnerPath, $script:workerPath)) {
+            $task8Bytes = [IO.File]::ReadAllBytes($task8Script)
+            $task8Text = $strictUtf8.GetString($task8Bytes)
+            if ($task8Text.Length -gt 0) {
+                $task8Text[0] | Should -Not -Be ([char]0xFEFF)
+            }
+            Test-GraphKitPackagePrivacyText -Text $task8Text `
+                -EntryName ([IO.Path]::GetRelativePath($script:repoRoot, $task8Script)) `
+                -Encoding 'source-strict-utf8' -AllowedGuids $allowedGuids `
+                -Findings $privacyFindings -FindingKeys $privacyKeys
+        }
+        $privacyFindings.Count | Should -Be 0
         $normalizedRunnerText = $runnerText.Replace("`r`n", "`n")
         $embeddedStartToken = "`$helperGzipBase64 = @'`n"
         $embeddedStart = $normalizedRunnerText.IndexOf(
@@ -1893,14 +2463,6 @@ Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
     }
 
     It 'contains no provisioning, mutation, installation, Graph SDK, or Azure command in its AST' {
-        if (-not (Test-Path -LiteralPath $script:runnerPath -PathType Leaf)) {
-            throw 'Task 8 runner AST is not implemented.'
-        }
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile(
-            $script:runnerPath, [ref] $tokens, [ref] $errors)
-        @($errors).Count | Should -Be 0
         $forbidden = @(
             'New-Ivy24LabApp','New-ClientServicePrincipalCBA','Register-GraphTenant',
             'Remove-GraphTenant','Set-Secret','Remove-Secret','Register-SecretVault',
@@ -1919,10 +2481,21 @@ Describe 'Task 8 protected GraphKit.Auth parity runner contract' {
             'New-AzResourceGroup','Remove-AzResourceGroup','New-AzUserAssignedIdentity',
             'Remove-AzUserAssignedIdentity','New-AzContainerGroup','Remove-AzContainerGroup','az'
         )
-        $commands = @($ast.FindAll({
-            param($node)
-            $node -is [Management.Automation.Language.CommandAst]
-        }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $null -ne $_ })
+        $commands = foreach ($task8Script in @($script:runnerPath, $script:workerPath)) {
+            if (-not (Test-Path -LiteralPath $task8Script -PathType Leaf)) {
+                throw 'A Task 8 verifier script AST is not implemented.'
+            }
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                $task8Script, [ref] $tokens, [ref] $errors)
+            @($errors).Count | Should -Be 0
+            @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst]
+            }, $true) | ForEach-Object { $_.GetCommandName() } |
+                Where-Object { $null -ne $_ })
+        }
         @($commands | Where-Object { $_ -in $forbidden }).Count | Should -Be 0
     }
 
@@ -2734,25 +3307,59 @@ Describe 'Task 8 isolated import, routing, and cleanup' {
         }
     }
 
-    It 'restores PSModulePath, removes GraphKit, deletes only its exact root, and preserves a sibling' {
+    It 'isolates two sequential imports from the cleanup owner and preserves only outside siblings' {
         $candidate = Get-Task8PackedCandidate
         $result = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
             -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
-            -HookKind OutsideSentinel
+            -HookKind OutsideSentinel -Repeat 2
         $trace = Get-Task8TraceRecords $result.TracePath
-        $root = [string] ($trace | Where-Object event -eq 'root-created').data.root
-        $outside = [string] ($trace | Where-Object event -eq 'outside-created').data.path
+        $roots = @($trace | Where-Object event -eq 'root-created')
+        $outside = @($trace | Where-Object event -eq 'outside-created')
+        $imports = @($trace | Where-Object event -eq 'imported')
+        $exits = @($trace | Where-Object event -eq 'worker-exited')
+        $cleanups = @($trace | Where-Object event -eq 'cleanup-started')
+        $afterRuns = @($trace | Where-Object event -eq 'parent-after-run')
         try {
-            $result.Data.state | Should -BeExactly 'Passed'
-            (Test-Path -LiteralPath $root) | Should -BeFalse
-            (Test-Path -LiteralPath $outside -PathType Leaf) | Should -BeTrue
+            $result.ExitCode | Should -Be 0
+            $result.OutputLineCount | Should -Be 2
+            $result.JsonCount | Should -Be 2
+            $result.DataRecords.Count | Should -Be 2
+            @($result.DataRecords | Where-Object state -cne 'Passed').Count | Should -Be 0
+            $roots.Count | Should -Be 2
+            $outside.Count | Should -Be 2
+            $imports.Count | Should -Be 2
+            $exits.Count | Should -Be 2
+            $cleanups.Count | Should -Be 2
+            $afterRuns.Count | Should -Be 2
+            foreach ($index in 0..1) {
+                [int]$imports[$index].data.processId |
+                    Should -Not -Be ([int]$cleanups[$index].data.processId)
+                [int]$exits[$index].data.workerProcessId |
+                    Should -Be ([int]$imports[$index].data.processId)
+                [int]$exits[$index].data.processId |
+                    Should -Be ([int]$cleanups[$index].data.processId)
+                [int]$cleanups[$index].data.processId |
+                    Should -Be ([int]$afterRuns[$index].data.processId)
+                [int]$afterRuns[$index].data.graphKitCount | Should -Be 0
+                [int]$afterRuns[$index].data.contractsCount | Should -Be 0
+                (Test-Path -LiteralPath ([string]$roots[$index].data.root)) | Should -BeFalse
+                (Test-Path -LiteralPath ([string]$outside[$index].data.path) -PathType Leaf) |
+                    Should -BeTrue
+                [Array]::IndexOf($trace, $imports[$index]) |
+                    Should -BeLessThan ([Array]::IndexOf($trace, $exits[$index]))
+                [Array]::IndexOf($trace, $exits[$index]) |
+                    Should -BeLessThan ([Array]::IndexOf($trace, $cleanups[$index]))
+            }
             $finished = $trace | Where-Object event -eq 'wrapper-finished'
             $finished.data.modulePathRestored | Should -BeTrue
             $finished.data.graphKitLoaded | Should -BeFalse
         }
         finally {
-            if (Test-Path -LiteralPath $outside -PathType Leaf) {
-                Remove-Item -LiteralPath $outside -Force
+            foreach ($record in $outside) {
+                $outsidePath = [string]$record.data.path
+                if (Test-Path -LiteralPath $outsidePath -PathType Leaf) {
+                    Remove-Item -LiteralPath $outsidePath -Force
+                }
             }
         }
 
@@ -2765,6 +3372,150 @@ Describe 'Task 8 isolated import, routing, and cleanup' {
             Where-Object event -eq 'wrapper-finished'
         $absentFinished.data.modulePathRestored | Should -BeTrue
         $absentFinished.data.modulePathPresent | Should -BeFalse
+
+        $treeRun = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+            -HookKind WorkerGrandchild
+        $treeTrace = Get-Task8TraceRecords $treeRun.TracePath
+        $treeRoot = @($treeTrace | Where-Object event -eq 'root-created')
+        $treeOutside = @($treeTrace | Where-Object event -eq 'outside-created')
+        $grandchild = @($treeTrace | Where-Object event -eq 'grandchild-ready')
+        $rootExit = @($treeTrace | Where-Object event -eq 'worker-root-exited')
+        $termination = @($treeTrace |
+            Where-Object event -eq 'worker-tree-termination-requested')
+        $treeExit = @($treeTrace | Where-Object event -eq 'worker-tree-exit-confirmed')
+        $authorizedExit = @($treeTrace | Where-Object event -eq 'worker-exited')
+        $treeCleanup = @($treeTrace | Where-Object event -eq 'cleanup-started')
+        try {
+            Assert-Task8SafeFailure -Invocation $treeRun `
+                -Stage Diagnostics -Code DiagnosticsRejected `
+                -PackageSha256 $candidate.PackageSha256
+            $treeRun.Data.checks.cleanupVerified | Should -BeTrue
+            $treeRoot.Count | Should -Be 1
+            $treeOutside.Count | Should -Be 1
+            $grandchild.Count | Should -Be 1
+            $rootExit.Count | Should -Be 1
+            $termination.Count | Should -Be 1
+            $treeExit.Count | Should -Be 1
+            $authorizedExit.Count | Should -Be 1
+            $treeCleanup.Count | Should -Be 1
+            [bool]$termination[0].data.residualTreeDetected | Should -BeTrue
+            [bool]$treeExit[0].data.terminationRequested | Should -BeTrue
+            [bool]$treeExit[0].data.streamsDrained | Should -BeTrue
+            [bool]$authorizedExit[0].data.ownershipEstablished | Should -BeTrue
+            [bool]$authorizedExit[0].data.requestReleased | Should -BeTrue
+            [bool]$authorizedExit[0].data.rootExitConfirmed | Should -BeTrue
+            [bool]$authorizedExit[0].data.treeExitConfirmed | Should -BeTrue
+            [bool]$authorizedExit[0].data.streamsDrained | Should -BeTrue
+            [string]$authorizedExit[0].data.protocolFailure |
+                Should -BeExactly 'ResidualTree'
+            [Array]::IndexOf($treeTrace, $grandchild[0]) |
+                Should -BeLessThan ([Array]::IndexOf($treeTrace, $rootExit[0]))
+            [Array]::IndexOf($treeTrace, $rootExit[0]) |
+                Should -BeLessThan ([Array]::IndexOf($treeTrace, $termination[0]))
+            [Array]::IndexOf($treeTrace, $termination[0]) |
+                Should -BeLessThan ([Array]::IndexOf($treeTrace, $treeExit[0]))
+            [Array]::IndexOf($treeTrace, $treeExit[0]) |
+                Should -BeLessThan ([Array]::IndexOf($treeTrace, $treeCleanup[0]))
+            (Test-Path -LiteralPath ([string]$treeRoot[0].data.root)) | Should -BeFalse
+            (Test-Path -LiteralPath ([string]$treeOutside[0].data.path) -PathType Leaf) |
+                Should -BeTrue
+            $grandchildAlive = $false
+            try {
+                $probe = [Diagnostics.Process]::GetProcessById(
+                    [int]$grandchild[0].data.processId)
+                try { $grandchildAlive = -not $probe.HasExited }
+                finally { $probe.Dispose() }
+            }
+            catch [ArgumentException] {}
+            $grandchildAlive | Should -BeFalse
+        }
+        finally {
+            if ($grandchild.Count -eq 1) {
+                try {
+                    $rescue = [Diagnostics.Process]::GetProcessById(
+                        [int]$grandchild[0].data.processId)
+                    try {
+                        if (-not $rescue.HasExited -and
+                            $rescue.StartTime.ToUniversalTime().Ticks -eq
+                                [long]$grandchild[0].data.startTimeUtcTicks) {
+                            $rescue.Kill($true)
+                            $null = $rescue.WaitForExit(5000)
+                        }
+                    }
+                    finally { $rescue.Dispose() }
+                }
+                catch [ArgumentException] {}
+            }
+            foreach ($record in $treeOutside) {
+                $outsidePath = [string]$record.data.path
+                if (Test-Path -LiteralPath $outsidePath -PathType Leaf) {
+                    Remove-Item -LiteralPath $outsidePath -Force
+                }
+            }
+        }
+
+        if (-not $IsWindows) {
+            $escapeClock = [Diagnostics.Stopwatch]::StartNew()
+            $escapeRun = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+                -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+                -HookKind WorkerSessionEscape
+            $escapeClock.Stop()
+            $escapeTrace = Get-Task8TraceRecords $escapeRun.TracePath
+            $escapeRoot = @($escapeTrace | Where-Object event -eq 'root-created')
+            $escapeOutside = @($escapeTrace | Where-Object event -eq 'outside-created')
+            $escapedChild = @($escapeTrace | Where-Object event -eq 'grandchild-ready')
+            try {
+                Assert-Task8SafeFailure -Invocation $escapeRun `
+                    -Stage Cleanup -Code CleanupFailed `
+                    -PackageSha256 $candidate.PackageSha256
+                # This is an outer anti-hang ceiling, not the collector's operation
+                # deadline. It includes fresh pwsh startup, package staging, archive
+                # verification, extraction, and native-helper compilation.
+                $escapeClock.Elapsed.TotalSeconds | Should -BeLessThan 30
+                $escapeRoot.Count | Should -Be 1
+                $escapeOutside.Count | Should -Be 1
+                $escapedChild.Count | Should -Be 1
+                [bool]$escapedChild[0].data.escapedSession | Should -BeTrue
+                @($escapeTrace | Where-Object event -eq 'worker-root-exited').Count |
+                    Should -Be 1
+                @($escapeTrace | Where-Object event -eq 'worker-tree-exit-confirmed').Count |
+                    Should -Be 0
+                @($escapeTrace | Where-Object event -eq 'worker-exited').Count |
+                    Should -Be 0
+                @($escapeTrace | Where-Object event -eq 'cleanup-started').Count |
+                    Should -Be 0
+                (Test-Path -LiteralPath ([string]$escapeRoot[0].data.root) -PathType Container) |
+                    Should -BeTrue
+                (Test-Path -LiteralPath ([string]$escapeOutside[0].data.path) -PathType Leaf) |
+                    Should -BeTrue
+            }
+            finally {
+                if ($escapedChild.Count -eq 1) {
+                    try {
+                        $rescue = [Diagnostics.Process]::GetProcessById(
+                            [int]$escapedChild[0].data.processId)
+                        try {
+                            if (-not $rescue.HasExited -and
+                                $rescue.StartTime.ToUniversalTime().Ticks -eq
+                                    [long]$escapedChild[0].data.startTimeUtcTicks) {
+                                $rescue.Kill($true)
+                                $null = $rescue.WaitForExit(5000)
+                            }
+                        }
+                        finally { $rescue.Dispose() }
+                    }
+                    catch [ArgumentException] {}
+                }
+                foreach ($record in $escapeRoot + $escapeOutside) {
+                    $path = if ($record.event -ceq 'root-created') {
+                        [string]$record.data.root
+                    }
+                    else { [string]$record.data.path }
+                    Remove-Task8ResidualFixturePath -Path $path
+                }
+            }
+        }
     }
 }
 
@@ -3041,9 +3792,68 @@ Describe 'Task 8 evidence schema and stream guard' {
         $result.ExitCode | Should -Be 0
         $result.JsonCount | Should -Be 1
         $result.Output | Should -Not -Match 'task8-secret-sentinel'
+        $streamExit = @(Get-Task8TraceRecords $result.TracePath |
+            Where-Object event -eq 'worker-exited')
+        $streamExit.Count | Should -Be 1
+        $streamExit[0].data.protocolFailure | Should -BeExactly 'None'
         $result.Data.state | Should -BeExactly 'Passed'
         @((Get-Task8TraceRecords $result.TracePath) |
             Where-Object event -eq 'stream-sentinel-fired').Count | Should -Be 1
+        $requestFixturePath = $result.TracePath + '.worker-request.json'
+        (Test-Path -LiteralPath $requestFixturePath -PathType Leaf) | Should -BeTrue
+        $requestFixtureJson = [IO.File]::ReadAllText($requestFixturePath)
+        $requestFixture = $requestFixtureJson | ConvertFrom-Json -Depth 32 -NoEnumerate
+        $convertedRequest = Invoke-Task8PrivateHelper `
+            -FunctionName ConvertFrom-GraphKitAuthParityWorkerState `
+            -Arguments @{ Request = $requestFixture }
+        [string]$convertedRequest.State.CandidateSha256 |
+            Should -BeExactly $candidate.PackageSha256
+        foreach ($collectionName in @(
+            'expectedFiles','expectedDirectories','fileEvidence','directoryEvidence')) {
+            $scalarRequest = $requestFixtureJson | ConvertFrom-Json -Depth 32 -NoEnumerate
+            $scalarRequest.state.$collectionName = @(
+                $scalarRequest.state.$collectionName)[0]
+            {
+                Invoke-Task8PrivateHelper `
+                    -FunctionName ConvertFrom-GraphKitAuthParityWorkerState `
+                    -Arguments @{ Request = $scalarRequest }
+            } | Should -Throw
+        }
+        $digestMismatchRequest = $requestFixtureJson |
+            ConvertFrom-Json -Depth 32 -NoEnumerate
+        $digestMismatchRequest.packageSha256 = ('f' * 64)
+        {
+            Invoke-Task8PrivateHelper `
+                -FunctionName ConvertFrom-GraphKitAuthParityWorkerState `
+                -Arguments @{ Request = $digestMismatchRequest }
+        } | Should -Throw
+        foreach ($requestMutation in @(
+            'missing-top','unknown-top','wrong-type','missing-state','wrong-path')) {
+            $mutantRequest = $requestFixtureJson |
+                ConvertFrom-Json -Depth 32 -NoEnumerate
+            switch ($requestMutation) {
+                'missing-top' {
+                    $mutantRequest.PSObject.Properties.Remove('profileId')
+                }
+                'unknown-top' {
+                    $mutantRequest | Add-Member -MemberType NoteProperty `
+                        -Name unknown -Value $true
+                }
+                'wrong-type' { $mutantRequest.storePathBound = 'false' }
+                'missing-state' {
+                    $mutantRequest.state.PSObject.Properties.Remove('sealed')
+                }
+                'wrong-path' {
+                    $mutantRequest.state.moduleRoot =
+                        Join-Path $mutantRequest.state.rootPath 'different-module'
+                }
+            }
+            {
+                Invoke-Task8PrivateHelper `
+                    -FunctionName ConvertFrom-GraphKitAuthParityWorkerState `
+                    -Arguments @{ Request = $mutantRequest }
+            } | Should -Throw
+        }
 
         $ordinary = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
             -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
@@ -3053,6 +3863,227 @@ Describe 'Task 8 evidence schema and stream guard' {
         $ordinary.Data.state | Should -BeExactly 'Passed'
         $ordinary.Data.failureStage | Should -BeExactly 'None'
         $ordinary.Data.failureCode | Should -BeExactly 'None'
+
+        $workerProtocolCases = @(
+            @{ HookKind = 'WorkerExtraBlankFrame'; ProtocolFailure = 'Frame' }
+            @{ HookKind = 'WorkerBomFrame'; ProtocolFailure = 'Frame' }
+            @{ HookKind = 'WorkerSecondFrame'; ProtocolFailure = 'Frame' }
+            @{ HookKind = 'WorkerMissingTerminator'; ProtocolFailure = 'Frame' }
+            @{ HookKind = 'WorkerEmptyFrame'; ProtocolFailure = 'Frame' }
+            @{ HookKind = 'WorkerInvalidUtf8'; ProtocolFailure = 'StreamDecode' }
+            @{ HookKind = 'WorkerStderr'; ProtocolFailure = 'Stderr' }
+            @{ HookKind = 'WorkerStdoutOverflow'; ProtocolFailure = 'StdoutBound' }
+            @{ HookKind = 'WorkerStderrOverflow'; ProtocolFailure = 'StderrBound' }
+            @{ HookKind = 'WorkerNonzeroExit'; ProtocolFailure = 'ExitCode' }
+            @{ HookKind = 'WorkerRequestTrailingLf'; ProtocolFailure = 'Validation' }
+            @{ HookKind = 'WorkerRequestBom'; ProtocolFailure = 'Validation' }
+        )
+        foreach ($protocolCase in $workerProtocolCases) {
+            $protocolResult = Invoke-Task8RunnerProcess `
+                -PackagePath $candidate.PackagePath `
+                -PackageSha256 $candidate.PackageSha256 `
+                -AuthMode Certificate -DryRun -HookKind $protocolCase.HookKind
+            Assert-Task8SafeFailure -Invocation $protocolResult `
+                -Stage Diagnostics -Code DiagnosticsRejected `
+                -PackageSha256 $candidate.PackageSha256
+            $protocolResult.Output | Should -Not -Match 'task8-secret-sentinel'
+            $protocolResult.Data.checks.cleanupVerified | Should -BeTrue
+            $protocolExit = @(Get-Task8TraceRecords $protocolResult.TracePath |
+                Where-Object event -eq 'worker-exited')
+            $protocolExit.Count | Should -Be 1
+            $protocolExit[0].data.protocolFailure |
+                Should -BeExactly $protocolCase.ProtocolFailure
+            $protocolExit[0].data.treeExitConfirmed | Should -BeTrue
+            $protocolExit[0].data.streamsDrained | Should -BeTrue
+        }
+
+        $versionMismatch = Invoke-Task8RunnerProcess `
+            -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 `
+            -AuthMode Certificate -DryRun -HookKind WorkerRequestVersionMismatch
+        Assert-Task8SafeFailure -Invocation $versionMismatch `
+            -Stage Import -Code ImportRejected `
+            -PackageSha256 $candidate.PackageSha256
+        $versionMismatch.Data.checks.cleanupVerified | Should -BeTrue
+        $versionMismatchExit = @(Get-Task8TraceRecords $versionMismatch.TracePath |
+            Where-Object event -eq 'worker-exited')
+        $versionMismatchExit.Count | Should -Be 1
+        $versionMismatchExit[0].data.protocolFailure | Should -BeExactly 'None'
+        $versionMismatchTrace = Get-Task8TraceRecords $versionMismatch.TracePath
+        @($versionMismatchTrace | Where-Object event -eq 'imported').Count | Should -Be 0
+        $versionMismatch.Output | Should -Not -Match '0\.4\.0-r8\.other'
+
+        $pathMismatch = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+            -HookKind WorkerPathMismatch
+        Assert-Task8SafeFailure -Invocation $pathMismatch `
+            -Stage Diagnostics -Code DiagnosticsRejected `
+            -PackageSha256 $candidate.PackageSha256
+        $pathMismatch.Data.checks.cleanupVerified | Should -BeTrue
+
+        $postStart = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+            -HookKind PostStartSetupFailure
+        Assert-Task8SafeFailure -Invocation $postStart `
+            -Stage Diagnostics -Code DiagnosticsRejected `
+            -PackageSha256 $candidate.PackageSha256
+        $postStartTrace = Get-Task8TraceRecords $postStart.TracePath
+        $postStartSetup = @($postStartTrace | Where-Object event -eq 'worker-setup-started')
+        $postStartExit = @($postStartTrace | Where-Object event -eq 'worker-exited')
+        $postStartCleanup = @($postStartTrace | Where-Object event -eq 'cleanup-started')
+        $postStartSetup.Count | Should -Be 1
+        $postStartExit.Count | Should -Be 1
+        $postStartCleanup.Count | Should -Be 1
+        [int]$postStartExit[0].data.workerProcessId |
+            Should -Be ([int]$postStartSetup[0].data.processId)
+        [Array]::IndexOf($postStartTrace, $postStartExit[0]) |
+            Should -BeLessThan ([Array]::IndexOf($postStartTrace, $postStartCleanup[0]))
+
+        $noReadClock = [Diagnostics.Stopwatch]::StartNew()
+        $noRead = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+            -HookKind WorkerNoRead
+        $noReadClock.Stop()
+        Assert-Task8SafeFailure -Invocation $noRead `
+            -Stage Diagnostics -Code DiagnosticsRejected `
+            -PackageSha256 $candidate.PackageSha256
+        $noReadClock.Elapsed.TotalSeconds | Should -BeLessThan 30
+        $noRead.Data.checks.cleanupVerified | Should -BeTrue
+        $noReadTrace = Get-Task8TraceRecords $noRead.TracePath
+        $noReadExit = @($noReadTrace | Where-Object event -eq 'worker-exited')
+        $noReadCleanup = @($noReadTrace | Where-Object event -eq 'cleanup-started')
+        $noReadExit.Count | Should -Be 1
+        $noReadExit[0].data.forcedTermination | Should -BeTrue
+        $noReadExit[0].data.protocolFailure | Should -BeExactly 'Timeout'
+        [long]$noReadExit[0].data.operationDeadlineMilliseconds | Should -Be 3000
+        [long]$noReadExit[0].data.hardDeadlineMilliseconds | Should -Be 5000
+        [long]$noReadExit[0].data.elapsedMilliseconds |
+            Should -BeGreaterOrEqual (
+                [long]$noReadExit[0].data.operationDeadlineMilliseconds)
+        [long]$noReadExit[0].data.elapsedMilliseconds | Should -BeLessOrEqual 7000
+        $noReadCleanup.Count | Should -Be 1
+        [Array]::IndexOf($noReadTrace, $noReadExit[0]) |
+            Should -BeLessThan ([Array]::IndexOf($noReadTrace, $noReadCleanup[0]))
+
+        $pollClock = [Diagnostics.Stopwatch]::StartNew()
+        $pollFailure = Invoke-Task8RunnerProcess -PackagePath $candidate.PackagePath `
+            -PackageSha256 $candidate.PackageSha256 -AuthMode Certificate -DryRun `
+            -HookKind WorkerPermanentPollFailure
+        $pollClock.Stop()
+        $pollTrace = Get-Task8TraceRecords $pollFailure.TracePath
+        $pollRoot = @($pollTrace | Where-Object event -eq 'root-created')
+        try {
+            Assert-Task8SafeFailure -Invocation $pollFailure `
+                -Stage Cleanup -Code CleanupFailed `
+                -PackageSha256 $candidate.PackageSha256
+            # The collector hard bound is enforced independently; this wrapper-level
+            # assertion also includes process startup, staging, and native compilation.
+            $pollClock.Elapsed.TotalSeconds | Should -BeLessThan 30
+            $pollRoot.Count | Should -Be 1
+            @($pollTrace | Where-Object event -eq 'worker-process-failure').Count |
+                Should -Be 1
+            @($pollTrace | Where-Object event -eq 'cleanup-started').Count | Should -Be 0
+            (Test-Path -LiteralPath ([string]$pollRoot[0].data.root) -PathType Container) |
+                Should -BeTrue
+        }
+        finally {
+            foreach ($record in $pollRoot) {
+                Remove-Task8ResidualFixturePath -Path ([string]$record.data.root)
+            }
+        }
+
+        $runnerSource = [IO.File]::ReadAllText($script:runnerPath)
+        $runnerSource | Should -Match (
+            'public bool IsTreeEmpty\(\)[\s\S]*?if \(_emptyConfirmed\) return true;')
+        $runnerSource | Should -Match (
+            'else if \(_assigned && _ownershipEstablished && !_emptyConfirmed')
+
+        $workerRequest = [pscustomobject]@{
+            nonce = ('a' * 64)
+            execution = 'DryRun'
+            authMode = 'Certificate'
+            packageSha256 = ('b' * 64)
+            moduleVersion = '0.4.0-r8.fixture'
+        }
+        $workerAdapter = [ordered]@{}
+        foreach ($name in @(
+            'abiMarkerExact','contractsDefault','providerCollectibleNonDefault',
+            'msalVersionExact','providerMsalSameContext','publicAbiExact')) {
+            $workerAdapter[$name] = $true
+        }
+        $workerResult = [pscustomobject][ordered]@{
+            recordKind = 'GraphKit.Task8.ParityWorkerResult/1'
+            nonce = ('a' * 64)
+            requestSha256 = ('c' * 64)
+            execution = 'DryRun'
+            authMode = 'Certificate'
+            packageSha256 = ('b' * 64)
+            moduleVersion = '0.4.0-r8.fixture'
+            state = 'Passed'
+            failureStage = 'None'
+            failureCode = 'None'
+            exactImport = $true
+            adapter = [pscustomobject]$workerAdapter
+            contextMatched = $false
+            sourceMatched = $false
+            tenantProofVerified = $false
+            readAttempted = $false
+            readSucceeded = $false
+            rowCount = [long]0
+            workerTeardownVerified = $true
+        }
+        Invoke-Task8PrivateHelper -FunctionName Test-GraphKitAuthParityWorkerResult `
+            -Arguments @{
+                Result = $workerResult
+                Request = $workerRequest
+                RequestSha256 = ('c' * 64)
+            } | Should -BeTrue
+        {
+            Invoke-Task8PrivateHelper `
+                -FunctionName ConvertFrom-GraphKitAuthParityWorkerJson `
+                -Arguments @{
+                    Json = '{"outer":{"value":1,"value":2}}'
+                    MaximumBytes = [long]1024
+                }
+        } | Should -Throw
+        foreach ($mutation in @(
+            'unknown','missing','wrong-type','wrong-nonce','wrong-hash',
+            'wrong-version','wrong-execution','wrong-auth','wrong-package',
+            'missing-adapter','unknown-adapter','wrong-adapter-type')) {
+            $mutant = $workerResult | ConvertTo-Json -Compress -Depth 5 |
+                ConvertFrom-Json -Depth 5
+            switch ($mutation) {
+                'unknown' {
+                    $mutant | Add-Member -MemberType NoteProperty `
+                        -Name unknown -Value $true
+                }
+                'missing' { $mutant.PSObject.Properties.Remove('rowCount') }
+                'wrong-type' { $mutant.exactImport = 'true' }
+                'wrong-nonce' { $mutant.nonce = ('d' * 64) }
+                'wrong-hash' { $mutant.requestSha256 = ('e' * 64) }
+                'wrong-version' { $mutant.moduleVersion = '0.4.0-r8.other' }
+                'wrong-execution' { $mutant.execution = 'Live' }
+                'wrong-auth' { $mutant.authMode = 'BearerToken' }
+                'wrong-package' { $mutant.packageSha256 = ('d' * 64) }
+                'missing-adapter' {
+                    $mutant.adapter.PSObject.Properties.Remove('publicAbiExact')
+                }
+                'unknown-adapter' {
+                    $mutant.adapter | Add-Member -MemberType NoteProperty `
+                        -Name unknown -Value $true
+                }
+                'wrong-adapter-type' { $mutant.adapter.publicAbiExact = 'true' }
+            }
+            {
+                Invoke-Task8PrivateHelper `
+                    -FunctionName Test-GraphKitAuthParityWorkerResult `
+                    -Arguments @{
+                        Result = $mutant
+                        Request = $workerRequest
+                        RequestSha256 = ('c' * 64)
+                    }
+            } | Should -Throw
+        }
     }
 
     It 'accepts the exact in-memory mode-run scalar types and closed schema' {

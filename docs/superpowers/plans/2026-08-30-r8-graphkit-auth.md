@@ -15,8 +15,9 @@
 Deterministic implementation is complete and green: Tasks 1-7 (prerelease identity, ABI and
 package boundary, dependency-free contract assembly, isolated provider, build/package/CI
 wiring, built-in cutover, and deterministic parity/runspace proof) plus Task 8 Steps 0-3
-(deterministic prerequisites and the digest-bound protected runner, frozen at clean commit
-`beceb22`). The remaining checkboxes are approval-gated and out of scope for deterministic
+(deterministic prerequisites and the digest-bound protected runner; the exact verified revision is
+recorded by the current release proof rather than pinned in this plan). The remaining checkboxes are
+approval-gated and out of scope for deterministic
 completion: Task 8 Steps 4-6 (protected live parity evidence), Task 9 (transitive MSAL removal,
 sequenced after live parity), and Task 10 (exact-SHA CI and publication).
 
@@ -998,6 +999,7 @@ service-behavior claim.
 **Files:**
 
 - Create: `scripts/Invoke-GraphKitAuthParity.ps1`
+- Create: `scripts/private/Invoke-GraphKitAuthParityWorker.ps1`
 - Create: `tests/QA/GraphKitAuthLiveParity.tests.ps1`
 - Create: `source/Private/Operations/Assert-GraphOperationAuthMode.ps1`
 - Modify: `source/Data/Operations/*.psd1`
@@ -1169,16 +1171,40 @@ tests/Unit/Transport/Invoke-GraphRetry.Tests.ps1
 
 - [x] **Step 1: Write and test a digest-bound protected runner**
 
-The runner requires the exact package path and SHA-256, installs into an isolated module path, and
-accepts one auth mode per invocation. Dry-run tests prove certificate, client-secret,
-managed-identity, and fixed-bearer routing without reading a credential, calling Graph, granting a
-permission, or creating Azure resources. Real mode emits only redacted counts, auth mode, adapter
-diagnostics, package digest, and success/failure state.
+The public runner keeps its literal six-parameter contract, requires the exact package path and
+SHA-256, and accepts one auth mode per invocation. The runner and its private worker are trusted
+verifier code. The parent alone snapshots, extracts, seals, retains native identity/closure evidence,
+starts the worker, validates its strict nonce- and request-hash-bound primitive JSON response, and
+performs exact cleanup. The parent never imports the candidate manifest or loads
+`GraphKit.Auth.Contracts`; the worker alone revalidates the sealed state, imports and diagnoses the
+candidate, removes it, emits one bounded redacted frame, and exits. No environment-selected role,
+scriptblock serialization, raw-stream test hook, or production worker override is accepted.
+
+The parent creates lifecycle ownership before start, withholds stdin until ownership is established,
+drains bounded stdout/stderr concurrently under one operation clock plus a bounded teardown phase,
+and authorizes cleanup only after root exit, OS-owner emptiness, and EOF on both pipes. Windows uses
+an unnamed kill-on-close Job Object and proves its active-process count is zero. Unix starts the
+trusted worker in a new session/process group and proves that group empty; this covers the worker and
+descendants that remain in that group, while inherited stdout/stderr EOF is an additional escape
+detector. This is lifecycle containment within the same-identity, non-adversarial verifier boundary,
+not a hostile-process sandbox: a descendant that deliberately creates a new session/group and closes
+both IPC streams is outside the claim. An escaped descendant that retains IPC makes exit
+unconfirmed, preserves the sealed stage, and produces `CleanupFailed`. Tests pin normal and forced
+exit, a grandchild retaining a staged DLL and stdout, a Unix `setsid` escape, permanently failing
+lifecycle polls, malformed protocol frames, path rederivation, and two sequential imports in one
+long-lived parent with no GraphKit assemblies retained there.
+
+Dry-run tests prove certificate, client-secret, managed-identity, and fixed-bearer routing without
+reading a credential, calling Graph, granting a permission, or creating Azure resources. Real mode
+emits only redacted counts, auth mode, adapter diagnostics, package digest, and success/failure state.
 
 - [x] **Step 2: Commit deterministic prerequisites and runner in sequence**
 
 First commit the reviewed prerequisite set above and repeat its focused and complete local gates on
-that exact clean SHA. Then commit only `scripts/Invoke-GraphKitAuthParity.ps1` and
+that exact clean SHA. Then commit only
+`docs/superpowers/plans/2026-08-30-r8-graphkit-auth.md`,
+`scripts/Invoke-GraphKitAuthParity.ps1`,
+`scripts/private/Invoke-GraphKitAuthParityWorker.ps1`, and
 `tests/QA/GraphKitAuthLiveParity.tests.ps1`. No observed-evidence file belongs in either commit.
 
 - [x] **Step 3: Pack/test and freeze the exact clean runner commit**
