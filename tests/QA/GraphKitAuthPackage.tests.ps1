@@ -579,9 +579,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
             }
         }
-    }
 
-    It 'preserves the primary build failure when fallback quarantine also fails' {
         $observed = & {
             $tasks = @{}
             function Capture-GraphKitAuthTask {
