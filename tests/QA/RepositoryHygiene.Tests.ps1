@@ -29,6 +29,16 @@ Describe 'Repository hygiene' -Tag 'QA' {
         Get-GitIgnoreExitCode -Path 'docs/r0-marker.md' | Should -Be 1
     }
 
+    It 'pins the raw-byte auth parity fixture to LF on every platform' {
+        $fixture = 'tests/Fixtures/GraphKitAuthParityCases.json'
+        Test-Path -LiteralPath (Join-Path $script:repoRoot $fixture) -PathType Leaf | Should -BeTrue
+        $attributes = @(& git -C $script:repoRoot check-attr text eol -- $fixture)
+
+        $LASTEXITCODE | Should -Be 0
+        $attributes | Should -Contain "$fixture`: text: set"
+        $attributes | Should -Contain "$fixture`: eol: lf"
+    }
+
     It 'pins every declared dependency to an exact version' {
         $dependencies = Import-PowerShellDataFile -Path (Join-Path $script:repoRoot 'RequiredModules.psd1')
         $unversioned = @(
