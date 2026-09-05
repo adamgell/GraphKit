@@ -230,6 +230,10 @@ public sealed class GraphTokenResult
 
     public required string[] Scopes { get; init; }
 
+    // Intentionally mutable across the public ABI: the PowerShell tenant-binding
+    // pipeline stamps independently proven identity onto the exact acquired result.
+    // Send authority also requires GraphKit's fingerprint/generation/tenant proof
+    // cache, so a caller-written value is metadata rather than proof.
     public string? VerifiedTenantId { get; set; }
 
     public required string TokenFingerprint { get; init; }
