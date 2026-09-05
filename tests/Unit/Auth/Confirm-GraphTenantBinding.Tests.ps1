@@ -20,6 +20,7 @@ namespace GraphKit.Tests
 {
     public sealed class TenantDeadlineIgnoringHandler : HttpMessageHandler
     {
+        public const string ContractMarker = "GraphKit.TenantDeadlineIgnoringHandler/1";
         private int _sendCount;
 
         public int SendCount { get { return Volatile.Read(ref _sendCount); } }
@@ -77,6 +78,16 @@ namespace GraphKit.Tests
     }
 }
 '@
+    }
+
+    $handlerType = 'GraphKit.Tests.TenantDeadlineIgnoringHandler' -as [type]
+    $marker = if ($null -ne $handlerType) { $handlerType.GetField('ContractMarker') } else { $null }
+    if ($null -eq $marker -or
+        [string] $marker.GetRawConstantValue() -cne 'GraphKit.TenantDeadlineIgnoringHandler/1') {
+        throw (
+            'The process-global tenant-deadline handler fixture is stale. ' +
+            'Run this file in a fresh PowerShell process.'
+        )
     }
 
     $script:TenantId = [guid] '00000000-0000-0000-0000-000000000001'
@@ -179,6 +190,15 @@ namespace GraphKit.Tests
 }
 
 Describe 'Confirm-GraphTenantBinding' {
+
+    It 'pins the process-global deadline handler fixture contract' {
+        $handlerType = 'GraphKit.Tests.TenantDeadlineIgnoringHandler' -as [type]
+        $marker = $handlerType.GetField('ContractMarker')
+
+        $marker | Should -Not -BeNullOrEmpty
+        [string] $marker.GetRawConstantValue() |
+            Should -BeExactly 'GraphKit.TenantDeadlineIgnoringHandler/1'
+    }
 
     Context 'binding cache' {
         BeforeEach {

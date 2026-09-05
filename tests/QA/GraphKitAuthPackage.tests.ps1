@@ -993,6 +993,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
     }
 
     It 'removes identity-bound owned state after injected <FailureKind> creation failure' -ForEach @(
+        @{ FailureKind = 'capture root' }
+        @{ FailureKind = 'stage root' }
         @{ FailureKind = 'capture payload' }
         @{ FailureKind = 'temporary install root' }
     ) {
@@ -1015,6 +1017,10 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
         $failure | Should -Match ([regex]::Escape("injected $FailureKind creation failure"))
         $failure | Should -Not -Match 'ambiguous cleanup|Original failure'
+        if ($FailureKind -in @('capture root', 'stage root')) {
+            Test-Path -LiteralPath (Join-Path $fixtureOutput 'GraphKit.Auth') |
+                Should -BeFalse
+        }
         foreach ($rootName in @('capture','stage')) {
             $root = Join-Path $fixtureOutput "GraphKit.Auth/$rootName"
             if (Test-Path -LiteralPath $root -PathType Container) {
@@ -1706,6 +1712,30 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         { Remove-GraphKitAuthAbiTestFixture -RepositoryRoot $root } | Should -Not -Throw
 
         Test-Path -LiteralPath $bin | Should -BeFalse
+    }
+
+    It 'removes a copied ABI projection when validation fails immediately after creation' {
+        Assert-GraphKitAuthStageCommands
+        $failure = $null
+        try {
+            $null = New-GraphKitAuthAbiTestFixture -RepositoryRoot $script:repoRoot `
+                -OutputRoot (Join-Path $script:repoRoot 'output') `
+                -AfterFixtureCopy {
+                    param($relativeFile)
+                    throw "injected post-copy validation failure for $relativeFile"
+                }
+        }
+        catch { $failure = $_.Exception.Message }
+
+        $failure | Should -Match 'injected post-copy validation failure'
+        foreach ($binRoot in @(
+            'src/GraphKit.Auth/GraphKit.Auth.Contracts/bin'
+            'src/GraphKit.Auth/GraphKit.Auth/bin'
+            'src/GraphKit.Auth/GraphKit.Auth.Tests/bin'
+        )) {
+            Test-Path -LiteralPath (Join-Path $script:repoRoot $binRoot) |
+                Should -BeFalse
+        }
     }
 
     It 'deletes only a recorded projection and preserves an unrecorded partial materialization' {

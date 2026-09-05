@@ -155,8 +155,10 @@ function Initialize-GraphKitAuthOwnerDirectory {
         [Parameter(Mandatory)] $ParentEvidence,
         [Parameter(Mandatory)][string] $ChildName,
         [Parameter(Mandatory)][string] $Kind,
-        [scriptblock] $AfterChildInspection
+        [scriptblock] $AfterChildInspection,
+        [ref] $CreatedByCall
     )
+    if ($null -ne $CreatedByCall) { $CreatedByCall.Value = $false }
     Initialize-GraphKitAuthStageCapture
     Assert-GraphKitAuthSafeSegment -Value $ChildName -Kind $Kind
     $parent = [IO.Path]::GetFullPath($ParentPath)
@@ -224,6 +226,7 @@ function Initialize-GraphKitAuthOwnerDirectory {
             -not $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess($after)) {
             throw "The GraphKit.Auth $Kind path changed while owner-only access was applied."
         }
+        if ($null -ne $CreatedByCall) { $CreatedByCall.Value = $created }
         return $after
     }
     catch {
@@ -703,18 +706,66 @@ function New-GraphKitAuthSealedStage {
     $authParentName = [IO.Path]::GetFileName($authParent)
     $authParentEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
         $authParentParent, $authParentName)
-    $authEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authParent `
-        -ParentEvidence $authParentEvidence -ChildName ([IO.Path]::GetFileName($authRoot)) `
-        -Kind 'auth root' -AfterChildInspection $AfterOwnedDirectoryCreate
     $captureRoot = Join-Path $authRoot 'capture'
     $stageRoot = Join-Path $authRoot 'stage'
     $versionRoot = Join-Path $stageRoot $FullVersion
-    $captureRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
-        -ParentEvidence $authEvidence -ChildName 'capture' -Kind 'capture root' `
-        -AfterChildInspection $AfterOwnedDirectoryCreate
-    $stageRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
-        -ParentEvidence $authEvidence -ChildName 'stage' -Kind 'stage root' `
-        -AfterChildInspection $AfterOwnedDirectoryCreate
+    $authEvidence = $null
+    $captureRootEvidence = $null
+    $stageRootEvidence = $null
+    $authRootCreated = $false
+    $captureRootCreated = $false
+    $stageRootCreated = $false
+    try {
+        $authEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authParent `
+            -ParentEvidence $authParentEvidence -ChildName ([IO.Path]::GetFileName($authRoot)) `
+            -Kind 'auth root' -AfterChildInspection $AfterOwnedDirectoryCreate `
+            -CreatedByCall ([ref]$authRootCreated)
+        $captureRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
+            -ParentEvidence $authEvidence -ChildName 'capture' -Kind 'capture root' `
+            -AfterChildInspection $AfterOwnedDirectoryCreate `
+            -CreatedByCall ([ref]$captureRootCreated)
+        $stageRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
+            -ParentEvidence $authEvidence -ChildName 'stage' -Kind 'stage root' `
+            -AfterChildInspection $AfterOwnedDirectoryCreate `
+            -CreatedByCall ([ref]$stageRootCreated)
+    }
+    catch {
+        $primary = $_
+        $cleanupFailures = [Collections.Generic.List[string]]::new()
+        foreach ($ownedRoot in @(
+            [pscustomobject]@{
+                Created = $stageRootCreated; ParentPath = $authRoot
+                ParentEvidence = $authEvidence; ChildName = 'stage'
+                ChildEvidence = $stageRootEvidence; Kind = 'stage root initialization cleanup'
+            }
+            [pscustomobject]@{
+                Created = $captureRootCreated; ParentPath = $authRoot
+                ParentEvidence = $authEvidence; ChildName = 'capture'
+                ChildEvidence = $captureRootEvidence; Kind = 'capture root initialization cleanup'
+            }
+            [pscustomobject]@{
+                Created = $authRootCreated; ParentPath = $authParent
+                ParentEvidence = $authParentEvidence
+                ChildName = [IO.Path]::GetFileName($authRoot)
+                ChildEvidence = $authEvidence; Kind = 'auth root initialization cleanup'
+            }
+        )) {
+            if (-not $ownedRoot.Created -or $null -eq $ownedRoot.ChildEvidence) { continue }
+            try {
+                Remove-GraphKitAuthVerifiedEmptyDirectory `
+                    -ParentPath $ownedRoot.ParentPath `
+                    -ParentEvidence $ownedRoot.ParentEvidence `
+                    -ChildName $ownedRoot.ChildName `
+                    -ChildEvidence $ownedRoot.ChildEvidence `
+                    -Kind $ownedRoot.Kind
+            }
+            catch { $cleanupFailures.Add($_.Exception.Message) }
+        }
+        if ($cleanupFailures.Count -ne 0) {
+            throw "GraphKit.Auth authority initialization failed and ambiguous cleanup was refused: $($cleanupFailures -join ' | ') Original failure: $($primary.Exception.Message)"
+        }
+        throw $primary
+    }
     $runId = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
     $capture = Join-Path $captureRoot $runId
     $payload = Join-Path $capture 'payload'
@@ -1138,7 +1189,8 @@ function New-GraphKitAuthAbiTestFixture {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string] $RepositoryRoot,
-        [Parameter(Mandatory)][string] $OutputRoot
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [scriptblock] $AfterFixtureCopy
     )
     Initialize-GraphKitAuthStageCapture
     $sourceManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $RepositoryRoot 'source/GraphKit.psd1')
@@ -1213,6 +1265,11 @@ function New-GraphKitAuthAbiTestFixture {
             $copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
                 $verified.PayloadPath, $entry.Key, $destination, $entry.Key
             )
+            $script:GraphKitAuthAbiFixtureState.CreatedPaths.Add($destinationFile)
+            $script:GraphKitAuthAbiFixtureState.ExpectedEvidence[$destinationFile] = $copy.Destination
+            if ($null -ne $AfterFixtureCopy) {
+                & $AfterFixtureCopy $relativeFile $copy.Destination
+            }
             $manifestRecord = @($verified.Manifest.files | Where-Object {
                 [string]$_.path -ceq "payload/$($entry.Key)"
             })
@@ -1221,8 +1278,6 @@ function New-GraphKitAuthAbiTestFixture {
                 [long]$copy.Destination.LinkCount -ne 1) {
                 throw "The GraphKit.Auth ABI test fixture '$($entry.Key)' does not match the sealed payload."
             }
-            $script:GraphKitAuthAbiFixtureState.CreatedPaths.Add($destinationFile)
-            $script:GraphKitAuthAbiFixtureState.ExpectedEvidence[$destinationFile] = $copy.Destination
             & git -C $RepositoryRoot check-ignore --quiet -- $relativeFile
             if ($LASTEXITCODE -ne 0) {
                 throw "The exact GraphKit.Auth ABI-test projection '$relativeFile' is not excluded by its literal process scope."
