@@ -584,10 +584,11 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
     It 'preserves the primary build failure when fallback quarantine also fails' {
         $observed = & {
             $tasks = @{}
-            function task {
+            function Capture-GraphKitAuthTask {
                 param([string] $Name, [scriptblock] $Action)
                 $tasks[$Name] = $Action
             }
+            Set-Alias -Name task -Value Capture-GraphKitAuthTask -Scope Local
 
             . $script:taskPath
 
