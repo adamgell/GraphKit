@@ -353,57 +353,92 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
         $registered.Count | Should -Be 2
         [object]::ReferenceEquals($registered[0], $hostCleanup) | Should -BeTrue
         [object]::ReferenceEquals($registered[1], $sourceCleanup) | Should -BeTrue
-        $stateKey = 'GraphKitTest.SenderState.' + [guid]::NewGuid().ToString('N')
-        $clientKey = 'GraphKitTest.SenderClient.' + [guid]::NewGuid().ToString('N')
-        [System.AppDomain]::CurrentDomain.SetData($stateKey, $state)
-        [System.AppDomain]::CurrentDomain.SetData($clientKey, $client)
-        $sendJob = $null
-        $stopJob = $null
+        $sendRunspace = $null
+        $stopRunspace = $null
+        $sendPipeline = $null
+        $stopPipeline = $null
+        $sendAsync = $null
+        $stopAsync = $null
+        $sendReceived = $false
+        $stopReceived = $false
 
         try {
-            $sendJob = Start-ThreadJob -ScriptBlock {
-                param($Manifest, $StateKey, $ClientKey)
-                Import-Module $Manifest -Force -ErrorAction Stop
-                $sharedState = [System.AppDomain]::CurrentDomain.GetData($StateKey)
-                $sharedClient = [System.AppDomain]::CurrentDomain.GetData($ClientKey)
+            # Start-ThreadJob shares one process-global throttle whose capacity is
+            # changed by unrelated tests. Prepare both workers synchronously so
+            # this test measures sender shutdown rather than ambient job scheduling.
+            $sendRunspace = [runspacefactory]::CreateRunspace()
+            $stopRunspace = [runspacefactory]::CreateRunspace()
+            foreach ($workerRunspace in @($sendRunspace, $stopRunspace)) {
+                $workerRunspace.ThreadOptions =
+                    [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+                $workerRunspace.Open()
+
+                $initializer = [powershell]::Create()
+                $initializer.Runspace = $workerRunspace
+                try {
+                    $null = $initializer.AddCommand('Import-Module').
+                        AddParameter('Name', $script:BuiltManifest).
+                        AddParameter('Force', $true).
+                        AddParameter('ErrorAction', 'Stop').Invoke()
+                    if ($initializer.HadErrors) {
+                        $messages = @($initializer.Streams.Error | ForEach-Object {
+                            $_.Exception.Message
+                        }) -join '; '
+                        throw "Dedicated lifecycle worker failed to import GraphKit: $messages"
+                    }
+                }
+                finally {
+                    $initializer.Dispose()
+                }
+            }
+
+            $sendPipeline = [powershell]::Create()
+            $sendPipeline.Runspace = $sendRunspace
+            $null = $sendPipeline.AddScript({
+                param($State, $Client)
                 & (Get-Module GraphKit) {
-                    param($State, $Client)
+                    param($LifecycleState, $InjectedClient)
                     $factory = {
                         param([int] $ConnectTimeoutSeconds)
                         [pscustomobject] @{
-                            Client          = $Client
+                            Client          = $InjectedClient
                             OwnedByGraphKit = $false
                         }
                     }.GetNewClosure()
                     Send-GraphHttpRequest -Uri ([uri] 'https://graph.microsoft.com/v1.0/me') `
-                        -Method GET -CredentialPolicy None -LifecycleState $State `
+                        -Method GET -CredentialPolicy None -LifecycleState $LifecycleState `
                         -HttpClientFactory $factory -TimeoutHeadersSeconds 30 -TimeoutBodySeconds 30
-                } $sharedState $sharedClient
-            } -ArgumentList $script:BuiltManifest, $stateKey, $clientKey
+                } $State $Client
+            }).AddArgument($state).AddArgument($client)
+            $sendAsync = $sendPipeline.BeginInvoke()
 
-            $handler.Started.Task.Wait(5000) | Should -BeTrue
+            $handler.Started.Task.Wait(5000) | Should -BeTrue `
+                -Because 'dedicated runspace setup completed before the timed physical-send assertion'
             $state.ActiveOperations | Should -Be 1
 
-            $stopJob = Start-ThreadJob -ScriptBlock {
-                param($Manifest, $StateKey)
-                Import-Module $Manifest -Force -ErrorAction Stop
-                $sharedState = [System.AppDomain]::CurrentDomain.GetData($StateKey)
+            $stopPipeline = [powershell]::Create()
+            $stopPipeline.Runspace = $stopRunspace
+            $null = $stopPipeline.AddScript({
+                param($State)
                 & (Get-Module GraphKit) {
-                    param($State)
-                    Stop-GraphModule -State $State
-                } $sharedState
-            } -ArgumentList $script:BuiltManifest, $stateKey
+                    param($LifecycleState)
+                    Stop-GraphModule -State $LifecycleState
+                } $State
+            }).AddArgument($state)
+            $stopAsync = $stopPipeline.BeginInvoke()
 
-            $stopCompleted = $stopJob | Wait-Job -Timeout 5
-            if ($null -eq $stopCompleted) {
+            if (-not $stopAsync.AsyncWaitHandle.WaitOne(5000)) {
                 $client.CancelPendingRequests()
                 throw 'Stop-GraphModule did not cancel and drain the in-flight sender within five seconds.'
             }
 
-            $sendCompleted = @($sendJob | Wait-Job -Timeout 10)
-            $sendCompleted.Count | Should -Be 1
-            $null = $stopJob | Receive-Job -ErrorAction Stop
-            $result = $sendJob | Receive-Job -ErrorAction Stop
+            $stopReceived = $true
+            $null = $stopPipeline.EndInvoke($stopAsync)
+            $sendAsync.AsyncWaitHandle.WaitOne(10000) | Should -BeTrue
+            $sendReceived = $true
+            $result = @($sendPipeline.EndInvoke($sendAsync))
+            $result.Count | Should -Be 1
+            $result = $result[0]
 
             $handler.SendCount | Should -Be 1
             $handler.SeenToken.IsCancellationRequested | Should -BeTrue
@@ -425,17 +460,33 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
         }
         finally {
             try { $client.CancelPendingRequests() } catch { }
-            if ($null -ne $sendJob) {
-                $null = @($sendJob | Wait-Job -Timeout 10)
-                $sendJob | Remove-Job -Force -ErrorAction SilentlyContinue
-            }
-            if ($null -ne $stopJob) {
-                $null = @($stopJob | Wait-Job -Timeout 10)
-                $stopJob | Remove-Job -Force -ErrorAction SilentlyContinue
-            }
-            [System.AppDomain]::CurrentDomain.SetData($stateKey, $null)
-            [System.AppDomain]::CurrentDomain.SetData($clientKey, $null)
             $client.Dispose()
+            if ($null -ne $sendAsync -and -not $sendReceived) {
+                if ($sendAsync.AsyncWaitHandle.WaitOne(10000)) {
+                    try { $null = $sendPipeline.EndInvoke($sendAsync) } catch { }
+                }
+                else {
+                    try { $sendPipeline.Stop() } catch { }
+                }
+            }
+            if ($null -ne $stopAsync -and -not $stopReceived) {
+                if ($stopAsync.AsyncWaitHandle.WaitOne(10000)) {
+                    try { $null = $stopPipeline.EndInvoke($stopAsync) } catch { }
+                }
+                else {
+                    try { $stopPipeline.Stop() } catch { }
+                }
+            }
+            if ($null -ne $sendPipeline) { $sendPipeline.Dispose() }
+            if ($null -ne $stopPipeline) { $stopPipeline.Dispose() }
+            if ($null -ne $sendRunspace) {
+                try { $sendRunspace.Close() } catch { }
+                $sendRunspace.Dispose()
+            }
+            if ($null -ne $stopRunspace) {
+                try { $stopRunspace.Close() } catch { }
+                $stopRunspace.Dispose()
+            }
         }
     }
 }
