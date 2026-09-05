@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Release gates now require exactly 74 passing `GraphKit.Auth` tests, independently reconcile the
+- Release gates now require exactly 77 passing `GraphKit.Auth` tests, independently reconcile the
   portable Pester floor against fresh discovery, and verify every dynamically selected PowerShell
   CI archive against a committed checksum copied from that version's official PowerShell release
   `hashes.sha256` asset before extraction or execution.

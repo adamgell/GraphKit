@@ -234,7 +234,7 @@ child runspace: nested PowerShell-class acquisition can hang before its method g
 Post-release development therefore rejects crossed legacy sources in the public sender before
 single-flight or method dispatch. That is containment, not delivery of the contract below.
 
-A small compiled adapter owns the MSAL boundary outright:
+The required end state is a small compiled adapter that owns the MSAL boundary outright:
 
 `GraphKit.Auth` is the required end-state boundary. The transitive MSAL delivery contract remains
 the immutable `0.3.0` behavior; a successor must not claim runspace-neutral contexts until the

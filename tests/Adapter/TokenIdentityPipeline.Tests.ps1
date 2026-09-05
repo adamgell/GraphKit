@@ -1,6 +1,7 @@
 BeforeAll {
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
-    $built = Get-ChildItem (Join-Path $repoRoot 'output/module/GraphKit') -Directory |
+    $built = Get-ChildItem (Join-Path $repoRoot 'output/module/GraphKit') -Directory `
+        -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending | Select-Object -First 1
     if (-not $built) {
         throw "No built GraphKit module found under '$repoRoot/output/module/GraphKit'. Run './build.ps1 -Tasks build' first."
@@ -8,25 +9,46 @@ BeforeAll {
     Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force -ErrorAction Stop
 
     $script:TenantId = [guid] '00000000-0000-0000-0000-000000000001'
+    # Port zero is reserved and cannot name a listening TCP destination. These
+    # cases prove cancellation happens before transport, so no server is needed.
+    $script:NoSendAuthority = [uri] 'http://127.0.0.1:0/'
     $script:openServers = [System.Collections.Generic.List[object]]::new()
-
-    function Get-TokenPipelineFreePort {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-        $listener.Start()
-        $port = ([System.Net.IPEndPoint] $listener.LocalEndpoint).Port
-        $listener.Stop()
-        return $port
-    }
 
     function Start-TokenPipelineServer {
         param(
-            [int] $Port,
-            [object[]] $Responses
+            [object[]] $Responses,
+            [scriptblock] $CandidatePortProvider = {
+                param([int] $Attempt)
+
+                [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(
+                    49152,
+                    65536)
+            }
         )
 
-        $listener = [System.Net.HttpListener]::new()
-        $listener.Prefixes.Add("http://127.0.0.1:$Port/")
-        $listener.Start()
+        $listener = $null
+        $port = 0
+        $bindFailure = $null
+        foreach ($attempt in 1..16) {
+            $candidatePort = & $CandidatePortProvider $attempt
+            $candidate = [System.Net.HttpListener]::new()
+            $candidate.Prefixes.Add("http://127.0.0.1:$candidatePort/")
+            try {
+                $candidate.Start()
+                $listener = $candidate
+                $port = $candidatePort
+                break
+            }
+            catch [System.Net.HttpListenerException] {
+                $bindFailure = $_.Exception
+                try { $candidate.Close() } catch { }
+            }
+        }
+        if ($null -eq $listener) {
+            throw [System.InvalidOperationException]::new(
+                'Could not bind the token-pipeline loopback server after 16 attempts.',
+                $bindFailure)
+        }
 
         $runspace = [runspacefactory]::CreateRunspace()
         $runspace.Open()
@@ -67,6 +89,7 @@ BeforeAll {
             PowerShell = $powershell
             Handle    = $handle
             Runspace  = $runspace
+            Authority = [uri] "http://127.0.0.1:$port/"
         }
         $script:openServers.Add($server)
         return $server
@@ -193,12 +216,41 @@ Describe 'Composed retry and sender token identity' {
         }
     }
 
+    It 'retries an occupied bind candidate and reports the exact bound authority' {
+        $script:collisionCandidateCalls = 0
+        $script:collisionBlocker = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            0)
+        $script:collisionBlocker.Start()
+        $script:collisionBlockedPort =
+            ([System.Net.IPEndPoint] $script:collisionBlocker.LocalEndpoint).Port
+
+        try {
+            $server = Start-TokenPipelineServer -Responses @() -CandidatePortProvider {
+                param([int] $Attempt)
+
+                $script:collisionCandidateCalls++
+                if ($Attempt -eq 2) {
+                    $script:collisionBlocker.Stop()
+                }
+                return $script:collisionBlockedPort
+            }
+
+            $script:collisionCandidateCalls | Should -Be 2
+            $server.Authority.AbsoluteUri | Should -BeExactly (
+                "http://127.0.0.1:{0}/" -f $script:collisionBlockedPort)
+        }
+        finally {
+            $script:collisionBlocker.Stop()
+            $script:collisionBlocker.Dispose()
+        }
+    }
+
     It 'acquires exactly once for one ordinary Graph attempt' {
-        $port = Get-TokenPipelineFreePort
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 204; Body = $null }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource
 
         $result = InModuleScope GraphKit -ArgumentList (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), (New-TokenPipelineDescriptor), $authority {
@@ -215,11 +267,10 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'proves a descriptor-verified GET even when the provider claims the tenant without a cache record' {
-        $port = Get-TokenPipelineFreePort
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 200; Body = '{"value":[]}' }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource -ClaimedTenantId $script:TenantId.ToString()
         $script:verifiedGetProofCalls = 0
         $script:verifiedGetProofToken = $null
@@ -279,8 +330,7 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'returns DeadlineExpired and releases admission before acquisition when the inherited proof budget is exhausted' {
-        $port = Get-TokenPipelineFreePort
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $script:NoSendAuthority
         $tokenSource = New-RotatingTokenSource
         $script:deadlineProofEntered = 0
         $script:deadlineProofSawCancellation = $false
@@ -345,8 +395,7 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'returns Cancelled and releases admission when a descriptor-verified GET is cancelled during proof' {
-        $port = Get-TokenPipelineFreePort
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $script:NoSendAuthority
         $cts = [System.Threading.CancellationTokenSource]::new()
         $tokenSource = New-RotatingTokenSource
         $tokenSource | Add-Member -MemberType NoteProperty -Name CancellationSource -Value $cts
@@ -410,12 +459,11 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'uses false then true acquisition flags across one 401 refresh' {
-        $port = Get-TokenPipelineFreePort
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 401; Body = '{"error":{"code":"InvalidAuthenticationToken"}}' }
             @{ StatusCode = 200; Body = '{"value":[]}' }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource
         $injections = @{
             Delay  = { param([double] $Seconds) }
@@ -436,11 +484,10 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'does not elevate an unproven provider tenant claim into provenance' {
-        $port = Get-TokenPipelineFreePort
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 200; Body = '{"value":[]}' }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource -ClaimedTenantId $script:TenantId.ToString()
 
         $result = InModuleScope GraphKit -ArgumentList (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), (New-TokenPipelineDescriptor), $authority {
@@ -456,12 +503,11 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'does not carry an earlier token proof across a 401 refresh' {
-        $port = Get-TokenPipelineFreePort
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 401; Body = '{"error":{"code":"InvalidAuthenticationToken"}}' }
             @{ StatusCode = 200; Body = '{"value":[]}' }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource -ClaimedTenantId $script:TenantId.ToString()
 
         InModuleScope GraphKit -ArgumentList $script:TenantId {
@@ -536,13 +582,12 @@ Describe 'Composed retry and sender token identity' {
     }
 
     It 'proves and sends a mutation with the same exact token' {
-        $port = Get-TokenPipelineFreePort
         $tenantBody = '{"value":[{"id":"' + $script:TenantId.ToString() + '"}]}'
-        $server = Start-TokenPipelineServer -Port $port -Responses @(
+        $server = Start-TokenPipelineServer -Responses @(
             @{ StatusCode = 200; Body = $tenantBody }
             @{ StatusCode = 204; Body = $null }
         )
-        $authority = [uri] "http://127.0.0.1:$port"
+        $authority = $server.Authority
         $tokenSource = New-RotatingTokenSource
 
         $result = InModuleScope GraphKit -ArgumentList (New-TokenPipelineContext -Authority $authority -TokenSource $tokenSource), (New-TokenPipelineDescriptor -ReplayPolicy NeverReplay -ThrottleClass Write), $authority {

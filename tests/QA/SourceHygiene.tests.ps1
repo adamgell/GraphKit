@@ -61,6 +61,149 @@ Describe 'GraphKit.Auth authored project-source privacy' {
             Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'detects a hashed protected token embedded in a longer hyphenated identifier' {
+        $realDigest = (Get-Command -Name Get-GraphKitPackagePrivacyDigest).ScriptBlock
+        Mock Get-GraphKitPackagePrivacyDigest {
+            if ($Value -ceq 'synthetic-protected-token') {
+                return '5cad5cdbf022740cbfc976f9836ac89d00000000000000000000000000000000'
+            }
+            return (& $realDigest -Value $Value)
+        }
+
+        $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid ([guid]::Empty)
+        $findings = [System.Collections.Generic.List[object]]::new()
+        $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefix-synthetic-protected-token-suffix' `
+            -EntryName 'fixture.txt' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $findings `
+            -FindingKeys $findingKeys
+
+        @($findings).Count | Should -Be 1
+        $findings[0].Category | Should -BeExactly 'internal identifier - customer name (A)'
+
+        $overBoundFindings = [System.Collections.Generic.List[object]]::new()
+        $overBoundFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        Test-GraphKitPackagePrivacyText `
+            -Text ((1..33 | ForEach-Object { "segment$_" }) -join '-') `
+            -EntryName 'fixture.txt' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $overBoundFindings `
+            -FindingKeys $overBoundFindingKeys
+
+        @($overBoundFindings).Count | Should -Be 1
+        $overBoundFindings[0].Category |
+            Should -BeExactly 'hyphenated identifier exceeds bounded privacy scan'
+    }
+
+    It 'detects an unapproved wrapped GUID and permits only digest-approved vendor metadata' {
+        $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid ([guid]::Empty)
+        $findings = [System.Collections.Generic.List[object]]::new()
+        $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefixx87f7ad68-c47e-48b4-a248-49602bc19e84ysuffix' `
+            -EntryName 'fixture.txt' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $findings `
+            -FindingKeys $findingKeys
+
+        @($findings).Count | Should -Be 1
+        $findings[0].Category | Should -BeExactly 'GUID that is not a well-known or package id'
+
+        $realDigest = (Get-Command -Name Get-GraphKitPackagePrivacyDigest).ScriptBlock
+        Mock Get-GraphKitPackagePrivacyDigest {
+            if ($Value -ceq '87f7ad68-c47e-48b4-a248-49602bc19e84') {
+                return '391ab33fdbbec5d86574ef81ce268caffeccdc6ea36e7940358e4ded01294842'
+            }
+            return (& $realDigest -Value $Value)
+        }
+        $vendorFindings = [System.Collections.Generic.List[object]]::new()
+        $vendorFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefixx87f7ad68-c47e-48b4-a248-49602bc19e84ysuffix' `
+            -EntryName 'Assemblies/GraphKit.Auth/Microsoft.Identity.Client.dll' `
+            -Encoding 'binary-utf16le' `
+            -AllowedGuids $allowedGuids `
+            -Findings $vendorFindings `
+            -FindingKeys $vendorFindingKeys
+
+        @($vendorFindings).Count | Should -Be 0
+
+        $sourceFindings = [System.Collections.Generic.List[object]]::new()
+        $sourceFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefixx87f7ad68-c47e-48b4-a248-49602bc19e84ysuffix' `
+            -EntryName 'Assemblies/GraphKit.Auth/Microsoft.Identity.Client.dll' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $sourceFindings `
+            -FindingKeys $sourceFindingKeys
+
+        @($sourceFindings).Count | Should -Be 1
+        $sourceFindings[0].Category |
+            Should -BeExactly 'GUID that is not a well-known or package id'
+
+        $wrongEntryFindings = [System.Collections.Generic.List[object]]::new()
+        $wrongEntryFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefixx87f7ad68-c47e-48b4-a248-49602bc19e84ysuffix' `
+            -EntryName 'Assemblies/GraphKit.Auth/Unexpected.dll' `
+            -Encoding 'binary-utf16le' `
+            -AllowedGuids $allowedGuids `
+            -Findings $wrongEntryFindings `
+            -FindingKeys $wrongEntryFindingKeys
+
+        @($wrongEntryFindings).Count | Should -Be 1
+        $wrongEntryFindings[0].Category |
+            Should -BeExactly 'GUID that is not a well-known or package id'
+
+        $wrongGuidFindings = [System.Collections.Generic.List[object]]::new()
+        $wrongGuidFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        Test-GraphKitPackagePrivacyText `
+            -Text 'prefixx89abcdef-0123-4abc-8def-0123456789abysuffix' `
+            -EntryName 'Assemblies/GraphKit.Auth/Microsoft.Identity.Client.dll' `
+            -Encoding 'binary-utf16le' `
+            -AllowedGuids $allowedGuids `
+            -Findings $wrongGuidFindings `
+            -FindingKeys $wrongGuidFindingKeys
+
+        @($wrongGuidFindings).Count | Should -Be 1
+        $wrongGuidFindings[0].Category |
+            Should -BeExactly 'GUID that is not a well-known or package id'
+    }
+
+    It 'fails closed when protected-token candidate generation reaches its fixed bound' {
+        $runs = @(
+            foreach ($runIndex in 0..15) {
+                (@(0..31 | ForEach-Object { "r${runIndex}s$_" }) -join '-')
+            }
+        )
+        $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid ([guid]::Empty)
+        $findings = [System.Collections.Generic.List[object]]::new()
+        $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+        Test-GraphKitPackagePrivacyText `
+            -Text ($runs -join ' ') `
+            -EntryName 'fixture.txt' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $findings `
+            -FindingKeys $findingKeys
+
+        @($findings).Count | Should -Be 1
+        $findings[0].Category |
+            Should -BeExactly 'protected-token candidate limit exceeded'
+        $findings[0].EvidenceSha256 |
+            Should -BeExactly (Get-GraphKitPackagePrivacyDigest -Value '8192')
+    }
 }
 
 Describe 'Source hygiene' {

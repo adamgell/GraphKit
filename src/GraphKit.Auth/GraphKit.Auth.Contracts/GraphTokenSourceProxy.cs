@@ -263,6 +263,8 @@ internal sealed class GraphTokenSourceProxy : IGraphTokenSource
 
 internal static class ProviderBoundaryFailure
 {
+    private const string CleanupFailureDataKey =
+        "GraphKit.Auth.ProviderConstructionCleanupFailed";
     private const int MaximumSafeFieldLength = 128;
     private const string SafeMessage =
         "The isolated GraphKit.Auth provider could not complete the requested operation.";
@@ -278,30 +280,48 @@ internal static class ProviderBoundaryFailure
         ArgumentNullException.ThrowIfNull(providerFailure);
         if (providerFailure is OperationCanceledException)
         {
-            return new OperationCanceledException(
+            return PreserveSafeMarkers(providerFailure, new OperationCanceledException(
                 CancellationMessage,
                 innerException: null,
-                effectiveCancellation);
+                effectiveCancellation));
         }
 
         if (providerFailure is GraphAuthException graphFailure)
         {
-            return new GraphAuthException(
+            return PreserveSafeMarkers(providerFailure, new GraphAuthException(
                 SafeToken(graphFailure.Code, unexpectedCode),
                 SafeToken(graphFailure.Category, unexpectedCategory),
                 SafeMessage,
                 graphFailure.RetryAfter is { } retryAfter && retryAfter >= TimeSpan.Zero
                     ? retryAfter
                     : null,
-                SafeCorrelation(graphFailure.CorrelationId) ?? string.Empty);
+                SafeCorrelation(graphFailure.CorrelationId) ?? string.Empty));
         }
 
-        return new GraphAuthException(
+        return PreserveSafeMarkers(providerFailure, new GraphAuthException(
             unexpectedCode,
             unexpectedCategory,
             SafeMessage,
             retryAfter: null,
-            correlationId: null);
+            correlationId: null));
+    }
+
+    private static T PreserveSafeMarkers<T>(Exception providerFailure, T recreatedFailure)
+        where T : Exception
+    {
+        try
+        {
+            if (providerFailure.Data[CleanupFailureDataKey] is bool cleanupFailed && cleanupFailed)
+            {
+                recreatedFailure.Data[CleanupFailureDataKey] = true;
+            }
+        }
+        catch
+        {
+            // Data is virtual. Ignore a provider-owned implementation rather than letting
+            // metadata inspection replace the already-sanitized boundary failure.
+        }
+        return recreatedFailure;
     }
 
     private static string SafeToken(string value, string fallback)

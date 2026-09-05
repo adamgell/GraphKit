@@ -110,10 +110,19 @@ function Test-GraphKitPackagePrivacyText {
         }
     }
 
-    $guidPattern = '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
+    # These digests bind one exact textual GUID to the pinned Microsoft.Identity.Client 4.82.1
+    # package entry and its UTF-16LE scan. The same GUID anywhere else remains a finding.
+    $allowedVendorEntryDigest =
+        '05361882fc2186c7978aceec9ede027acbceaa1753c0bfe72e13d281d19261e8'
+    $allowedVendorGuidDigest =
+        '391ab33fdbbec5d86574ef81ce268caffeccdc6ea36e7940358e4ded01294842'
+    $guidPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
     foreach ($match in [regex]::Matches($Text, $guidPattern)) {
         if ($AllowedGuids.Contains($match.Value) -or
-            (Test-GraphKitPackagePrivacyPlaceholderGuid -Value $match.Value)) {
+            (Test-GraphKitPackagePrivacyPlaceholderGuid -Value $match.Value) -or
+            ($Encoding -ceq 'binary-utf16le' -and
+                (Get-GraphKitPackagePrivacyDigest -Value $EntryName) -ceq $allowedVendorEntryDigest -and
+                (Get-GraphKitPackagePrivacyDigest -Value $match.Value) -ceq $allowedVendorGuidDigest)) {
             continue
         }
         Add-GraphKitPackagePrivacyFinding -Findings $Findings -FindingKeys $FindingKeys `
@@ -140,13 +149,64 @@ function Test-GraphKitPackagePrivacyText {
         '9a08498936078c81ec926fedbce5e7c9' = 'customer name (A, short form)'
         '6ca05670c4afd49e806f7cddbab83b00' = 'lab tenant id'
     }
-    foreach ($token in [regex]::Matches($Text, '[A-Za-z0-9][A-Za-z0-9-]{3,}')) {
-        $tokenDigest = (Get-GraphKitPackagePrivacyDigest -Value $token.Value.ToLowerInvariant()).Substring(0, 32)
+    $secretTokenCandidates = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $maximumSecretTokenCandidates = 8192
+    $secretTokenCandidateLimitExceeded = $false
+    :secretTokenGeneration foreach ($token in [regex]::Matches($Text, '[A-Za-z0-9][A-Za-z0-9-]{3,}')) {
+        if (-not $secretTokenCandidates.Contains($token.Value)) {
+            if ($secretTokenCandidates.Count -ge $maximumSecretTokenCandidates) {
+                $secretTokenCandidateLimitExceeded = $true
+                break secretTokenGeneration
+            }
+            $null = $secretTokenCandidates.Add($token.Value)
+        }
+        $segments = @([regex]::Matches($token.Value, '[A-Za-z0-9]+'))
+        if ($segments.Count -le 1) {
+            continue
+        }
+
+        # Candidate generation stays bounded at 528 substrings of at most 512 characters
+        # per hyphenated run. An identifier outside that envelope fails closed instead of
+        # creating quadratic work or silently bypassing the digest scan.
+        if ($segments.Count -gt 32 -or $token.Value.Length -gt 512) {
+            Add-GraphKitPackagePrivacyFinding -Findings $Findings -FindingKeys $FindingKeys `
+                -EntryName $EntryName -Encoding $Encoding `
+                -Category 'hyphenated identifier exceeds bounded privacy scan' `
+                -Evidence $token.Value
+            continue
+        }
+
+        for ($start = 0; $start -lt $segments.Count; $start++) {
+            for ($finish = $start; $finish -lt $segments.Count; $finish++) {
+                $candidateStart = $segments[$start].Index
+                $candidateLength = $segments[$finish].Index + $segments[$finish].Length - $candidateStart
+                if ($candidateLength -ge 4) {
+                    $candidate = $token.Value.Substring($candidateStart, $candidateLength)
+                    if (-not $secretTokenCandidates.Contains($candidate)) {
+                        if ($secretTokenCandidates.Count -ge $maximumSecretTokenCandidates) {
+                            $secretTokenCandidateLimitExceeded = $true
+                            break secretTokenGeneration
+                        }
+                        $null = $secretTokenCandidates.Add($candidate)
+                    }
+                }
+            }
+        }
+    }
+    if ($secretTokenCandidateLimitExceeded) {
+        Add-GraphKitPackagePrivacyFinding -Findings $Findings -FindingKeys $FindingKeys `
+            -EntryName $EntryName -Encoding $Encoding `
+            -Category 'protected-token candidate limit exceeded' `
+            -Evidence ([string] $maximumSecretTokenCandidates)
+    }
+    foreach ($token in $secretTokenCandidates) {
+        $tokenDigest = (Get-GraphKitPackagePrivacyDigest -Value $token.ToLowerInvariant()).Substring(0, 32)
         if ($secretTokenHashes.ContainsKey($tokenDigest)) {
             Add-GraphKitPackagePrivacyFinding -Findings $Findings -FindingKeys $FindingKeys `
                 -EntryName $EntryName -Encoding $Encoding `
                 -Category ("internal identifier - {0}" -f $secretTokenHashes[$tokenDigest]) `
-                -Evidence $token.Value
+                -Evidence $token
         }
     }
 }

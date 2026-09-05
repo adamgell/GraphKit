@@ -24,7 +24,7 @@ BeforeAll {
 }
 
 Describe 'GraphKit.Auth machine-readable test result gate' -Tag 'QA' {
-    It 'wires the authoritative validator into the build and accepts exactly 74 passing tests' {
+    It 'wires the authoritative validator into the build and accepts exactly 77 passing tests' {
         $taskSource = Get-Content -LiteralPath (
             Join-Path $script:repoRoot '.build/GraphKitAuth.tasks.ps1') -Raw
         @([regex]::Matches(
@@ -32,22 +32,22 @@ Describe 'GraphKit.Auth machine-readable test result gate' -Tag 'QA' {
             '(?m)^\s*Assert-GraphKitAuthTestResult\s+-Result\s+\$trx\s*$'
         )).Count | Should -Be 1
 
-        $result = New-GraphKitAuthTrxResult -Total 74
+        $result = New-GraphKitAuthTrxResult -Total 77
 
         { Assert-GraphKitAuthTestResult -Result $result } | Should -Not -Throw
     }
 
-    It 'rejects an all-passing result with only 73 discovered tests' {
-        $result = New-GraphKitAuthTrxResult -Total 73
+    It 'rejects an all-passing result with only 76 discovered tests' {
+        $result = New-GraphKitAuthTrxResult -Total 76
 
         { Assert-GraphKitAuthTestResult -Result $result } |
-            Should -Throw '*expected exactly 74*'
+            Should -Throw '*expected exactly 77*'
     }
 
-    It 'rejects an all-passing result with 75 discovered tests' {
-        $result = New-GraphKitAuthTrxResult -Total 75
+    It 'rejects an all-passing result with 78 discovered tests' {
+        $result = New-GraphKitAuthTrxResult -Total 78
 
         { Assert-GraphKitAuthTestResult -Result $result } |
-            Should -Throw '*expected exactly 74*'
+            Should -Throw '*expected exactly 77*'
     }
 }

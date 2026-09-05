@@ -10,6 +10,8 @@ namespace GraphKit.Auth.Tests;
 
 public sealed class OwnershipTests
 {
+    private const string CleanupFailureDataKey =
+        "GraphKit.Auth.ProviderConstructionCleanupFailed";
     private static readonly DateTimeOffset InitialNow =
         new(2026, 8, 31, 12, 0, 0, TimeSpan.Zero);
 
@@ -426,6 +428,89 @@ public sealed class OwnershipTests
         Assert.True(callerOwned.HasPrivateKey);
     }
 
+    [Fact]
+    public void CleanupFailureDoesNotReplaceSanitizedConstructionFailure()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 owned = CertificateFixture.Create();
+        var factory = new GraphTokenSourceFactory(
+            (_, _) => throw new InvalidOperationException("construction-sensitive-detail"),
+            clock.GetUtcNow,
+            _ => throw new InvalidOperationException("cleanup-sensitive-detail"));
+
+        GraphAuthException failure = Assert.Throws<GraphAuthException>(() =>
+            factory.Create(CertificateRequest(owned, ownsMaterial: true)));
+
+        Assert.Equal("provider_construction_failed", failure.Code);
+        Assert.Equal("Provider", failure.Category);
+        Assert.True(failure.Data[CleanupFailureDataKey] is true);
+        Assert.DoesNotContain("construction-sensitive-detail", failure.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("cleanup-sensitive-detail", failure.ToString(), StringComparison.Ordinal);
+        failure.Data["provider-owned-data"] = new ProviderOwnedObject();
+
+        Exception boundaryFailure = RecreateAtProviderBoundary(failure);
+        GraphAuthException boundaryGraphFailure = Assert.IsType<GraphAuthException>(boundaryFailure);
+        Assert.Equal("provider_construction_failed", boundaryGraphFailure.Code);
+        Assert.Equal("Provider", boundaryGraphFailure.Category);
+        Assert.True(boundaryFailure.Data[CleanupFailureDataKey] is true);
+        Assert.Single(boundaryFailure.Data);
+    }
+
+    [Fact]
+    public void CleanupFailureDoesNotReplaceConstructionCancellation()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 owned = CertificateFixture.Create();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var expected = new OperationCanceledException(
+            "construction-sensitive-detail",
+            cancellation.Token);
+        var factory = new GraphTokenSourceFactory(
+            (_, _) => throw expected,
+            clock.GetUtcNow,
+            _ => throw new InvalidOperationException("cleanup-sensitive-detail"));
+
+        OperationCanceledException failure = Assert.Throws<OperationCanceledException>(() =>
+            factory.Create(CertificateRequest(owned, ownsMaterial: true)));
+
+        Assert.Same(expected, failure);
+        Assert.True(failure.Data[CleanupFailureDataKey] is true);
+
+        Exception boundaryFailure = RecreateAtProviderBoundary(failure);
+        Assert.IsType<OperationCanceledException>(boundaryFailure);
+        Assert.True(boundaryFailure.Data[CleanupFailureDataKey] is true);
+    }
+
+    [Fact]
+    public void CleanupFailureDoesNotReplaceGraphAuthConstructionFailure()
+    {
+        var clock = new GraphTokenSourceTests.FakeClock(InitialNow);
+        using X509Certificate2 owned = CertificateFixture.Create();
+        var expected = new GraphAuthException(
+            "fixture_failure",
+            "Fixture",
+            "fixture-safe-message",
+            retryAfter: null,
+            correlationId: null);
+        var factory = new GraphTokenSourceFactory(
+            (_, _) => throw expected,
+            clock.GetUtcNow,
+            _ => throw new InvalidOperationException("cleanup-sensitive-detail"));
+
+        GraphAuthException failure = Assert.Throws<GraphAuthException>(() =>
+            factory.Create(CertificateRequest(owned, ownsMaterial: true)));
+
+        Assert.Same(expected, failure);
+        Assert.True(failure.Data[CleanupFailureDataKey] is true);
+
+        Exception boundaryFailure = RecreateAtProviderBoundary(failure);
+        GraphAuthException boundaryGraphFailure = Assert.IsType<GraphAuthException>(boundaryFailure);
+        Assert.Equal("fixture_failure", boundaryGraphFailure.Code);
+        Assert.Equal("Fixture", boundaryGraphFailure.Category);
+        Assert.True(boundaryFailure.Data[CleanupFailureDataKey] is true);
+    }
+
     [Theory]
     [InlineData(GraphAuthMode.Certificate)]
     [InlineData(GraphAuthMode.ClientSecret)]
@@ -703,6 +788,21 @@ public sealed class OwnershipTests
         {
             return new CreateOutcome(null, exception);
         }
+    }
+
+    private static Exception RecreateAtProviderBoundary(Exception failure)
+    {
+        Type boundaryType = typeof(GraphAuthHost).Assembly.GetType(
+            "GraphKit.Auth.ProviderBoundaryFailure",
+            throwOnError: true)!;
+        MethodInfo recreate = boundaryType.GetMethod(
+            "Recreate",
+            BindingFlags.Static | BindingFlags.NonPublic) ??
+            throw new InvalidOperationException("ProviderBoundaryFailure.Recreate was not found.");
+        return (Exception)(recreate.Invoke(
+            null,
+            [failure, CancellationToken.None, "provider_construction_failed", "Provider"]) ??
+            throw new InvalidOperationException("ProviderBoundaryFailure.Recreate returned null."));
     }
 
     private static MsalServiceException ServiceFailure(

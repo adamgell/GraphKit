@@ -4,6 +4,8 @@ namespace GraphKit.Auth;
 
 public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
 {
+    private const string CleanupFailureDataKey =
+        "GraphKit.Auth.ProviderConstructionCleanupFailed";
     private static readonly ConditionalWeakTable<object, object>
         ConsumedOwnedMaterials = new();
     private static readonly object ConsumedMaterialMarker = new();
@@ -75,28 +77,39 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
             transferredMaterial = null;
             return source;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
-            CleanupFailedTransfer(client, transferredMaterial);
+            if (CleanupFailedTransfer(client, transferredMaterial))
+            {
+                MarkCleanupFailure(exception);
+            }
             throw;
         }
-        catch (GraphAuthException)
+        catch (GraphAuthException exception)
         {
-            CleanupFailedTransfer(client, transferredMaterial);
+            if (CleanupFailedTransfer(client, transferredMaterial))
+            {
+                MarkCleanupFailure(exception);
+            }
             throw;
         }
         catch (Exception exception)
         {
-            CleanupFailedTransfer(client, transferredMaterial);
-            throw ProviderFailureSanitizer.Create(
+            bool cleanupFailed = CleanupFailedTransfer(client, transferredMaterial);
+            GraphAuthException failure = ProviderFailureSanitizer.Create(
                 exception,
                 "provider_construction_failed",
                 "Provider",
                 _utcNow);
+            if (cleanupFailed)
+            {
+                MarkCleanupFailure(failure);
+            }
+            throw failure;
         }
     }
 
-    private void CleanupFailedTransfer(
+    private bool CleanupFailedTransfer(
         ITokenClient? client,
         IDisposable? transferredMaterial)
     {
@@ -122,14 +135,19 @@ public sealed class GraphTokenSourceFactory : IGraphTokenSourceFactory
             }
         }
 
-        if (cleanupFailed)
+        return cleanupFailed;
+    }
+
+    private static void MarkCleanupFailure(Exception primaryFailure)
+    {
+        try
         {
-            throw new GraphAuthException(
-                "provider_construction_cleanup_failed",
-                "ProviderLifecycle",
-                "The isolated authentication provider could not clean up a failed source construction.",
-                retryAfter: null,
-                correlationId: null);
+            primaryFailure.Data[CleanupFailureDataKey] = true;
+        }
+        catch
+        {
+            // A provider-owned cancellation subtype can override Data. Its metadata must
+            // never be able to replace the primary cancellation while recording cleanup.
         }
     }
 

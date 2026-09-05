@@ -17,7 +17,7 @@ $script:GraphKitAuthStage = $null
 $script:GraphKitAuthStageCaptureType = $null
 $script:GraphKitAuthAbiFixtureState = $null
 $script:GraphKitAuthAbiGitConfigState = $null
-$script:GraphKitAuthExpectedTestCount = 74
+$script:GraphKitAuthExpectedTestCount = 77
 
 function Assert-GraphKitAuthTestResult {
     [CmdletBinding()]
