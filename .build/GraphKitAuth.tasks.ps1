@@ -270,6 +270,90 @@ function Initialize-GraphKitAuthBuildAuthorityRoot {
     return $authEvidence
 }
 
+function New-GraphKitAuthBuildWorkRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $RunId,
+        [scriptblock] $AfterCreate
+    )
+    Initialize-GraphKitAuthStageCapture
+    if ($RunId -cnotmatch '^[0-9a-f]{48}$') {
+        throw "The GraphKit.Auth build workspace run ID '$RunId' is not exactly 48 lowercase hexadecimal characters."
+    }
+    $authRoot = Get-GraphKitAuthOutputRoot $OutputRoot
+    $captureRoot = Join-Path $authRoot 'capture'
+    $output = [IO.Path]::GetFullPath($OutputRoot)
+    $outputEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($output)
+    $authEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        (Split-Path $authRoot -Parent), [IO.Path]::GetFileName($authRoot))
+    $captureEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        $authRoot, 'capture')
+    if (-not (Test-GraphKitAuthContainedPhysicalPath `
+        $outputEvidence.PhysicalPath $authEvidence.PhysicalPath) -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+        $authEvidence.PhysicalPath $captureEvidence.PhysicalPath) -or
+        -not (Test-GraphKitAuthOwnerOnlyWritableDirectory $captureEvidence)) {
+        throw 'The GraphKit.Auth build workspace capture root is not exact current-owner-only writable and physically contained.'
+    }
+    $name = ".build-$RunId"
+    $existing = Get-GraphKitAuthPortableChildEntry -ParentPath $captureRoot `
+        -ChildName $name -Kind 'build workspace'
+    if ($existing.Exists) {
+        throw "The GraphKit.Auth build workspace '$name' already exists."
+    }
+    $evidence = $null
+    try {
+        $evidence = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+            $captureRoot, $name)
+        if ($null -ne $AfterCreate) { & $AfterCreate $evidence }
+        if (-not (Test-GraphKitAuthContainedPhysicalPath `
+            $captureEvidence.PhysicalPath $evidence.PhysicalPath) -or
+            -not $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess($evidence)) {
+            throw 'The GraphKit.Auth build workspace was not created with exact owner-only access and containment.'
+        }
+    }
+    catch {
+        $primary = $_
+        if ($null -ne $evidence) {
+            try {
+                Assert-GraphKitAuthExactDirectoryClosure -Directory (Join-Path $captureRoot $name) `
+                    -ExpectedNames @() -Kind 'incomplete build workspace, which must be empty'
+                $recoveryQuarantine = New-GraphKitAuthTaskQuarantineRoot -OutputRoot $output
+                $partialWork = [pscustomobject]@{
+                    Name = $name
+                    Path = Join-Path $captureRoot $name
+                    Evidence = $evidence
+                    CapturePath = $captureRoot
+                    CaptureEvidence = $captureEvidence
+                    AuthPath = $authRoot
+                    AuthEvidence = $authEvidence
+                    OutputPath = $output
+                    OutputEvidence = $outputEvidence
+                }
+                $null = Move-GraphKitAuthBuildWorkToQuarantine `
+                    -BuildWork $partialWork -QuarantineRoot $recoveryQuarantine.Path
+            }
+            catch {
+                throw "GraphKit.Auth build workspace initialization failed and ambiguous cleanup was refused: $($_.Exception.Message) Original failure: $($primary.Exception.Message)"
+            }
+        }
+        throw $primary
+    }
+    return [pscustomobject]@{
+        PSTypeName = 'GraphKit.Auth.BuildWorkRoot'
+        Name = $name
+        Path = Join-Path $captureRoot $name
+        Evidence = $evidence
+        CapturePath = $captureRoot
+        CaptureEvidence = $captureEvidence
+        AuthPath = $authRoot
+        AuthEvidence = $authEvidence
+        OutputPath = $output
+        OutputEvidence = $outputEvidence
+    }
+}
+
 function Remove-GraphKitAuthVerifiedInstallCandidate {
     [CmdletBinding()]
     param(
@@ -981,14 +1065,43 @@ function Invoke-GraphKitAuthPrepareClean {
     return @($verified)
 }
 
+function New-GraphKitAuthTaskQuarantineRoot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $OutputRoot)
+    Initialize-GraphKitAuthStageCapture
+    $output = [IO.Path]::GetFullPath($OutputRoot)
+    if (-not (Test-Path -LiteralPath $output -PathType Container)) {
+        $null = [IO.Directory]::CreateDirectory($output)
+    }
+    $outputEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($output)
+    $quarantineName = 'GraphKit.Auth.quarantine-' + [guid]::NewGuid().ToString('N')
+    $quarantine = Join-Path $output $quarantineName
+    $quarantineEvidence = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+        $output, $quarantineName)
+    if (-not $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess(
+            $quarantineEvidence) -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $outputEvidence.PhysicalPath $quarantineEvidence.PhysicalPath)) {
+        throw 'The GraphKit.Auth generated-root quarantine was not created with exact owner-only access.'
+    }
+    return [pscustomobject]@{
+        PSTypeName = 'GraphKit.Auth.TaskQuarantineRoot'
+        Name = $quarantineName
+        Path = $quarantine
+        Evidence = $quarantineEvidence
+        OutputPath = $output
+        OutputEvidence = $outputEvidence
+    }
+}
+
 function Invoke-GraphKitAuthLiteralQuarantine {
     param([Parameter(Mandatory)][string] $RepositoryRoot)
     # Directory.Move is the identity-preserving quarantine primitive. Keep its
     # destination beneath the repository output tree so source and destination
     # remain on the same volume instead of depending on the OS temp volume.
-    $quarantine = Join-Path (Join-Path $RepositoryRoot 'output') `
-        ('GraphKit.Auth.quarantine-' + [guid]::NewGuid().ToString('N'))
-    $null = [IO.Directory]::CreateDirectory($quarantine)
+    $quarantineRoot = New-GraphKitAuthTaskQuarantineRoot `
+        -OutputRoot (Join-Path $RepositoryRoot 'output')
+    $quarantine = $quarantineRoot.Path
     $relativeRoots = @(
         'src/GraphKit.Auth/GraphKit.Auth.Contracts/bin'
         'src/GraphKit.Auth/GraphKit.Auth.Contracts/obj'
@@ -1006,6 +1119,145 @@ function Invoke-GraphKitAuthLiteralQuarantine {
         }
     }
     return $quarantine
+}
+
+function Move-GraphKitAuthBuildWorkToQuarantine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $BuildWork,
+        [Parameter(Mandatory)][string] $QuarantineRoot,
+        [scriptblock] $BeforeMove
+    )
+    Initialize-GraphKitAuthStageCapture
+    foreach ($property in @(
+        'Name','Path','Evidence','CapturePath','CaptureEvidence',
+        'AuthPath','AuthEvidence','OutputPath','OutputEvidence'
+    )) {
+        if ($null -eq $BuildWork.PSObject.Properties[$property]) {
+            throw "The GraphKit.Auth build workspace record is missing '$property'."
+        }
+    }
+    $name = [string]$BuildWork.Name
+    if ($name -cnotmatch '^\.build-[0-9a-f]{48}$') {
+        throw "The GraphKit.Auth build workspace name '$name' is not exact."
+    }
+    $captureRoot = [IO.Path]::GetFullPath([string]$BuildWork.CapturePath)
+    $source = [IO.Path]::GetFullPath([string]$BuildWork.Path)
+    if ($source -cne [IO.Path]::GetFullPath((Join-Path $captureRoot $name))) {
+        throw 'The GraphKit.Auth build workspace path is not the exact captured child.'
+    }
+    $authRoot = [IO.Path]::GetFullPath([string]$BuildWork.AuthPath)
+    $outputRoot = [IO.Path]::GetFullPath([string]$BuildWork.OutputPath)
+    $comparison = if ($IsWindows) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else { [StringComparison]::Ordinal }
+    if (-not $captureRoot.Equals((Join-Path $authRoot 'capture'), $comparison) -or
+        -not $authRoot.Equals((Join-Path $outputRoot 'GraphKit.Auth'), $comparison)) {
+        throw 'The GraphKit.Auth build workspace parent lineage is not exact.'
+    }
+    $quarantine = [IO.Path]::GetFullPath($QuarantineRoot)
+    $quarantineParent = Split-Path $quarantine -Parent
+    $quarantineName = [IO.Path]::GetFileName($quarantine)
+    if ($quarantineName -cnotmatch '^GraphKit\.Auth\.quarantine-[0-9a-f]{32}$') {
+        throw 'The GraphKit.Auth build workspace quarantine is not one task-specific sibling.'
+    }
+    if (-not $quarantineParent.Equals($outputRoot, $comparison)) {
+        throw 'The GraphKit.Auth build workspace quarantine is not beneath the exact captured output root.'
+    }
+    $currentOutput = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($outputRoot)
+    if ([string]$currentOutput.NativeIdentity -cne `
+            [string]$BuildWork.OutputEvidence.NativeIdentity -or
+        [string]$currentOutput.PhysicalPath -cne `
+            [string]$BuildWork.OutputEvidence.PhysicalPath) {
+        throw 'The GraphKit.Auth build workspace output parent changed identity; ambiguous cleanup was refused.'
+    }
+    $currentAuth = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        $outputRoot, 'GraphKit.Auth')
+    if ([string]$currentAuth.NativeIdentity -cne `
+            [string]$BuildWork.AuthEvidence.NativeIdentity -or
+        [string]$currentAuth.PhysicalPath -cne `
+            [string]$BuildWork.AuthEvidence.PhysicalPath -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentOutput.PhysicalPath $currentAuth.PhysicalPath)) {
+        throw 'The GraphKit.Auth build workspace authority parent changed identity; ambiguous cleanup was refused.'
+    }
+    $quarantineEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        $quarantineParent, $quarantineName)
+    if (-not $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess(
+            $quarantineEvidence) -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentOutput.PhysicalPath $quarantineEvidence.PhysicalPath)) {
+        throw 'The GraphKit.Auth build workspace quarantine is not exact current-owner-only writable.'
+    }
+    if ($null -ne $BeforeMove) { & $BeforeMove $source $quarantine }
+    $currentOutput = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($outputRoot)
+    if ([string]$currentOutput.NativeIdentity -cne `
+            [string]$BuildWork.OutputEvidence.NativeIdentity -or
+        [string]$currentOutput.PhysicalPath -cne `
+            [string]$BuildWork.OutputEvidence.PhysicalPath) {
+        throw 'The GraphKit.Auth build workspace output parent changed identity before the move; ambiguous cleanup was refused.'
+    }
+    $currentAuth = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        $outputRoot, 'GraphKit.Auth')
+    if ([string]$currentAuth.NativeIdentity -cne `
+            [string]$BuildWork.AuthEvidence.NativeIdentity -or
+        [string]$currentAuth.PhysicalPath -cne `
+            [string]$BuildWork.AuthEvidence.PhysicalPath -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentOutput.PhysicalPath $currentAuth.PhysicalPath)) {
+        throw 'The GraphKit.Auth build workspace authority parent changed identity before the move; ambiguous cleanup was refused.'
+    }
+    $currentCapture = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($captureRoot)
+    if ([string]$currentCapture.NativeIdentity -cne `
+            [string]$BuildWork.CaptureEvidence.NativeIdentity -or
+        [string]$currentCapture.PhysicalPath -cne `
+            [string]$BuildWork.CaptureEvidence.PhysicalPath) {
+        throw 'The GraphKit.Auth build workspace capture parent changed identity; ambiguous cleanup was refused.'
+    }
+    $current = $script:GraphKitAuthStageCaptureType::InspectDirectory($captureRoot, $name)
+    if ([string]$current.NativeIdentity -cne [string]$BuildWork.Evidence.NativeIdentity -or
+        [string]$current.PhysicalPath -cne [string]$BuildWork.Evidence.PhysicalPath -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentCapture.PhysicalPath $current.PhysicalPath) -or
+        -not (Test-GraphKitAuthOwnerOnlyWritableDirectory $current)) {
+        throw 'The GraphKit.Auth build workspace changed identity before quarantine; ambiguous cleanup was refused.'
+    }
+    $currentQuarantine = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+        $quarantineParent, $quarantineName)
+    if ([string]$currentQuarantine.NativeIdentity -cne `
+            [string]$quarantineEvidence.NativeIdentity -or
+        [string]$currentQuarantine.PhysicalPath -cne `
+            [string]$quarantineEvidence.PhysicalPath -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentOutput.PhysicalPath $currentQuarantine.PhysicalPath)) {
+        throw 'The GraphKit.Auth build workspace quarantine changed identity before the move; ambiguous cleanup was refused.'
+    }
+    $destinationEntry = Get-GraphKitAuthPortableChildEntry -ParentPath $quarantine `
+        -ChildName $name -Kind 'build workspace quarantine destination'
+    if ($destinationEntry.Exists) {
+        throw "The GraphKit.Auth build workspace quarantine destination '$name' already exists; no move was attempted."
+    }
+    $destination = Join-Path $quarantine $name
+    $script:GraphKitAuthStageCaptureType::MoveDirectoryCreateNew($source, $destination)
+    $moved = $script:GraphKitAuthStageCaptureType::InspectDirectory($quarantine, $name)
+    if ([string]$moved.NativeIdentity -cne [string]$BuildWork.Evidence.NativeIdentity -or
+        -not (Test-GraphKitAuthContainedPhysicalPath `
+            $currentQuarantine.PhysicalPath $moved.PhysicalPath) -or
+        -not (Test-GraphKitAuthOwnerOnlyWritableDirectory $moved)) {
+        throw 'The GraphKit.Auth quarantined build workspace changed identity; ambiguous cleanup was refused.'
+    }
+    $sourceEntry = Get-GraphKitAuthPortableChildEntry -ParentPath $captureRoot `
+        -ChildName $name -Kind 'quarantined build workspace source'
+    if ($sourceEntry.Exists) {
+        throw 'The GraphKit.Auth build workspace source was recreated during quarantine; ambiguous cleanup was refused.'
+    }
+    return [pscustomobject]@{
+        PSTypeName = 'GraphKit.Auth.QuarantinedBuildWorkRoot'
+        Name = $name
+        Path = $destination
+        Evidence = $moved
+    }
 }
 
 function Restore-GraphKitAuthGitConfigEnvironment {
@@ -1376,15 +1628,22 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
         $providerProject = Join-Path $BuildRoot 'src/GraphKit.Auth/GraphKit.Auth/GraphKit.Auth.csproj'
         $testProject = Join-Path $BuildRoot 'src/GraphKit.Auth/GraphKit.Auth.Tests/GraphKit.Auth.Tests.csproj'
         $runId = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
-        $authOutput = Join-Path $BuildRoot 'output/GraphKit.Auth'
-        $publishRoot = Join-Path $authOutput "publish/$runId"
-        $providerPublish = Join-Path $publishRoot 'provider'
-        $payloadSource = Join-Path $publishRoot 'payload'
-        $resultRoot = Join-Path $authOutput "dotnet-test/$runId"
+        $buildWork = $null
+        $publishRoot = $null
+        $providerPublish = $null
+        $payloadSource = $null
+        $resultRoot = $null
         $quarantine = $null
+        $buildWorkQuarantined = $false
         $primaryFailure = $null
         try {
             $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot (Join-Path $BuildRoot 'output')
+            $buildWork = New-GraphKitAuthBuildWorkRoot -OutputRoot (Join-Path $BuildRoot 'output') `
+                -RunId $runId
+            $resultRoot = Join-Path $buildWork.Path 'dotnet-test'
+            $publishRoot = Join-Path $buildWork.Path 'publish'
+            $providerPublish = Join-Path $publishRoot 'provider'
+            $payloadSource = Join-Path $publishRoot 'payload'
             $dotnetVersionOutput = @(& dotnet --version)
             if ($LASTEXITCODE -ne 0) { throw 'GraphKit.Auth could not query the dotnet SDK version.' }
             $dotnetVersion = ([string] (@($dotnetVersionOutput | Where-Object {
@@ -1467,6 +1726,7 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
             throw
         }
         finally {
+            $cleanupFailures = [Collections.Generic.List[string]]::new()
             if ($null -eq $quarantine) {
                 try {
                     $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $BuildRoot
@@ -1474,8 +1734,45 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
                     Write-Host "GraphKit.Auth generated roots quarantined at '$quarantine'."
                 }
                 catch {
-                    if ($null -eq $primaryFailure) { throw }
-                    Write-Warning 'GraphKit.Auth generated-root quarantine also failed; the earlier build failure remains authoritative.'
+                    $cleanupFailures.Add(
+                        "generated-root quarantine failed: $($_.Exception.Message)")
+                }
+            }
+            $buildWorkQuarantine = $quarantine
+            if ($null -ne $buildWork -and $null -eq $buildWorkQuarantine) {
+                try {
+                    $buildWorkQuarantineRoot = New-GraphKitAuthTaskQuarantineRoot `
+                        -OutputRoot (Join-Path $BuildRoot 'output')
+                    $buildWorkQuarantine = $buildWorkQuarantineRoot.Path
+                    $script:GraphKitAuthQuarantine = $buildWorkQuarantine
+                    Write-Host "GraphKit.Auth independent build-workspace quarantine created at '$buildWorkQuarantine'."
+                }
+                catch {
+                    $cleanupFailures.Add(
+                        "independent build-workspace quarantine creation failed: $($_.Exception.Message)")
+                }
+            }
+            if ($null -ne $buildWork -and $null -ne $buildWorkQuarantine -and
+                -not $buildWorkQuarantined) {
+                try {
+                    $movedBuildWork = Move-GraphKitAuthBuildWorkToQuarantine `
+                        -BuildWork $buildWork -QuarantineRoot $buildWorkQuarantine
+                    $buildWorkQuarantined = $true
+                    Write-Host "GraphKit.Auth build workspace quarantined at '$($movedBuildWork.Path)'."
+                }
+                catch {
+                    $cleanupFailures.Add(
+                        "build-workspace quarantine failed: $($_.Exception.Message)")
+                }
+            }
+            if ($cleanupFailures.Count -ne 0) {
+                if ($null -eq $primaryFailure) {
+                    throw "GraphKit.Auth build cleanup failed: $($cleanupFailures -join ' | ')."
+                }
+                foreach ($cleanupFailure in $cleanupFailures) {
+                    Write-Warning `
+                        "GraphKit.Auth cleanup also failed; the earlier build failure remains authoritative. $cleanupFailure" `
+                        -WarningAction Continue
                 }
             }
         }

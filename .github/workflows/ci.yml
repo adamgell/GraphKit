@@ -112,7 +112,7 @@ jobs:
           if ($resultFiles.Count -gt 1) {
               throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
           }
-          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 1474 -AllowedSkips 0
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 1482 -AllowedSkips 0
           if ($LASTEXITCODE -ne 0) {
               throw 'The standalone whole-result gate failed.'
           }

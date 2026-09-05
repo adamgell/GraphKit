@@ -51,6 +51,7 @@ public static class GraphKitAuthStageCapture
 {
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
+    private const uint DeleteAccess = 0x00010000;
     private const uint ShareRead = 0x00000001;
     private const uint ShareWrite = 0x00000002;
     private const uint ShareDelete = 0x00000004;
@@ -61,6 +62,7 @@ public static class GraphKitAuthStageCapture
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileFlagWriteThrough = 0x80000000;
     private const uint FileAttributeReparsePoint = 0x00000400;
+    private const int FileDispositionInfoClass = 4;
 
     public static GraphKitAuthPathEvidence InspectFile(string rootPath, string relativePath)
         => Inspect(rootPath, relativePath, expectDirectory: false, hashContent: true);
@@ -243,6 +245,23 @@ public static class GraphKitAuthStageCapture
         string destinationRelativePath,
         bool requireInitialOwnerOnly = false,
         long maximumLength = long.MaxValue)
+        => CopyFileCreateNew(
+            sourceRoot,
+            sourceRelativePath,
+            destinationRoot,
+            destinationRelativePath,
+            requireInitialOwnerOnly,
+            maximumLength,
+            simulatePostCreateFailure: false);
+
+    public static GraphKitAuthCopyEvidence CopyFileCreateNew(
+        string sourceRoot,
+        string sourceRelativePath,
+        string destinationRoot,
+        string destinationRelativePath,
+        bool requireInitialOwnerOnly,
+        long maximumLength,
+        bool simulatePostCreateFailure)
     {
         string sourcePath = ResolveRelative(sourceRoot, sourceRelativePath);
         string destinationPath = ResolveRelative(destinationRoot, destinationRelativePath);
@@ -263,54 +282,141 @@ public static class GraphKitAuthStageCapture
         using FileStream destinationStream = OpenDestinationCreateNew(
             destinationPath, requireInitialOwnerOnly);
         SafeFileHandle destinationHandle = destinationStream.SafeFileHandle;
-        GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
-            destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
-        if (requireInitialOwnerOnly && !HasInitialOwnerOnlyAccess(destinationInitial))
+        try
         {
-            throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
-        }
-        SetOwnerOnly(destinationPath, directory: false, writable: true);
-        byte[] buffer = new byte[131072];
-        long offset = 0;
-        while (offset < sourceBefore.Length)
-        {
-            int requested = (int)Math.Min(buffer.Length, sourceBefore.Length - offset);
-            int read = RandomAccess.Read(sourceHandle, buffer.AsSpan(0, requested), offset);
-            if (read == 0)
+            if (simulatePostCreateFailure)
             {
-                throw new EndOfStreamException($"Source '{sourceRelativePath}' ended during capture.");
+                RandomAccess.Write(destinationHandle, new byte[] { 0xA5 }, 0);
+                RandomAccess.FlushToDisk(destinationHandle);
+                throw new IOException("Injected post-create copy failure after a partial write.");
             }
-            if (offset > maximumLength - read)
+            GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
+                destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
+            if (requireInitialOwnerOnly && !HasInitialOwnerOnlyAccess(destinationInitial))
             {
-                throw new IOException($"Source '{sourceRelativePath}' exceeded its bounded capture length.");
+                throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
             }
-            RandomAccess.Write(destinationHandle, buffer.AsSpan(0, read), offset);
-            offset += read;
-        }
-        RandomAccess.FlushToDisk(destinationHandle);
+            SetOwnerOnly(destinationHandle, destinationPath, directory: false, writable: true);
+            byte[] buffer = new byte[131072];
+            long offset = 0;
+            while (offset < sourceBefore.Length)
+            {
+                int requested = (int)Math.Min(buffer.Length, sourceBefore.Length - offset);
+                int read = RandomAccess.Read(sourceHandle, buffer.AsSpan(0, requested), offset);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException($"Source '{sourceRelativePath}' ended during capture.");
+                }
+                if (offset > maximumLength - read)
+                {
+                    throw new IOException($"Source '{sourceRelativePath}' exceeded its bounded capture length.");
+                }
+                RandomAccess.Write(destinationHandle, buffer.AsSpan(0, read), offset);
+                offset += read;
+            }
+            RandomAccess.FlushToDisk(destinationHandle);
 
-        NativeFacts sourceAfter = GetNativeFacts(sourceHandle, sourcePath);
-        if (!sourceBefore.SameObject(sourceAfter) || sourceBefore.Length != sourceAfter.Length)
+            NativeFacts sourceAfter = GetNativeFacts(sourceHandle, sourcePath);
+            if (!sourceBefore.SameObject(sourceAfter) || sourceBefore.Length != sourceAfter.Length)
+            {
+                throw new IOException($"Source '{sourceRelativePath}' changed while it was being captured.");
+            }
+
+            GraphKitAuthPathEvidence sourceEvidence = EvidenceFromHandle(
+                sourceHandle, sourcePath, sourceRelativePath, expectDirectory: false);
+            GraphKitAuthPathEvidence destinationEvidence = EvidenceFromHandle(
+                destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
+            if (!string.Equals(sourceEvidence.Sha256, destinationEvidence.Sha256, StringComparison.Ordinal) ||
+                sourceEvidence.Length != destinationEvidence.Length)
+            {
+                throw new IOException($"Captured destination '{destinationRelativePath}' does not match its source.");
+            }
+
+            return new GraphKitAuthCopyEvidence
+            {
+                Source = sourceEvidence,
+                DestinationInitial = destinationInitial,
+                Destination = destinationEvidence
+            };
+        }
+        catch (Exception primaryFailure)
         {
-            throw new IOException($"Source '{sourceRelativePath}' changed while it was being captured.");
+            HandleCreateNewFailure(
+                destinationHandle,
+                destinationRelativePath,
+                operation: "Copying",
+                primaryFailure: primaryFailure);
+            throw;
+        }
+    }
+
+    private static void HandleCreateNewFailure(
+        SafeFileHandle destinationHandle,
+        string destinationRelativePath,
+        string operation,
+        Exception primaryFailure)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                MarkExactWindowsHandleForDeletion(destinationHandle, destinationRelativePath);
+                return;
+            }
+
+            RandomAccess.SetLength(destinationHandle, 0);
+            RandomAccess.FlushToDisk(destinationHandle);
+        }
+        catch (Exception cleanupFailure)
+        {
+            throw new IOException(
+                $"{operation} '{destinationRelativePath}' failed and exact live-handle cleanup also failed; " +
+                $"no path deletion was attempted. Cleanup failure: {cleanupFailure.Message} " +
+                $"Original failure: {primaryFailure.Message}",
+                new AggregateException(primaryFailure, cleanupFailure));
         }
 
-        GraphKitAuthPathEvidence sourceEvidence = EvidenceFromHandle(
-            sourceHandle, sourcePath, sourceRelativePath, expectDirectory: false);
-        GraphKitAuthPathEvidence destinationEvidence = EvidenceFromHandle(
-            destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
-        if (!string.Equals(sourceEvidence.Sha256, destinationEvidence.Sha256, StringComparison.Ordinal) ||
-            sourceEvidence.Length != destinationEvidence.Length)
+        if (!OperatingSystem.IsWindows())
         {
-            throw new IOException($"Captured destination '{destinationRelativePath}' does not match its source.");
+            throw new IOException(
+                $"{operation} '{destinationRelativePath}' failed. Unix has no portable exact-handle " +
+                "path-deletion primitive, so GraphKit.Auth truncated and flushed only its exact " +
+                "create-new object and did not delete any path. Inspect and explicitly recover the " +
+                $"zero-byte collision. Original failure: {primaryFailure.Message}",
+                primaryFailure);
+        }
+    }
+
+    private static void MarkExactWindowsHandleForDeletion(
+        SafeFileHandle destinationHandle,
+        string destinationRelativePath)
+    {
+        if (!GetFileInformationByHandle(destinationHandle, out ByHandleFileInformation info))
+        {
+            throw new IOException(
+                $"Could not inspect the exact create-new destination '{destinationRelativePath}' " +
+                $"before handle-bound deletion (Win32 {Marshal.GetLastWin32Error()}).");
+        }
+        bool directory = (info.FileAttributes & 0x10) != 0;
+        bool reparse = (info.FileAttributes & FileAttributeReparsePoint) != 0;
+        if (directory || reparse || info.NumberOfLinks != 1)
+        {
+            throw new IOException(
+                $"The exact create-new destination '{destinationRelativePath}' changed type or link count; " +
+                "handle-bound deletion was refused.");
         }
 
-        return new GraphKitAuthCopyEvidence
+        FileDispositionInfo disposition = new() { DeleteFile = 1 };
+        if (!SetFileInformationByHandle(
+            destinationHandle,
+            FileDispositionInfoClass,
+            ref disposition,
+            (uint)Marshal.SizeOf<FileDispositionInfo>()))
         {
-            Source = sourceEvidence,
-            DestinationInitial = destinationInitial,
-            Destination = destinationEvidence
-        };
+            throw new IOException(
+                $"Could not mark the exact create-new destination '{destinationRelativePath}' for " +
+                $"handle-bound deletion (Win32 {Marshal.GetLastWin32Error()}).");
+        }
     }
 
     public static GraphKitAuthWriteEvidence WriteFileCreateNew(
@@ -318,6 +424,19 @@ public static class GraphKitAuthStageCapture
         string destinationRelativePath,
         byte[] content,
         bool requireInitialOwnerOnly = false)
+        => WriteFileCreateNew(
+            destinationRoot,
+            destinationRelativePath,
+            content,
+            requireInitialOwnerOnly,
+            simulatePostCreateFailure: false);
+
+    public static GraphKitAuthWriteEvidence WriteFileCreateNew(
+        string destinationRoot,
+        string destinationRelativePath,
+        byte[] content,
+        bool requireInitialOwnerOnly,
+        bool simulatePostCreateFailure)
     {
         ArgumentNullException.ThrowIfNull(content);
         string destinationPath = ResolveRelative(destinationRoot, destinationRelativePath);
@@ -326,28 +445,46 @@ public static class GraphKitAuthStageCapture
         using FileStream destinationStream = OpenDestinationCreateNew(
             destinationPath, requireInitialOwnerOnly);
         SafeFileHandle destinationHandle = destinationStream.SafeFileHandle;
-        GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
-            destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
-        if (requireInitialOwnerOnly && !HasInitialOwnerOnlyAccess(destinationInitial))
+        try
         {
-            throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
+            if (simulatePostCreateFailure)
+            {
+                RandomAccess.Write(destinationHandle, new byte[] { 0xA5 }, 0);
+                RandomAccess.FlushToDisk(destinationHandle);
+                throw new IOException("Injected post-create write failure after a partial write.");
+            }
+            GraphKitAuthPathEvidence destinationInitial = EvidenceFromHandle(
+                destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
+            if (requireInitialOwnerOnly && !HasInitialOwnerOnlyAccess(destinationInitial))
+            {
+                throw new IOException($"New destination '{destinationRelativePath}' did not begin with owner-only access.");
+            }
+            SetOwnerOnly(destinationHandle, destinationPath, directory: false, writable: true);
+            RandomAccess.Write(destinationHandle, content, 0);
+            RandomAccess.FlushToDisk(destinationHandle);
+            GraphKitAuthPathEvidence destination = EvidenceFromHandle(
+                destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
+            string expectedHash = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+            if (destination.Length != content.LongLength ||
+                !string.Equals(destination.Sha256, expectedHash, StringComparison.Ordinal))
+            {
+                throw new IOException($"Written destination '{destinationRelativePath}' does not match its supplied bytes.");
+            }
+            return new GraphKitAuthWriteEvidence
+            {
+                DestinationInitial = destinationInitial,
+                Destination = destination
+            };
         }
-        SetOwnerOnly(destinationPath, directory: false, writable: true);
-        RandomAccess.Write(destinationHandle, content, 0);
-        RandomAccess.FlushToDisk(destinationHandle);
-        GraphKitAuthPathEvidence destination = EvidenceFromHandle(
-            destinationHandle, destinationPath, destinationRelativePath, expectDirectory: false);
-        string expectedHash = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
-        if (destination.Length != content.LongLength ||
-            !string.Equals(destination.Sha256, expectedHash, StringComparison.Ordinal))
+        catch (Exception primaryFailure)
         {
-            throw new IOException($"Written destination '{destinationRelativePath}' does not match its supplied bytes.");
+            HandleCreateNewFailure(
+                destinationHandle,
+                destinationRelativePath,
+                operation: "Writing",
+                primaryFailure: primaryFailure);
+            throw;
         }
-        return new GraphKitAuthWriteEvidence
-        {
-            DestinationInitial = destinationInitial,
-            Destination = destination
-        };
     }
 
     public static void SetOwnerOnly(string absolutePath, bool directory, bool writable)
@@ -367,6 +504,31 @@ public static class GraphKitAuthStageCapture
                 ? UnixFileMode.UserRead | UnixFileMode.UserWrite
                 : UnixFileMode.UserRead);
         File.SetUnixFileMode(path, mode);
+    }
+
+    private static void SetOwnerOnly(
+        SafeFileHandle handle,
+        string absolutePath,
+        bool directory,
+        bool writable)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // The create handle omits FILE_SHARE_DELETE, so the path cannot be
+            // renamed or replaced while its ACL is applied.
+            SetOwnerOnlyWindows(absolutePath, directory, writable);
+            return;
+        }
+
+        uint mode = directory
+            ? (writable ? 0x1C0u : 0x140u) // 0700 / 0500
+            : (writable ? 0x180u : 0x100u); // 0600 / 0400
+        if (fchmod(handle.DangerousGetHandle().ToInt32(), mode) != 0)
+        {
+            throw new IOException(
+                $"Could not set exact-handle owner-only access on '{absolutePath}' " +
+                $"(errno {Marshal.GetLastWin32Error()}).");
+        }
     }
 
     public static void MoveDirectoryCreateNew(string sourcePath, string destinationPath)
@@ -667,61 +829,98 @@ public static class GraphKitAuthStageCapture
         string destinationPath,
         bool requireInitialOwnerOnly)
     {
-        if (OperatingSystem.IsWindows() && requireInitialOwnerOnly)
+        if (OperatingSystem.IsWindows())
         {
-            FileSecurity security = new();
-            SecurityIdentifier owner = WindowsIdentity.GetCurrent().User
-                ?? throw new IOException("The current Windows identity has no SID.");
-            security.SetOwner(owner);
-            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            security.AddAccessRule(new FileSystemAccessRule(
-                owner,
-                FileSystemRights.FullControl,
-                InheritanceFlags.None,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
-            GCHandle pinnedDescriptor = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
-            try
+            SafeFileHandle handle;
+            if (requireInitialOwnerOnly)
             {
-                SecurityAttributes attributes = new()
+                FileSecurity security = new();
+                SecurityIdentifier owner = WindowsIdentity.GetCurrent().User
+                    ?? throw new IOException("The current Windows identity has no SID.");
+                security.SetOwner(owner);
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    owner,
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.None,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+                GCHandle pinnedDescriptor = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+                try
                 {
-                    Length = Marshal.SizeOf<SecurityAttributes>(),
-                    SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject(),
-                    InheritHandle = 0
-                };
-                SafeFileHandle handle = CreateFileWithSecurityW(
+                    SecurityAttributes attributes = new()
+                    {
+                        Length = Marshal.SizeOf<SecurityAttributes>(),
+                        SecurityDescriptor = pinnedDescriptor.AddrOfPinnedObject(),
+                        InheritHandle = 0
+                    };
+                    handle = CreateFileWithSecurityW(
+                        destinationPath,
+                        GenericRead | GenericWrite | DeleteAccess,
+                        ShareRead,
+                        ref attributes,
+                        CreateNew,
+                        FileAttributeNormal | FileFlagWriteThrough,
+                        IntPtr.Zero);
+                }
+                finally
+                {
+                    pinnedDescriptor.Free();
+                }
+            }
+            else
+            {
+                handle = CreateFileW(
                     destinationPath,
-                    GenericRead | GenericWrite,
+                    GenericRead | GenericWrite | DeleteAccess,
                     ShareRead,
-                    ref attributes,
+                    IntPtr.Zero,
                     CreateNew,
                     FileAttributeNormal | FileFlagWriteThrough,
                     IntPtr.Zero);
-                if (handle.IsInvalid)
+            }
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                if (error == 80 || error == 183)
                 {
-                    int error = Marshal.GetLastWin32Error();
-                    handle.Dispose();
-                    if (error == 80 || error == 183)
-                    {
-                        throw new IOException("Atomic owner-only file destination collision.");
-                    }
                     throw new IOException(
-                        $"Could not atomically create owner-only destination file (Win32 {error}).");
+                        requireInitialOwnerOnly
+                            ? "Atomic owner-only file destination collision."
+                            : "Atomic file destination collision.");
                 }
+                throw new IOException(
+                    requireInitialOwnerOnly
+                        ? $"Could not atomically create owner-only destination file (Win32 {error})."
+                        : $"Could not atomically create destination file (Win32 {error}).");
+            }
+            try
+            {
+                return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false);
+            }
+            catch (Exception primaryFailure)
+            {
                 try
                 {
-                    return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false);
+                    MarkExactWindowsHandleForDeletion(
+                        handle,
+                        Path.GetFileName(destinationPath));
                 }
-                catch
+                catch (Exception cleanupFailure)
+                {
+                    throw new IOException(
+                        "Wrapping the exact Windows create-new handle failed and handle-bound " +
+                        $"cleanup also failed; no path deletion was attempted. Cleanup failure: " +
+                        $"{cleanupFailure.Message} Original failure: {primaryFailure.Message}",
+                        new AggregateException(primaryFailure, cleanupFailure));
+                }
+                finally
                 {
                     handle.Dispose();
-                    throw;
                 }
-            }
-            finally
-            {
-                pinnedDescriptor.Free();
+                throw;
             }
         }
 
@@ -732,10 +931,7 @@ public static class GraphKitAuthStageCapture
             Share = FileShare.Read,
             Options = FileOptions.WriteThrough
         };
-        if (!OperatingSystem.IsWindows())
-        {
-            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        }
+        options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         return new FileStream(destinationPath, options);
     }
 
@@ -1104,6 +1300,12 @@ public static class GraphKitAuthStageCapture
     [StructLayout(LayoutKind.Sequential)]
     private struct FileTime { public uint Low; public uint High; }
 
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct FileDispositionInfo
+    {
+        public byte DeleteFile;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct SecurityAttributes
     {
@@ -1142,6 +1344,13 @@ public static class GraphKitAuthStageCapture
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle file,
+        int fileInformationClass,
+        ref FileDispositionInfo fileInformation,
+        uint bufferSize);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path,
         uint pathLength, uint flags);
@@ -1151,6 +1360,9 @@ public static class GraphKitAuthStageCapture
 
     [DllImport("libc", SetLastError = true)]
     private static extern int open(string path, int flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fchmod(int descriptor, uint mode);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fstat(int descriptor, [Out] byte[] stat);

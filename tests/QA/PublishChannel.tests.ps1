@@ -33,7 +33,7 @@ BeforeAll {
     }
 
     function New-PassingResult {
-        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 1474)
+        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 1482)
         $path = Join-Path $Root "NUnitXml_GraphKit_v$Version.Test.xml"
         @"
 <?xml version="1.0" encoding="utf-8" standalone="no"?>

@@ -595,6 +595,13 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             function Initialize-GraphKitAuthBuildAuthorityRoot {
                 throw [InvalidOperationException]::new('injected primary build failure')
             }
+            function New-GraphKitAuthBuildWorkRoot {
+                [pscustomobject]@{ Path='fixture-work'; Name='.build-fixture'; Evidence='fixture-evidence' }
+            }
+            function Move-GraphKitAuthBuildWorkToQuarantine {}
+            function New-GraphKitAuthTaskQuarantineRoot {
+                [pscustomobject]@{ Path='fixture-work-quarantine' }
+            }
             function Invoke-GraphKitAuthLiteralQuarantine {
                 param([string] $RepositoryRoot)
                 $cleanupCalls.Add($RepositoryRoot)
@@ -1178,6 +1185,345 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
             Remove-Item -LiteralPath $fixtureOutput -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'creates one owner-only build workspace before routing mutable build output beneath it' {
+        Assert-GraphKitAuthStageCommands
+        $fixtureRoot = Join-Path $TestDrive ('build-workspace-owner-' + [guid]::NewGuid().ToString('N'))
+        $fixtureOutput = Join-Path $fixtureRoot 'output'
+        $null = New-Item -ItemType Directory -Path $fixtureOutput
+        try {
+            $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot $fixtureOutput
+            $runId = '1' * 48
+            $workspace = New-GraphKitAuthBuildWorkRoot -OutputRoot $fixtureOutput -RunId $runId
+            $authRoot = Join-Path $fixtureOutput 'GraphKit.Auth'
+            $captureRoot = Join-Path $authRoot 'capture'
+
+            $workspace.Name | Should -BeExactly ".build-$runId"
+            $workspace.Path | Should -BeExactly (Join-Path $captureRoot ".build-$runId")
+            $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess(
+                $workspace.Evidence) | Should -BeTrue
+            $current = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $captureRoot, $workspace.Name)
+            $current.NativeIdentity | Should -BeExactly $workspace.Evidence.NativeIdentity
+            $current.PhysicalPath | Should -BeExactly $workspace.Evidence.PhysicalPath
+
+            $taskSource = Get-Content -LiteralPath $script:taskPath -Raw
+            $buildTaskSource = [regex]::Match(
+                $taskSource,
+                '(?ms)^\s*task Build_GraphKitAuth \{.*?^\s*\}\r?\n\r?\n\s*task Copy_GraphKitAuth_Into_BuiltModule'
+            ).Value
+            $workspaceIndex = $buildTaskSource.IndexOf(
+                '$buildWork = New-GraphKitAuthBuildWorkRoot -OutputRoot')
+            $resultIndex = $buildTaskSource.IndexOf(
+                '$resultRoot = Join-Path $buildWork.Path ''dotnet-test''')
+            $publishIndex = $buildTaskSource.IndexOf(
+                '$publishRoot = Join-Path $buildWork.Path ''publish''')
+            $firstMutableIndex = $buildTaskSource.IndexOf(
+                '[IO.Directory]::CreateDirectory($resultRoot)')
+            $workspaceIndex | Should -BeGreaterOrEqual 0
+            $resultIndex | Should -BeGreaterThan $workspaceIndex
+            $publishIndex | Should -BeGreaterThan $workspaceIndex
+            $firstMutableIndex | Should -BeGreaterThan $workspaceIndex
+            $buildTaskSource | Should -Not -Match '\$authOutput\s+["''](?:publish|dotnet-test)/\$runId' `
+                -Because 'no mutable build artifact may be a top-level authority-root child'
+            $finallyIndex = $buildTaskSource.LastIndexOf('finally {')
+            $sourceQuarantineIndex = $buildTaskSource.IndexOf(
+                'Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $BuildRoot')
+            $versionIndex = $buildTaskSource.IndexOf(
+                "scripts/Get-GraphKitTrainVersion.ps1")
+            $stageIndex = $buildTaskSource.IndexOf('New-GraphKitAuthSealedStage -OutputRoot')
+            $workspaceQuarantineIndex = $buildTaskSource.IndexOf(
+                'Move-GraphKitAuthBuildWorkToQuarantine', $finallyIndex)
+            $sourceQuarantineIndex | Should -BeGreaterThan $workspaceIndex
+            $versionIndex | Should -BeGreaterThan $sourceQuarantineIndex
+            $stageIndex | Should -BeGreaterThan $versionIndex
+            $workspaceQuarantineIndex | Should -BeGreaterThan $finallyIndex
+
+            $normalQuarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+            $null = Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                -QuarantineRoot $normalQuarantine
+            $createdEvidence = [Collections.Generic.List[object]]::new()
+            $failedRunId = '4' * 48
+            {
+                New-GraphKitAuthBuildWorkRoot -OutputRoot $fixtureOutput -RunId $failedRunId `
+                    -AfterCreate {
+                        param($evidence)
+                        $createdEvidence.Add($evidence)
+                        throw 'injected workspace post-create validation failure'
+                    }
+            } | Should -Throw 'injected workspace post-create validation failure'
+            $createdEvidence.Count | Should -Be 1
+            @([IO.Directory]::EnumerateFileSystemEntries($captureRoot)).Count | Should -Be 0
+            $recovered = @(Get-ChildItem -LiteralPath $fixtureOutput -Directory -Force | Where-Object {
+                $_.Name -match '^GraphKit\.Auth\.quarantine-[0-9a-f]{32}$' -and
+                (Test-Path -LiteralPath (Join-Path $_.FullName ".build-$failedRunId") -PathType Container)
+            })
+            $recovered.Count | Should -Be 1
+            $recoveredEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $recovered[0].FullName, ".build-$failedRunId")
+            $recoveredEvidence.NativeIdentity | Should -BeExactly $createdEvidence[0].NativeIdentity
+        }
+        finally {
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureRoot
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'quarantines the exact completed workspace and restores a Prepare-authorized topology' {
+        Assert-GraphKitAuthStageCommands
+        $fixtureRoot = Join-Path $TestDrive ('build-workspace-complete-' + [guid]::NewGuid().ToString('N'))
+        $fixtureOutput = Join-Path $fixtureRoot 'output'
+        $null = New-Item -ItemType Directory -Path $fixtureOutput
+        try {
+            $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot $fixtureOutput
+            $workspace = New-GraphKitAuthBuildWorkRoot -OutputRoot $fixtureOutput -RunId ('2' * 48)
+            $publish = Join-Path $workspace.Path 'publish'
+            $results = Join-Path $workspace.Path 'dotnet-test'
+            $null = [IO.Directory]::CreateDirectory($publish)
+            $null = [IO.Directory]::CreateDirectory($results)
+            [IO.File]::WriteAllText((Join-Path $publish 'provider.bin'), 'provider payload')
+            [IO.File]::WriteAllText((Join-Path $results 'GraphKit.Auth.trx'), 'test result')
+            $publishHash = (Get-FileHash -LiteralPath (Join-Path $publish 'provider.bin') -Algorithm SHA256).Hash
+            $resultHash = (Get-FileHash -LiteralPath (Join-Path $results 'GraphKit.Auth.trx') -Algorithm SHA256).Hash
+            $stageVersion = '0.4.0-r8.fixture.build-workspace-complete'
+            $stage = New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput `
+                -FullVersion $stageVersion `
+                -PayloadSourceRoot (Join-Path $script:stagePath 'payload')
+
+            $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+            $moved = Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                -QuarantineRoot $quarantine
+
+            $moved.Evidence.NativeIdentity | Should -BeExactly $workspace.Evidence.NativeIdentity
+            $moved.Path | Should -BeExactly (Join-Path $quarantine $workspace.Name)
+            Test-Path -LiteralPath $workspace.Path | Should -BeFalse
+            (Get-FileHash -LiteralPath (Join-Path $moved.Path 'publish/provider.bin') -Algorithm SHA256).Hash |
+                Should -BeExactly $publishHash
+            (Get-FileHash -LiteralPath (Join-Path $moved.Path 'dotnet-test/GraphKit.Auth.trx') -Algorithm SHA256).Hash |
+                Should -BeExactly $resultHash
+            $captureRoot = Join-Path $fixtureOutput 'GraphKit.Auth/capture'
+            @([IO.Directory]::EnumerateFileSystemEntries($captureRoot)).Count | Should -Be 0
+            $prepared = @(Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput)
+            $prepared.Count | Should -Be 1
+            $prepared[0].StagePath | Should -BeExactly $stage.StagePath
+        }
+        finally {
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureRoot
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'fails closed before moving a workspace whose captured identity was replaced' {
+        Assert-GraphKitAuthStageCommands
+        $fixtureRoot = Join-Path $TestDrive ('build-workspace-tamper-' + [guid]::NewGuid().ToString('N'))
+        $fixtureOutput = Join-Path $fixtureRoot 'output'
+        $null = New-Item -ItemType Directory -Path $fixtureOutput
+        try {
+            $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot $fixtureOutput
+            $workspace = New-GraphKitAuthBuildWorkRoot -OutputRoot $fixtureOutput -RunId ('3' * 48)
+            [IO.File]::WriteAllText((Join-Path $workspace.Path 'original.bin'), 'captured workspace')
+            $captureRoot = Split-Path $workspace.Path -Parent
+            $preserved = Join-Path $captureRoot '.preserved-original'
+            $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                $fixtureRoot, 'foreign')
+            $foreignQuarantineName = 'GraphKit.Auth.quarantine-' + ('5' * 32)
+            $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                (Join-Path $fixtureRoot 'foreign'), $foreignQuarantineName)
+            $foreignQuarantine = Join-Path (Join-Path $fixtureRoot 'foreign') $foreignQuarantineName
+            {
+                Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                    -QuarantineRoot $foreignQuarantine
+            } | Should -Throw '*not beneath the exact captured output root*'
+            Test-Path -LiteralPath $workspace.Path -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $foreignQuarantine $workspace.Name) | Should -BeFalse
+
+            $replacedQuarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+            $replacedQuarantineName = [IO.Path]::GetFileName($replacedQuarantine)
+            $preservedQuarantine = Join-Path $fixtureOutput '.preserved-quarantine'
+            $replacedQuarantineEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $fixtureOutput, $replacedQuarantineName)
+            {
+                Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                    -QuarantineRoot $replacedQuarantine -BeforeMove {
+                        [IO.Directory]::Move($replacedQuarantine, $preservedQuarantine)
+                        $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                            $fixtureOutput, $replacedQuarantineName)
+                    }
+            } | Should -Throw '*quarantine changed identity before the move*ambiguous cleanup was refused*'
+            $preservedQuarantineEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $fixtureOutput, '.preserved-quarantine')
+            $preservedQuarantineEvidence.NativeIdentity |
+                Should -BeExactly $replacedQuarantineEvidence.NativeIdentity
+            Test-Path -LiteralPath $workspace.Path -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $replacedQuarantine $workspace.Name) | Should -BeFalse
+
+            $collisionQuarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+            $collisionDestination = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                $collisionQuarantine, $workspace.Name)
+            [IO.File]::WriteAllText(
+                (Join-Path $collisionQuarantine "$($workspace.Name)/caller.bin"), 'caller destination')
+            $sourceBeforeCollision = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $captureRoot, $workspace.Name)
+            {
+                Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                    -QuarantineRoot $collisionQuarantine
+            } | Should -Throw '*destination*already exists*no move was attempted*'
+            $sourceAfterCollision = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $captureRoot, $workspace.Name)
+            $destinationAfterCollision = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $collisionQuarantine, $workspace.Name)
+            $sourceAfterCollision.NativeIdentity | Should -BeExactly $sourceBeforeCollision.NativeIdentity
+            $destinationAfterCollision.NativeIdentity | Should -BeExactly $collisionDestination.NativeIdentity
+            (Get-Content -LiteralPath (
+                Join-Path $collisionQuarantine "$($workspace.Name)/caller.bin") -Raw) |
+                Should -BeExactly 'caller destination'
+
+            $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+
+            {
+                Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $workspace `
+                    -QuarantineRoot $quarantine -BeforeMove {
+                        [IO.Directory]::Move($workspace.Path, $preserved)
+                        $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                            $captureRoot, $workspace.Name)
+                        [IO.File]::WriteAllText(
+                            (Join-Path $workspace.Path 'replacement.bin'), 'caller replacement')
+                    }
+            } | Should -Throw '*changed identity*ambiguous cleanup was refused*'
+
+            $preservedEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $captureRoot, '.preserved-original')
+            $preservedEvidence.NativeIdentity | Should -BeExactly $workspace.Evidence.NativeIdentity
+            Test-Path -LiteralPath (Join-Path $workspace.Path 'replacement.bin') -PathType Leaf |
+                Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $quarantine $workspace.Name) | Should -BeFalse
+
+            $ancestorFixtureRoot = Join-Path $fixtureRoot 'ancestor-case'
+            $ancestorOutput = Join-Path $ancestorFixtureRoot 'output'
+            $null = [IO.Directory]::CreateDirectory($ancestorOutput)
+            $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot $ancestorOutput
+            $ancestorWork = New-GraphKitAuthBuildWorkRoot `
+                -OutputRoot $ancestorOutput -RunId ('6' * 48)
+            $ancestorCapture = Split-Path $ancestorWork.Path -Parent
+            $ancestorQuarantine = Invoke-GraphKitAuthLiteralQuarantine `
+                -RepositoryRoot $ancestorFixtureRoot
+            $ancestorQuarantineName = [IO.Path]::GetFileName($ancestorQuarantine)
+            $ancestorCaptureEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath(
+                $ancestorCapture)
+            $ancestorQuarantineEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $ancestorOutput, $ancestorQuarantineName)
+            $preservedAncestorOutput = Join-Path $ancestorFixtureRoot 'preserved-output'
+            {
+                Move-GraphKitAuthBuildWorkToQuarantine -BuildWork $ancestorWork `
+                    -QuarantineRoot $ancestorQuarantine -BeforeMove {
+                        [IO.Directory]::Move($ancestorOutput, $preservedAncestorOutput)
+                        $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                            $ancestorFixtureRoot, 'output')
+                        $replacementAuth = Join-Path $ancestorOutput 'GraphKit.Auth'
+                        $null = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
+                            $ancestorOutput, 'GraphKit.Auth')
+                        [IO.Directory]::Move(
+                            (Join-Path $preservedAncestorOutput 'GraphKit.Auth/capture'),
+                            (Join-Path $replacementAuth 'capture'))
+                        [IO.Directory]::Move(
+                            (Join-Path $preservedAncestorOutput $ancestorQuarantineName),
+                            (Join-Path $ancestorOutput $ancestorQuarantineName))
+                    }
+            } | Should -Throw '*output parent changed identity before the move*ambiguous cleanup was refused*'
+            $ancestorCaptureAfter = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                (Join-Path $ancestorOutput 'GraphKit.Auth'), 'capture')
+            $ancestorQuarantineAfter = $script:GraphKitAuthStageCaptureType::InspectDirectory(
+                $ancestorOutput, $ancestorQuarantineName)
+            $ancestorCaptureAfter.NativeIdentity |
+                Should -BeExactly $ancestorCaptureEvidence.NativeIdentity
+            $ancestorQuarantineAfter.NativeIdentity |
+                Should -BeExactly $ancestorQuarantineEvidence.NativeIdentity
+            Test-Path -LiteralPath $ancestorWork.Path -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $ancestorQuarantine $ancestorWork.Name) |
+                Should -BeFalse
+        }
+        finally {
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureRoot
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'quarantines one partial workspace in finally without replacing the primary build failure' {
+        $observed = & {
+            $tasks = @{}
+            function Register-GraphKitAuthTaskCapture {
+                param([string] $Name, [scriptblock] $Action)
+                $tasks[$Name] = $Action
+            }
+            Set-Alias -Name task -Value Register-GraphKitAuthTaskCapture -Scope Local
+            . $script:taskPath
+
+            $sourceQuarantines = [Collections.Generic.List[string]]::new()
+            $workspaceQuarantines = [Collections.Generic.List[object]]::new()
+            function Initialize-GraphKitAuthStageCapture {}
+            function Initialize-GraphKitAuthBuildAuthorityRoot {}
+            function New-GraphKitAuthBuildWorkRoot {
+                [pscustomobject]@{ Path='fixture-work'; Name='.build-fixture'; Evidence='fixture-evidence' }
+            }
+            function Invoke-GraphKitAuthLiteralQuarantine {
+                param([string] $RepositoryRoot)
+                $sourceQuarantines.Add($RepositoryRoot)
+                throw 'injected source quarantine failure'
+            }
+            function New-GraphKitAuthTaskQuarantineRoot {
+                param([string] $OutputRoot)
+                [pscustomobject]@{ Path='fixture-work-quarantine' }
+            }
+            function Move-GraphKitAuthBuildWorkToQuarantine {
+                param($BuildWork, [string] $QuarantineRoot)
+                $workspaceQuarantines.Add([pscustomobject]@{
+                    BuildWork = $BuildWork
+                    QuarantineRoot = $QuarantineRoot
+                })
+                [pscustomobject]@{ Path=(Join-Path $QuarantineRoot $BuildWork.Name) }
+            }
+            function dotnet {
+                param([Parameter(ValueFromRemainingArguments)][object[]] $Arguments)
+                if (($Arguments -join ' ') -ceq '--version') {
+                    $global:LASTEXITCODE = 0
+                    '10.0.400'
+                    return
+                }
+                $global:LASTEXITCODE = 1
+            }
+
+            $BuildRoot = Join-Path $TestDrive ('build-workspace-primary-' + [guid]::NewGuid().ToString('N'))
+            $failure = $null
+            $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+            $savedWarningPreference = $WarningPreference
+            try {
+                $WarningPreference = 'Stop'
+                try { & $tasks['Build_GraphKitAuth'] }
+                catch { $failure = $_ }
+            }
+            finally {
+                $WarningPreference = $savedWarningPreference
+                if ($null -eq $lastExitCodeVariable) {
+                    Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+                }
+                else {
+                    $global:LASTEXITCODE = $lastExitCodeVariable.Value
+                }
+            }
+            [pscustomobject]@{
+                Failure = $failure
+                SourceQuarantines = @($sourceQuarantines)
+                WorkspaceQuarantines = @($workspaceQuarantines)
+            }
+        }
+
+        $observed.Failure.Exception.Message | Should -BeExactly 'GraphKit.Auth locked restore failed.'
+        $observed.SourceQuarantines.Count | Should -Be 1
+        $observed.WorkspaceQuarantines.Count | Should -Be 1
+        $observed.WorkspaceQuarantines[0].BuildWork.Path | Should -BeExactly 'fixture-work'
+        $observed.WorkspaceQuarantines[0].QuarantineRoot |
+            Should -BeExactly 'fixture-work-quarantine'
     }
 
     It 'leaves an exact Prepare-authorized topology after failure immediately following build authority initialization' {
@@ -1778,6 +2124,58 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $createdPathIndex | Should -BeGreaterThan $copyIndex
         $evidenceIndex | Should -BeGreaterThan $createdPathIndex
         $validationIndex | Should -BeGreaterThan $evidenceIndex
+    }
+
+    It 'uses the platform-safe <Operation> failure policy before evidence with owner-only=<OwnerOnly>' -ForEach @(
+        @{ Operation = 'copy'; OwnerOnly = $false }
+        @{ Operation = 'copy'; OwnerOnly = $true }
+        @{ Operation = 'write'; OwnerOnly = $false }
+        @{ Operation = 'write'; OwnerOnly = $true }
+    ) {
+        Initialize-GraphKitAuthStageCapture
+        $root = Join-Path $TestDrive (
+            "$Operation-post-create-failure-$OwnerOnly-" + [guid]::NewGuid().ToString('N'))
+        $source = Join-Path $root 'source'
+        $destination = Join-Path $root 'destination'
+        $null = New-Item -ItemType Directory -Path $source, $destination -Force
+        [IO.File]::WriteAllBytes((Join-Path $source 'candidate.dll'), [byte[]](1..32))
+        $captured = Join-Path $destination 'candidate.dll'
+        $sourceHash = (Get-FileHash -LiteralPath (Join-Path $source 'candidate.dll') `
+            -Algorithm SHA256).Hash
+        $parentBefore = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($destination)
+
+        $failure = $null
+        try {
+            if ($Operation -ceq 'copy') {
+                $null = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
+                    $source, 'candidate.dll', $destination, 'candidate.dll',
+                    $OwnerOnly, [long]::MaxValue, $true)
+            }
+            else {
+                $null = $script:GraphKitAuthStageCaptureType::WriteFileCreateNew(
+                    $destination, 'candidate.dll', [byte[]](33..64),
+                    $OwnerOnly, $true)
+            }
+        }
+        catch { $failure = $_.Exception.Message }
+
+        $failure | Should -Match "Injected post-create $Operation failure"
+        $parentAfter = $script:GraphKitAuthStageCaptureType::InspectDirectoryPath($destination)
+        $parentAfter.NativeIdentity | Should -BeExactly $parentBefore.NativeIdentity
+        $parentAfter.PhysicalPath | Should -BeExactly $parentBefore.PhysicalPath
+        (Get-FileHash -LiteralPath (Join-Path $source 'candidate.dll') -Algorithm SHA256).Hash |
+            Should -BeExactly $sourceHash
+        if ($IsWindows) {
+            Test-Path -LiteralPath $captured | Should -BeFalse
+            $failure | Should -Not -Match 'no path deletion|zero-byte collision|explicitly recover'
+        }
+        else {
+            Test-Path -LiteralPath $captured -PathType Leaf | Should -BeTrue
+            (Get-Item -LiteralPath $captured).Length | Should -Be 0
+            $failure | Should -Match 'Unix has no portable exact-handle path-deletion primitive'
+            $failure | Should -Match 'did not delete any path'
+            $failure | Should -Match 'explicitly recover the zero-byte collision'
+        }
     }
 
     It 'deletes only a recorded projection and preserves an unrecorded partial materialization' {

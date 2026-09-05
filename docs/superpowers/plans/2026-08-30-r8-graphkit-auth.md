@@ -378,7 +378,8 @@ to re-grant permissions. The path-based loader is not an adversarial atomic byte
 Keep mutable compiler output and authorized stage bytes separate:
 
 ```text
-output/GraphKit.Auth/publish/<unique-untrusted-run-id>/
+output/GraphKit.Auth/capture/.build-<unique-secure-run-id>/publish/{provider/,payload/}
+output/GraphKit.Auth/capture/.build-<unique-secure-run-id>/dotnet-test/
 output/GraphKit.Auth/capture/<unique-secure-run-id>/{manifest.json,payload/}
 output/GraphKit.Auth/stage/<full-module-version>/<manifest-sha256>/{manifest.json,payload/}
 ```
@@ -387,7 +388,9 @@ output/GraphKit.Auth/stage/<full-module-version>/<manifest-sha256>/{manifest.jso
 closed if it exists; it is never reused, merged, or overwritten. Bind Task 5 to one Release lineage:
 locked restore, build without restore, machine-readable xUnit with no build or restore and no
 skipped/unexecuted outcome, then provider publish without build or restore. Contracts, tested
-provider, and published provider must come from that one build.
+provider, and published provider must come from that one build. The build workspace is one exact
+owner-only child created before either mutable output root; no top-level `publish` or `dotnet-test`
+child is permitted beneath the GraphKit.Auth authority root.
 
 The focused private C# helper is authorized only for relative no-follow opens, physical
 containment, native identity and link count, stable-handle hashing, and platform permission
@@ -457,10 +460,16 @@ may unseal only exact physically contained envelopes whose canonical manifest, d
 identities, permissions, and closure pass. Missing or forged manifests, partial sealing, links,
 aliases, and containment ambiguity fail closed before `Clean`.
 
-Machine-readable .NET results live only below a unique
-`output/GraphKit.Auth/dotnet-test/<run-id>/`. After capture and before the build task returns, move
-only these literal generated roots intact into a recoverable task-specific temporary quarantine,
-including on failure:
+Machine-readable .NET results and provider-publish scratch live only below one unique owner-only
+`output/GraphKit.Auth/capture/.build-<run-id>/` workspace. Once the sealed stage no longer depends
+on its payload source, an outer `finally` atomically moves that exact captured workspace, with
+no-replace semantics, into a task-specific `output/GraphKit.Auth.quarantine-<id>/` sibling. This
+workspace move is independent of the source-build quarantine and runs on both success and failure,
+so a completed build restores an empty `capture` root before returning. A hard process death can
+leave the workspace in `capture`; the next Prepare must fail closed rather than delete it.
+
+Separately, after capture and before module version is recalculated, move only these literal source
+generated roots intact into the same recoverable task-specific quarantine, including on failure:
 
 ```text
 src/GraphKit.Auth/GraphKit.Auth.Contracts/bin
