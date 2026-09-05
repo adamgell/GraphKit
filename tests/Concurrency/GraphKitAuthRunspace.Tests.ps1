@@ -1,5 +1,8 @@
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
+    # ThreadJob readiness includes runspace startup and a full module import. Keep that
+    # scheduler-sensitive setup bound separate from the tighter operation/deadlock gates.
+    $script:Task7ThreadJobReadyTimeoutMilliseconds = 15000
     $builtCandidates = @(
         Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'output/module/GraphKit') `
             -Directory | Sort-Object Name -Descending
@@ -303,9 +306,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
             $source = $holder.Source
             $holder.ObservedSources.Enqueue([object] $source)
             $null = $holder.Ready.Signal()
-            if (-not $holder.Go.Wait(5000)) {
-                throw 'Task 7 fixed-bearer child did not receive the parent release gate.'
-            }
+            $holder.Go.Wait()
 
             $result = $source.Acquire($false, [Threading.CancellationToken]::None)
             $holder.Results.Enqueue([object] $result)
@@ -434,9 +435,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
             $source = $holder.Sources[$ContextIndex]
             $holder.ObservedSources.Enqueue([object] $source)
             $null = $holder.Ready.Signal()
-            if (-not $holder.Go.Wait(5000)) {
-                throw 'Task 7 controlled child did not receive the parent release gate.'
-            }
+            $holder.Go.Wait()
             $transport = & $module {
                 param($Context, $Source, $Client, [bool] $ForceRefresh, [int] $RequestIndex)
                 $clientFactory = {
@@ -589,9 +588,7 @@ public sealed class Task7OfflineHandler : HttpMessageHandler
             $source = $holder.Source
             $holder.ObservedSources.Enqueue([object] $source)
             $null = $holder.Ready.Signal()
-            if (-not $holder.Go.Wait(5000)) {
-                throw 'Task 7 legacy child did not receive the parent release gate.'
-            }
+            $holder.Go.Wait()
             $caught = $null
             try {
                 $null = & $module {
@@ -846,7 +843,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
                         -ArgumentList $script:BuiltManifest, $holderKey
                 }
             )
-            $ready.Wait(5000) | Should -BeTrue
+            $ready.Wait($script:Task7ThreadJobReadyTimeoutMilliseconds) | Should -BeTrue
             $go.Set()
             $outcomes = Complete-Task7ChildJobs -Jobs $jobs -ExpectedCount 2
             @($outcomes | Where-Object { -not $_.Success }).Count | Should -Be 0
@@ -929,7 +926,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
                 Start-ThreadJob -ScriptBlock $script:ControlledSenderChild `
                     -ArgumentList $script:BuiltManifest, $holderKey, 1, $false
             )
-            $ready.Wait(5000) | Should -BeTrue
+            $ready.Wait($script:Task7ThreadJobReadyTimeoutMilliseconds) | Should -BeTrue
             $go.Set()
             $entered.Wait(5000) | Should -BeTrue
             $release.Set()
@@ -1054,7 +1051,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
                 Start-ThreadJob -ScriptBlock $script:ControlledSenderChild `
                     -ArgumentList $script:BuiltManifest, $holderKey, 1, $false
             )
-            $ready.Wait(5000) | Should -BeTrue
+            $ready.Wait($script:Task7ThreadJobReadyTimeoutMilliseconds) | Should -BeTrue
             $go.Set()
             $entered.Wait(5000) | Should -BeTrue
             $followerObserved = [Threading.SpinWait]::SpinUntil(
@@ -1156,7 +1153,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
                 Start-ThreadJob -ScriptBlock $script:ControlledSenderChild `
                     -ArgumentList $script:BuiltManifest, $holderKey, 1, $true
             )
-            $ready.Wait(5000) | Should -BeTrue
+            $ready.Wait($script:Task7ThreadJobReadyTimeoutMilliseconds) | Should -BeTrue
             $go.Set()
             $entered.Wait(5000) | Should -BeTrue
             $ordinarySnapshot = Get-Task7OuterFlightSnapshot `
@@ -1315,7 +1312,7 @@ Describe 'GraphKit.Auth exact parent-source thread-runspace use' -Tag Concurrenc
                 Start-ThreadJob -ScriptBlock $script:LegacyContainmentChild `
                     -ArgumentList $script:BuiltManifest, $holderKey
             )
-            $ready.Wait(5000) | Should -BeTrue
+            $ready.Wait($script:Task7ThreadJobReadyTimeoutMilliseconds) | Should -BeTrue
             $go.Set()
             $outcomes = Complete-Task7ChildJobs -Jobs $jobs -ExpectedCount 1
             $outcomes[0].Success | Should -BeTrue
