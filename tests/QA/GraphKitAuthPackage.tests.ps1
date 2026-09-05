@@ -992,7 +992,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
     }
 
-    It 'removes identity-bound owned state after injected <FailureKind> creation failure' -ForEach @(
+    It 'leaves only recoverable authority state after injected <FailureKind> creation failure' -ForEach @(
+        @{ FailureKind = 'auth root' }
         @{ FailureKind = 'capture root' }
         @{ FailureKind = 'stage root' }
         @{ FailureKind = 'capture payload' }
@@ -1017,16 +1018,25 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
         $failure | Should -Match ([regex]::Escape("injected $FailureKind creation failure"))
         $failure | Should -Not -Match 'ambiguous cleanup|Original failure'
-        if ($FailureKind -in @('capture root', 'stage root')) {
-            Test-Path -LiteralPath (Join-Path $fixtureOutput 'GraphKit.Auth') |
-                Should -BeFalse
-        }
+        $authRoot = Join-Path $fixtureOutput 'GraphKit.Auth'
+        Test-Path -LiteralPath $authRoot -PathType Container | Should -BeTrue
+        { Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput } |
+            Should -Not -Throw
         foreach ($rootName in @('capture','stage')) {
-            $root = Join-Path $fixtureOutput "GraphKit.Auth/$rootName"
+            $root = Join-Path $authRoot $rootName
             if (Test-Path -LiteralPath $root -PathType Container) {
                 @([IO.Directory]::EnumerateFileSystemEntries($root)).Count | Should -Be 0
             }
         }
+
+        $recoveryVersion = '0.4.0-r8.fixture.recovery-' + $FailureKind.Replace(' ', '-')
+        {
+            $null = New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput `
+                -FullVersion $recoveryVersion `
+                -PayloadSourceRoot (Join-Path $script:stagePath 'payload')
+        } | Should -Not -Throw
+        { Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput } |
+            Should -Not -Throw
     }
 
     It 'creates <DirectoryKind> with exact owner-only initial directory access' -ForEach @(
@@ -1196,6 +1206,38 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             @([IO.Directory]::EnumerateFileSystemEntries($captureRoot)).Count | Should -Be 0
             { Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput } | Should -Not -Throw
             @(Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput).Count | Should -Be 0
+        }
+        finally {
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
+            Remove-Item -LiteralPath $fixtureOutput -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'preserves a recoverable build authority root when capture initialization fails' {
+        Assert-GraphKitAuthStageCommands
+        $fixtureOutput = Join-Path $TestDrive ('build-authority-capture-failure-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $fixtureOutput
+        $failure = $null
+        try {
+            try {
+                $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot $fixtureOutput `
+                    -AfterChildInspection {
+                        param($kind)
+                        if ($kind -ceq 'build capture root') {
+                            throw 'injected build capture root failure'
+                        }
+                    }
+            }
+            catch { $failure = $_.Exception.Message }
+
+            $failure | Should -BeExactly 'injected build capture root failure'
+            $authRoot = Join-Path $fixtureOutput 'GraphKit.Auth'
+            Test-Path -LiteralPath $authRoot -PathType Container | Should -BeTrue
+            $captureRoot = Join-Path $authRoot 'capture'
+            Test-Path -LiteralPath $captureRoot -PathType Container | Should -BeTrue
+            @([IO.Directory]::EnumerateFileSystemEntries($captureRoot)).Count | Should -Be 0
+            { Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput } |
+                Should -Not -Throw
         }
         finally {
             Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
@@ -1714,28 +1756,28 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         Test-Path -LiteralPath $bin | Should -BeFalse
     }
 
-    It 'removes a copied ABI projection when validation fails immediately after creation' {
-        Assert-GraphKitAuthStageCommands
-        $failure = $null
-        try {
-            $null = New-GraphKitAuthAbiTestFixture -RepositoryRoot $script:repoRoot `
-                -OutputRoot (Join-Path $script:repoRoot 'output') `
-                -AfterFixtureCopy {
-                    param($relativeFile)
-                    throw "injected post-copy validation failure for $relativeFile"
-                }
-        }
-        catch { $failure = $_.Exception.Message }
+    It 'records a copied ABI projection before any subsequent validation' {
+        $task = Get-Content -LiteralPath $script:taskPath -Raw
+        $fixtureSource = [regex]::Match(
+            $task,
+            '(?ms)^function New-GraphKitAuthAbiTestFixture \{.*?^\}'
+        ).Value
+        $copyIndex = $fixtureSource.IndexOf(
+            '$copy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(')
+        $createdPathIndex = $fixtureSource.IndexOf(
+            '$script:GraphKitAuthAbiFixtureState.CreatedPaths.Add($destinationFile)',
+            $copyIndex)
+        $evidenceIndex = $fixtureSource.IndexOf(
+            '$script:GraphKitAuthAbiFixtureState.ExpectedEvidence[$destinationFile] = $copy.Destination',
+            $createdPathIndex)
+        $validationIndex = $fixtureSource.IndexOf(
+            '$manifestRecord = @($verified.Manifest.files',
+            $evidenceIndex)
 
-        $failure | Should -Match 'injected post-copy validation failure'
-        foreach ($binRoot in @(
-            'src/GraphKit.Auth/GraphKit.Auth.Contracts/bin'
-            'src/GraphKit.Auth/GraphKit.Auth/bin'
-            'src/GraphKit.Auth/GraphKit.Auth.Tests/bin'
-        )) {
-            Test-Path -LiteralPath (Join-Path $script:repoRoot $binRoot) |
-                Should -BeFalse
-        }
+        $copyIndex | Should -BeGreaterOrEqual 0
+        $createdPathIndex | Should -BeGreaterThan $copyIndex
+        $evidenceIndex | Should -BeGreaterThan $createdPathIndex
+        $validationIndex | Should -BeGreaterThan $evidenceIndex
     }
 
     It 'deletes only a recorded projection and preserves an unrecorded partial materialization' {

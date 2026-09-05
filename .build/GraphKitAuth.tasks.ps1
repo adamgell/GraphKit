@@ -156,9 +156,8 @@ function Initialize-GraphKitAuthOwnerDirectory {
         [Parameter(Mandatory)][string] $ChildName,
         [Parameter(Mandatory)][string] $Kind,
         [scriptblock] $AfterChildInspection,
-        [ref] $CreatedByCall
+        [switch] $PreserveCreatedOnFailure
     )
-    if ($null -ne $CreatedByCall) { $CreatedByCall.Value = $false }
     Initialize-GraphKitAuthStageCapture
     Assert-GraphKitAuthSafeSegment -Value $ChildName -Kind $Kind
     $parent = [IO.Path]::GetFullPath($ParentPath)
@@ -226,12 +225,11 @@ function Initialize-GraphKitAuthOwnerDirectory {
             -not $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess($after)) {
             throw "The GraphKit.Auth $Kind path changed while owner-only access was applied."
         }
-        if ($null -ne $CreatedByCall) { $CreatedByCall.Value = $created }
         return $after
     }
     catch {
         $primary = $_
-        if ($created -and $null -ne $before) {
+        if ($created -and $null -ne $before -and -not $PreserveCreatedOnFailure) {
             try {
                 Remove-GraphKitAuthVerifiedEmptyDirectory -ParentPath $parent `
                     -ParentEvidence $reopenedParent -ChildName $ChildName `
@@ -260,33 +258,16 @@ function Initialize-GraphKitAuthBuildAuthorityRoot {
     $outputName = [IO.Path]::GetFileName($output)
     $outputEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory(
         $outputParent, $outputName)
-    $authEntryBefore = Get-GraphKitAuthPortableChildEntry -ParentPath $output `
-        -ChildName 'GraphKit.Auth' -Kind 'build auth root'
-    $authCreated = -not $authEntryBefore.Exists
     $authEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $output `
         -ParentEvidence $outputEvidence -ChildName 'GraphKit.Auth' `
-        -Kind 'build auth root' -AfterChildInspection $AfterChildInspection
+        -Kind 'build auth root' -AfterChildInspection $AfterChildInspection `
+        -PreserveCreatedOnFailure
     $authRoot = Join-Path $output 'GraphKit.Auth'
-    try {
-        $null = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
-            -ParentEvidence $authEvidence -ChildName 'capture' `
-            -Kind 'build capture root' -AfterChildInspection $AfterChildInspection
-        return $authEvidence
-    }
-    catch {
-        $primary = $_
-        if ($authCreated) {
-            try {
-                Remove-GraphKitAuthVerifiedEmptyDirectory -ParentPath $output `
-                    -ParentEvidence $outputEvidence -ChildName 'GraphKit.Auth' `
-                    -ChildEvidence $authEvidence -Kind 'incomplete build authority root cleanup'
-            }
-            catch {
-                throw "GraphKit.Auth build authority initialization failed and ambiguous cleanup was refused: $($_.Exception.Message) Original failure: $($primary.Exception.Message)"
-            }
-        }
-        throw $primary
-    }
+    $null = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
+        -ParentEvidence $authEvidence -ChildName 'capture' `
+        -Kind 'build capture root' -AfterChildInspection $AfterChildInspection `
+        -PreserveCreatedOnFailure
+    return $authEvidence
 }
 
 function Remove-GraphKitAuthVerifiedInstallCandidate {
@@ -709,63 +690,16 @@ function New-GraphKitAuthSealedStage {
     $captureRoot = Join-Path $authRoot 'capture'
     $stageRoot = Join-Path $authRoot 'stage'
     $versionRoot = Join-Path $stageRoot $FullVersion
-    $authEvidence = $null
-    $captureRootEvidence = $null
-    $stageRootEvidence = $null
-    $authRootCreated = $false
-    $captureRootCreated = $false
-    $stageRootCreated = $false
-    try {
-        $authEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authParent `
-            -ParentEvidence $authParentEvidence -ChildName ([IO.Path]::GetFileName($authRoot)) `
-            -Kind 'auth root' -AfterChildInspection $AfterOwnedDirectoryCreate `
-            -CreatedByCall ([ref]$authRootCreated)
-        $captureRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
-            -ParentEvidence $authEvidence -ChildName 'capture' -Kind 'capture root' `
-            -AfterChildInspection $AfterOwnedDirectoryCreate `
-            -CreatedByCall ([ref]$captureRootCreated)
-        $stageRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
-            -ParentEvidence $authEvidence -ChildName 'stage' -Kind 'stage root' `
-            -AfterChildInspection $AfterOwnedDirectoryCreate `
-            -CreatedByCall ([ref]$stageRootCreated)
-    }
-    catch {
-        $primary = $_
-        $cleanupFailures = [Collections.Generic.List[string]]::new()
-        foreach ($ownedRoot in @(
-            [pscustomobject]@{
-                Created = $stageRootCreated; ParentPath = $authRoot
-                ParentEvidence = $authEvidence; ChildName = 'stage'
-                ChildEvidence = $stageRootEvidence; Kind = 'stage root initialization cleanup'
-            }
-            [pscustomobject]@{
-                Created = $captureRootCreated; ParentPath = $authRoot
-                ParentEvidence = $authEvidence; ChildName = 'capture'
-                ChildEvidence = $captureRootEvidence; Kind = 'capture root initialization cleanup'
-            }
-            [pscustomobject]@{
-                Created = $authRootCreated; ParentPath = $authParent
-                ParentEvidence = $authParentEvidence
-                ChildName = [IO.Path]::GetFileName($authRoot)
-                ChildEvidence = $authEvidence; Kind = 'auth root initialization cleanup'
-            }
-        )) {
-            if (-not $ownedRoot.Created -or $null -eq $ownedRoot.ChildEvidence) { continue }
-            try {
-                Remove-GraphKitAuthVerifiedEmptyDirectory `
-                    -ParentPath $ownedRoot.ParentPath `
-                    -ParentEvidence $ownedRoot.ParentEvidence `
-                    -ChildName $ownedRoot.ChildName `
-                    -ChildEvidence $ownedRoot.ChildEvidence `
-                    -Kind $ownedRoot.Kind
-            }
-            catch { $cleanupFailures.Add($_.Exception.Message) }
-        }
-        if ($cleanupFailures.Count -ne 0) {
-            throw "GraphKit.Auth authority initialization failed and ambiguous cleanup was refused: $($cleanupFailures -join ' | ') Original failure: $($primary.Exception.Message)"
-        }
-        throw $primary
-    }
+    $authEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authParent `
+        -ParentEvidence $authParentEvidence -ChildName ([IO.Path]::GetFileName($authRoot)) `
+        -Kind 'auth root' -AfterChildInspection $AfterOwnedDirectoryCreate `
+        -PreserveCreatedOnFailure
+    $captureRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
+        -ParentEvidence $authEvidence -ChildName 'capture' -Kind 'capture root' `
+        -AfterChildInspection $AfterOwnedDirectoryCreate -PreserveCreatedOnFailure
+    $stageRootEvidence = Initialize-GraphKitAuthOwnerDirectory -ParentPath $authRoot `
+        -ParentEvidence $authEvidence -ChildName 'stage' -Kind 'stage root' `
+        -AfterChildInspection $AfterOwnedDirectoryCreate -PreserveCreatedOnFailure
     $runId = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
     $capture = Join-Path $captureRoot $runId
     $payload = Join-Path $capture 'payload'
@@ -990,7 +924,9 @@ function Invoke-GraphKitAuthPrepareClean {
     $captureEntry = Get-GraphKitAuthPortableChildEntry -ParentPath $authRoot `
         -ChildName 'capture' -Kind 'Prepare capture root'
     if (-not $captureEntry.Exists) {
-        throw 'The GraphKit.Auth Prepare capture root is missing from a partial output tree.'
+        Assert-GraphKitAuthExactDirectoryClosure -Directory $authRoot `
+            -ExpectedNames @() -Kind 'Prepare partial auth root, which must be empty'
+        return @()
     }
     $captureEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory($authRoot, 'capture')
     if (-not (Test-GraphKitAuthContainedPhysicalPath $authEvidence.PhysicalPath $captureEvidence.PhysicalPath)) {
@@ -1003,7 +939,13 @@ function Invoke-GraphKitAuthPrepareClean {
         -ExpectedNames @() -Kind 'Prepare capture root, which must be empty'
     $stageEntry = Get-GraphKitAuthPortableChildEntry -ParentPath $authRoot `
         -ChildName 'stage' -Kind 'Prepare stage root'
-    if (-not $stageEntry.Exists) { return @() }
+    if (-not $stageEntry.Exists) {
+        Assert-GraphKitAuthExactDirectoryClosure -Directory $authRoot `
+            -ExpectedNames @('capture') -Kind 'Prepare partial auth root'
+        return @()
+    }
+    Assert-GraphKitAuthExactDirectoryClosure -Directory $authRoot `
+        -ExpectedNames @('capture','stage') -Kind 'Prepare authority root'
     $stageRoot = Join-Path $authRoot 'stage'
     $stageRootEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory($authRoot, 'stage')
     if (-not (Test-GraphKitAuthContainedPhysicalPath $authEvidence.PhysicalPath $stageRootEvidence.PhysicalPath)) {
@@ -1189,8 +1131,7 @@ function New-GraphKitAuthAbiTestFixture {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string] $RepositoryRoot,
-        [Parameter(Mandatory)][string] $OutputRoot,
-        [scriptblock] $AfterFixtureCopy
+        [Parameter(Mandatory)][string] $OutputRoot
     )
     Initialize-GraphKitAuthStageCapture
     $sourceManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $RepositoryRoot 'source/GraphKit.psd1')
@@ -1267,9 +1208,6 @@ function New-GraphKitAuthAbiTestFixture {
             )
             $script:GraphKitAuthAbiFixtureState.CreatedPaths.Add($destinationFile)
             $script:GraphKitAuthAbiFixtureState.ExpectedEvidence[$destinationFile] = $copy.Destination
-            if ($null -ne $AfterFixtureCopy) {
-                & $AfterFixtureCopy $relativeFile $copy.Destination
-            }
             $manifestRecord = @($verified.Manifest.files | Where-Object {
                 [string]$_.path -ceq "payload/$($entry.Key)"
             })
