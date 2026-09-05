@@ -1389,7 +1389,12 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
         $primaryFailure = $null
         try {
             $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot (Join-Path $BuildRoot 'output')
-            if ((& dotnet --version) -cne '10.0.400') { throw 'GraphKit.Auth requires dotnet SDK 10.0.400 exactly.' }
+            $dotnetVersionOutput = @(& dotnet --version)
+            if ($LASTEXITCODE -ne 0) { throw 'GraphKit.Auth could not query the dotnet SDK version.' }
+            $dotnetVersion = ([string] (@($dotnetVersionOutput | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            }) | Select-Object -Last 1)).Trim()
+            if ($dotnetVersion -cne '10.0.400') { throw 'GraphKit.Auth requires dotnet SDK 10.0.400 exactly.' }
             & dotnet restore $solution --locked-mode
             if ($LASTEXITCODE -ne 0) { throw 'GraphKit.Auth locked restore failed.' }
             & dotnet build $solution -c Release --no-restore

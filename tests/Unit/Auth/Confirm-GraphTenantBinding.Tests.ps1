@@ -398,6 +398,15 @@ Describe 'Confirm-GraphTenantBinding' {
                     -ProofCache $Cache -RemainingDeadline ([TimeSpan]::MaxValue)
             }
             $script:proofCall.DeadlineSeconds | Should -Be 86400
+
+            $nullCloudCache = @{}
+            $nullCloudContext = New-TestContext
+            $nullCloudContext.Cloud = $null
+            $null = InModuleScope GraphKit -ArgumentList $nullCloudCache, $nullCloudContext, (New-TestTokenResult) {
+                param($Cache, $Context, $TokenResult)
+                Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult -ProofCache $Cache
+            }
+            $script:proofCall.Context.Cloud | Should -BeExactly 'TenantProof'
         }
 
         It 'forwards the caller cancellation token into the proof retry pipeline' {

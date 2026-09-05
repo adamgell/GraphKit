@@ -1865,24 +1865,24 @@ Describe 'GraphTokenSource' {
                 }
             }
 
-            $base = InModuleScope GraphKit -Parameters @{ Profile = $baseProfile } {
-                param($Profile)
-                Get-GraphCredentialGeneration -TenantProfile $Profile
+            $base = InModuleScope GraphKit -Parameters @{ TenantProfile = $baseProfile } {
+                param($TenantProfile)
+                Get-GraphCredentialGeneration -TenantProfile $TenantProfile
             }
             $passwordChanged = $baseProfile.Clone()
             $passwordChanged.Credential = $baseProfile.Credential.Clone()
             $passwordChanged.Credential.Password = $baseProfile.Credential.Password.Clone()
             $passwordChanged.Credential.Password.Version = 'password-v2'
-            $passwordGeneration = InModuleScope GraphKit -Parameters @{ Profile = $passwordChanged } {
-                param($Profile)
-                Get-GraphCredentialGeneration -TenantProfile $Profile
+            $passwordGeneration = InModuleScope GraphKit -Parameters @{ TenantProfile = $passwordChanged } {
+                param($TenantProfile)
+                Get-GraphCredentialGeneration -TenantProfile $TenantProfile
             }
             $materialChanged = $baseProfile.Clone()
             $materialChanged.Credential = $baseProfile.Credential.Clone()
             $materialChanged.Credential.Version = 'cert-v2'
-            $materialGeneration = InModuleScope GraphKit -Parameters @{ Profile = $materialChanged } {
-                param($Profile)
-                Get-GraphCredentialGeneration -TenantProfile $Profile
+            $materialGeneration = InModuleScope GraphKit -Parameters @{ TenantProfile = $materialChanged } {
+                param($TenantProfile)
+                Get-GraphCredentialGeneration -TenantProfile $TenantProfile
             }
 
             $passwordGeneration | Should -Not -Be $base
@@ -1971,7 +1971,7 @@ Describe 'GraphTokenSource' {
             }
 
             $result = InModuleScope GraphKit {
-                $profile = @{
+                $tenantProfile = @{
                     TenantId = '00000000-0000-0000-0000-000000000001'
                     ClientId = $null
                     AuthMethod = 'BearerToken'
@@ -1983,18 +1983,18 @@ Describe 'GraphTokenSource' {
                     Resource = 'https://graph.microsoft.com'
                     Authority = 'https://login.microsoftonline.com'
                 }
-                $old = New-GraphTokenSource -Profile $profile -Cloud $cloud
-                $new = New-GraphTokenSource -Profile $profile -Cloud $cloud
+                $old = New-GraphTokenSource -Profile $tenantProfile -Cloud $cloud
+                $new = New-GraphTokenSource -Profile $tenantProfile -Cloud $cloud
                 [pscustomobject] @{
                     OldGeneration = $old.CredentialGeneration
                     NewGeneration = $new.CredentialGeneration
                     OldToken = $old.Acquire($false, [System.Threading.CancellationToken]::None).AccessToken
                     NewToken = $new.Acquire($false, [System.Threading.CancellationToken]::None).AccessToken
-                    OldKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $profile.TenantId `
-                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $profile.ClientId `
+                    OldKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $tenantProfile.TenantId `
+                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $tenantProfile.ClientId `
                         -AuthMode BearerToken -Generation $old.CredentialGeneration
-                    NewKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $profile.TenantId `
-                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $profile.ClientId `
+                    NewKey = Get-GraphTokenAcquisitionKey -Environment $cloud.Name -TenantId $tenantProfile.TenantId `
+                        -Authority $cloud.Authority -Resource $cloud.Resource -ClientId $tenantProfile.ClientId `
                         -AuthMode BearerToken -Generation $new.CredentialGeneration
                 }
             }

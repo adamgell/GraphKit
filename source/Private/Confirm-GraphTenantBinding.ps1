@@ -228,12 +228,13 @@ function Confirm-GraphTenantBinding {
     # Invoke the normal retry/sender pipeline with a source pinned to this exact
     # result. The original provider may rotate on every call; it must never be
     # consulted while proving the bearer that the outer sender is about to use.
-    $proofCloud = if ($null -ne $Context.PSObject.Properties['Cloud']) {
+    $contextCloud = if ($null -ne $Context.PSObject.Properties['Cloud']) {
         [string] $Context.Cloud
     }
     else {
-        'TenantProof'
+        ''
     }
+    $proofCloud = if ([string]::IsNullOrWhiteSpace($contextCloud)) { 'TenantProof' } else { $contextCloud }
     $proofClientId = if ($null -ne $Context.PSObject.Properties['ClientId']) {
         $Context.ClientId
     }

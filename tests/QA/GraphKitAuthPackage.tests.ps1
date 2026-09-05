@@ -20,7 +20,7 @@ $graphKitAuthArchiveAliasCases = @(
         'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
     ) }
     @{ Kind = 'Unicode normalization alias'; Entries = @(
-        "Assemblies/GraphKit.Auth/probé.dll"
+        "Assemblies/GraphKit.Auth/prob$([char]0x00E9).dll"
         "Assemblies/GraphKit.Auth/probe$([char]0x0301).dll"
     ) }
 )
@@ -59,8 +59,8 @@ $portableVersionAliasCases = @(
     }
     @{
         Kind = 'NFC'
-        ExpectedName = '0.4.0-r8.fixture.vérsion-alias'
-        AliasName = '0.4.0-r8.fixture.vérsion-alias'.Normalize([Text.NormalizationForm]::FormD)
+        ExpectedName = "0.4.0-r8.fixture.v$([char]0x00E9)rsion-alias"
+        AliasName = ("0.4.0-r8.fixture.v$([char]0x00E9)rsion-alias").Normalize([Text.NormalizationForm]::FormD)
     }
 )
 $linuxAtomicRenameCases = if ($IsLinux) { @(@{}) } else { @() }
@@ -140,9 +140,9 @@ BeforeAll {
         param([string] $PackagePath, [string] $EntryPath)
         $archive = [IO.Compression.ZipFile]::OpenRead($PackagePath)
         try {
-            $matches = @($archive.Entries | Where-Object FullName -CEQ $EntryPath)
-            if ($matches.Count -ne 1) { throw "Expected one '$EntryPath' archive entry." }
-            $stream = $matches[0].Open()
+            $archiveMatches = @($archive.Entries | Where-Object FullName -CEQ $EntryPath)
+            if ($archiveMatches.Count -ne 1) { throw "Expected one '$EntryPath' archive entry." }
+            $stream = $archiveMatches[0].Open()
             try {
                 $sha = [Security.Cryptography.SHA256]::Create()
                 try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
@@ -284,7 +284,7 @@ BeforeAll {
                 }
             }
             'unicode-alias' {
-                [IO.File]::Copy($targetPath, (Join-Path $payloadPath "probé.dll"))
+                [IO.File]::Copy($targetPath, (Join-Path $payloadPath "prob$([char]0x00E9).dll"))
                 try { [IO.File]::Copy($targetPath, (Join-Path $payloadPath "probe$([char]0x0301).dll")) }
                 catch [IO.IOException] {
                     # APFS commonly aliases composed and decomposed names. The first extra
@@ -602,24 +602,63 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             }
 
             $BuildRoot = Join-Path $TestDrive ('primary-failure-' + [guid]::NewGuid().ToString('N'))
-            $caught = $null
+            $primaryFailure = $null
             try {
                 & $tasks['Build_GraphKitAuth']
             }
             catch {
-                $caught = $_
+                $primaryFailure = $_
+            }
+            $primaryCleanupCalls = $cleanupCalls.Count
+
+            function Initialize-GraphKitAuthBuildAuthorityRoot {}
+            $dotnetCalls = [Collections.Generic.List[string]]::new()
+            function dotnet {
+                param([Parameter(ValueFromRemainingArguments)][object[]] $Arguments)
+                $call = [string] ($Arguments -join ' ')
+                $dotnetCalls.Add($call)
+                if ($call -ceq '--version') {
+                    $global:LASTEXITCODE = 0
+                    'injected diagnostic line'
+                    ''
+                    '10.0.400'
+                    return
+                }
+                $global:LASTEXITCODE = 1
+            }
+
+            $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+            $normalizedVersionFailure = $null
+            try {
+                & $tasks['Build_GraphKitAuth']
+            }
+            catch {
+                $normalizedVersionFailure = $_
+            }
+            finally {
+                if ($null -eq $lastExitCodeVariable) {
+                    Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+                }
+                else {
+                    $global:LASTEXITCODE = $lastExitCodeVariable.Value
+                }
             }
 
             [pscustomobject]@{
-                Error = $caught
-                CleanupCalls = $cleanupCalls.Count
+                PrimaryFailure = $primaryFailure
+                PrimaryCleanupCalls = $primaryCleanupCalls
+                NormalizedVersionFailure = $normalizedVersionFailure
+                DotnetCalls = @($dotnetCalls)
             }
         }
 
-        $observed.CleanupCalls | Should -Be 1
-        $observed.Error | Should -Not -BeNullOrEmpty
-        $observed.Error.Exception.GetType().FullName | Should -BeExactly 'System.InvalidOperationException'
-        $observed.Error.Exception.Message | Should -BeExactly 'injected primary build failure'
+        $observed.PrimaryCleanupCalls | Should -Be 1
+        $observed.PrimaryFailure | Should -Not -BeNullOrEmpty
+        $observed.PrimaryFailure.Exception.GetType().FullName | Should -BeExactly 'System.InvalidOperationException'
+        $observed.PrimaryFailure.Exception.Message | Should -BeExactly 'injected primary build failure'
+        $observed.DotnetCalls[0] | Should -BeExactly '--version'
+        $observed.DotnetCalls[1] | Should -BeLike 'restore *'
+        $observed.NormalizedVersionFailure.Exception.Message | Should -BeExactly 'GraphKit.Auth locked restore failed.'
     }
 
     It 'refuses an existing full-version stage without changing its bytes' {
