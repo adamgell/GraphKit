@@ -25,6 +25,13 @@ function Test-GraphKitPackagePrivacyPlaceholderGuid {
         return $true
     }
 
+    # Repeated segments alone do not prove a placeholder. A value whose version and variant
+    # nibbles form an RFC 4122 / RFC 9562 UUID is a plausible tenant or client identifier and
+    # must pass only through an exact allowlist, even when every segment repeats one character.
+    if ($Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$') {
+        return $false
+    }
+
     foreach ($segment in @($Value -split '-')) {
         if (@($segment.ToCharArray() | Select-Object -Unique).Count -gt 1) {
             return $false

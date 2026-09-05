@@ -62,6 +62,44 @@ Describe 'GraphKit.Auth authored project-source privacy' {
         }
     }
 
+    It 'never treats an RFC-versioned repeated-segment GUID as a placeholder' {
+        $allowedGuids = Get-GraphKitPackagePrivacyAllowedGuidSet -ModuleGuid ([guid]::Empty)
+
+        foreach ($version in @('1', '2', '3', '4', '5', '6', '7', '8')) {
+            foreach ($variant in @('8', '9', 'a', 'b')) {
+                $candidate = "11111111-2222-$version$version$version$version-$variant$variant$variant$variant-555555555555"
+                Test-GraphKitPackagePrivacyPlaceholderGuid -Value $candidate | Should -BeFalse
+                $findings = [System.Collections.Generic.List[object]]::new()
+                $findingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+                Test-GraphKitPackagePrivacyText `
+                    -Text $candidate `
+                    -EntryName 'fixture.txt' `
+                    -Encoding 'strict-utf8' `
+                    -AllowedGuids $allowedGuids `
+                    -Findings $findings `
+                    -FindingKeys $findingKeys
+                @($findings).Count | Should -Be 1
+                $findings[0].Category |
+                    Should -BeExactly 'GUID that is not a well-known or package id'
+            }
+        }
+
+        $placeholder = '11111111-2222-4444-4444-555555555555'
+        Test-GraphKitPackagePrivacyPlaceholderGuid `
+            -Value $placeholder |
+            Should -BeTrue
+        $placeholderFindings = [System.Collections.Generic.List[object]]::new()
+        $placeholderFindingKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        Test-GraphKitPackagePrivacyText `
+            -Text $placeholder `
+            -EntryName 'fixture.txt' `
+            -Encoding 'strict-utf8' `
+            -AllowedGuids $allowedGuids `
+            -Findings $placeholderFindings `
+            -FindingKeys $placeholderFindingKeys
+        @($placeholderFindings).Count | Should -Be 0
+    }
+
     It 'detects a hashed protected token embedded in a longer hyphenated identifier' {
         $realDigest = (Get-Command -Name Get-GraphKitPackagePrivacyDigest).ScriptBlock
         Mock Get-GraphKitPackagePrivacyDigest {
