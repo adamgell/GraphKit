@@ -19,6 +19,8 @@ public sealed class GraphKitAuthPathEvidence
     public long Length { get; init; }
     public long LinkCount { get; init; }
     public int UnixMode { get; init; }
+    public uint OwnerUid { get; init; }
+    public uint EffectiveUid { get; init; }
     public string PermissionEvidence { get; init; } = string.Empty;
     public bool IsDirectory { get; init; }
     public bool IsRegularFile { get; init; }
@@ -26,6 +28,7 @@ public sealed class GraphKitAuthPathEvidence
     public bool OwnerWritable { get; init; }
     public string OwnerSid { get; init; } = string.Empty;
     public string CurrentIdentitySid { get; init; } = string.Empty;
+    public string CurrentOwnerSid { get; init; } = string.Empty;
     public bool AccessRulesProtected { get; init; }
     public bool HasInheritedAccessRules { get; init; }
     public bool OwnerOnlyAccess { get; init; }
@@ -63,7 +66,14 @@ public static class GraphKitAuthStageCapture
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileFlagWriteThrough = 0x80000000;
+    private const uint FileAttributeReadOnly = 0x00000001;
     private const uint FileAttributeReparsePoint = 0x00000400;
+    private const int SeFileObject = 1;
+    private const uint OwnerSecurityInformation = 0x00000001;
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const int TokenOwner = 4;
+    private const int ErrorInsufficientBuffer = 122;
+    private const uint MaxTokenOwnerInformationLength = 65536;
     private const int FileDispositionInfoClass = 4;
 
     public static GraphKitAuthPathEvidence InspectFile(string rootPath, string relativePath)
@@ -108,8 +118,8 @@ public static class GraphKitAuthStageCapture
         return OperatingSystem.IsWindows()
             ? evidence.OwnerOnlyAccess &&
                 !string.IsNullOrWhiteSpace(evidence.OwnerSid) &&
-                string.Equals(evidence.OwnerSid, evidence.CurrentIdentitySid, StringComparison.Ordinal)
-            : evidence.UnixMode == 0x180;
+                string.Equals(evidence.OwnerSid, evidence.CurrentOwnerSid, StringComparison.Ordinal)
+            : evidence.UnixMode == 0x180 && evidence.OwnerUid == evidence.EffectiveUid;
     }
 
     public static bool HasInitialOwnerOnlyDirectoryAccess(GraphKitAuthPathEvidence evidence)
@@ -123,8 +133,9 @@ public static class GraphKitAuthStageCapture
                 evidence.OwnerOnlyAccess &&
                 evidence.ExactWritableOwnerOnlyDirectoryAccess &&
                 !string.IsNullOrWhiteSpace(evidence.OwnerSid) &&
-                string.Equals(evidence.OwnerSid, evidence.CurrentIdentitySid, StringComparison.Ordinal)
-            : evidence.IsDirectory && evidence.UnixMode == 0x1C0;
+                string.Equals(evidence.OwnerSid, evidence.CurrentOwnerSid, StringComparison.Ordinal)
+            : evidence.IsDirectory && evidence.UnixMode == 0x1C0 &&
+                evidence.OwnerUid == evidence.EffectiveUid;
     }
 
     public static GraphKitAuthPathEvidence CreateDirectoryOwnerOnly(
@@ -145,12 +156,13 @@ public static class GraphKitAuthStageCapture
         if (OperatingSystem.IsWindows())
         {
             DirectorySecurity security = new();
-            SecurityIdentifier owner = WindowsIdentity.GetCurrent().User
+            SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
                 ?? throw new IOException("The current Windows identity has no SID.");
+            SecurityIdentifier owner = GetCurrentTokenOwnerSid();
             security.SetOwner(owner);
             security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
             security.AddAccessRule(new FileSystemAccessRule(
-                owner,
+                currentIdentity,
                 FileSystemRights.FullControl,
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                 PropagationFlags.None,
@@ -699,6 +711,8 @@ public static class GraphKitAuthStageCapture
             Length = after.Length,
             LinkCount = after.LinkCount,
             UnixMode = after.UnixMode,
+            OwnerUid = after.OwnerUid,
+            EffectiveUid = after.EffectiveUid,
             PermissionEvidence = after.PermissionEvidence,
             IsDirectory = after.IsDirectory,
             IsRegularFile = after.IsRegularFile,
@@ -706,6 +720,7 @@ public static class GraphKitAuthStageCapture
             OwnerWritable = after.OwnerWritable,
             OwnerSid = after.OwnerSid,
             CurrentIdentitySid = after.CurrentIdentitySid,
+            CurrentOwnerSid = after.CurrentOwnerSid,
             AccessRulesProtected = after.AccessRulesProtected,
             HasInheritedAccessRules = after.HasInheritedAccessRules,
             OwnerOnlyAccess = after.OwnerOnlyAccess,
@@ -837,12 +852,13 @@ public static class GraphKitAuthStageCapture
             if (requireInitialOwnerOnly)
             {
                 FileSecurity security = new();
-                SecurityIdentifier owner = WindowsIdentity.GetCurrent().User
+                SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
                     ?? throw new IOException("The current Windows identity has no SID.");
+                SecurityIdentifier owner = GetCurrentTokenOwnerSid();
                 security.SetOwner(owner);
                 security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
                 security.AddAccessRule(new FileSystemAccessRule(
-                    owner,
+                    currentIdentity,
                     FileSystemRights.FullControl,
                     InheritanceFlags.None,
                     PropagationFlags.None,
@@ -951,10 +967,12 @@ public static class GraphKitAuthStageCapture
             long windowsLength = ((long)info.FileSizeHigh << 32) | info.FileSizeLow;
             string identity = $"{info.VolumeSerialNumber:x8}:{info.FileIndexHigh:x8}{info.FileIndexLow:x8}";
             string physical = GetWindowsPhysicalPath(handle);
-            WindowsPermissionFacts permissions = GetWindowsPermissionFacts(path, directory);
-            return new NativeFacts(identity, physical, windowsLength, info.NumberOfLinks, 0, directory,
+            WindowsPermissionFacts permissions = GetWindowsPermissionFacts(
+                handle, directory, info.FileAttributes);
+            return new NativeFacts(identity, physical, windowsLength, info.NumberOfLinks, 0, 0, 0, directory,
                 !directory && !reparse, reparse, permissions.OwnerWritable, permissions.Sddl,
-                permissions.OwnerSid, permissions.CurrentIdentitySid, permissions.AccessRulesProtected,
+                permissions.OwnerSid, permissions.CurrentIdentitySid, permissions.CurrentOwnerSid,
+                permissions.AccessRulesProtected,
                 permissions.HasInheritedAccessRules, permissions.OwnerOnlyAccess,
                 permissions.ExactOwnerOnlyAccess,
                 permissions.ExactWritableOwnerOnlyDirectoryAccess,
@@ -971,6 +989,7 @@ public static class GraphKitAuthStageCapture
         ulong inode;
         ulong links;
         uint mode;
+        uint ownerUid;
         long length;
         if (OperatingSystem.IsMacOS())
         {
@@ -978,6 +997,7 @@ public static class GraphKitAuthStageCapture
             mode = BitConverter.ToUInt16(stat, 4);
             links = BitConverter.ToUInt16(stat, 6);
             inode = BitConverter.ToUInt64(stat, 8);
+            ownerUid = BitConverter.ToUInt32(stat, 16);
             length = BitConverter.ToInt64(stat, 96);
         }
         else if (OperatingSystem.IsLinux() &&
@@ -989,6 +1009,7 @@ public static class GraphKitAuthStageCapture
             inode = BitConverter.ToUInt64(stat, 8);
             mode = BitConverter.ToUInt32(stat, 16);
             links = BitConverter.ToUInt32(stat, 20);
+            ownerUid = BitConverter.ToUInt32(stat, 24);
             length = BitConverter.ToInt64(stat, 48);
         }
         else if (OperatingSystem.IsLinux() &&
@@ -998,6 +1019,7 @@ public static class GraphKitAuthStageCapture
             inode = BitConverter.ToUInt64(stat, 8);
             links = BitConverter.ToUInt64(stat, 16);
             mode = BitConverter.ToUInt32(stat, 24);
+            ownerUid = BitConverter.ToUInt32(stat, 28);
             length = BitConverter.ToInt64(stat, 48);
         }
         else
@@ -1010,6 +1032,7 @@ public static class GraphKitAuthStageCapture
         bool isRegular = fileType == 0x8000;
         bool isLink = fileType == 0xA000;
         int unixMode = (int)(mode & 0x0FFF);
+        uint effectiveUid = geteuid();
         string unixIdentity = $"{device:x}:{inode:x}";
         string physicalPath = GetUnixPhysicalPath(path, unixIdentity, isDirectory);
         return new NativeFacts(
@@ -1018,12 +1041,14 @@ public static class GraphKitAuthStageCapture
             length,
             checked((long)links),
             unixMode,
+            ownerUid,
+            effectiveUid,
             isDirectory,
             isRegular,
             isLink,
             (unixMode & 0x80) != 0,
             Convert.ToString(unixMode, 8).PadLeft(4, '0'),
-            string.Empty, string.Empty, false, false, false, false, false, false);
+            string.Empty, string.Empty, string.Empty, false, false, false, false, false, false);
     }
 
     private static string GetUnixPhysicalPath(string path, string expectedIdentity, bool directory)
@@ -1168,13 +1193,87 @@ public static class GraphKitAuthStageCapture
         value.Length >= 3 && char.IsAsciiLetter(value[0]) &&
         value[1] == ':' && value[2] == '\\';
 
-    private static WindowsPermissionFacts GetWindowsPermissionFacts(string path, bool directory)
+    private static SecurityIdentifier GetCurrentTokenOwnerSid()
     {
-        FileSystemSecurity security = directory
-            ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path), AccessControlSections.Access | AccessControlSections.Owner)
-            : FileSystemAclExtensions.GetAccessControl(new FileInfo(path), AccessControlSections.Access | AccessControlSections.Owner);
-        SecurityIdentifier current = WindowsIdentity.GetCurrent().User
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        bool initialResult = GetTokenInformation(
+            identity.Token,
+            TokenOwner,
+            IntPtr.Zero,
+            0,
+            out uint requiredLength);
+        int initialError = Marshal.GetLastWin32Error();
+        if (initialResult || initialError != ErrorInsufficientBuffer || requiredLength == 0 ||
+            requiredLength > MaxTokenOwnerInformationLength)
+        {
+            throw new IOException(
+                $"Could not determine the current Windows token owner size (Win32 {initialError}).");
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)requiredLength));
+        try
+        {
+            if (!GetTokenInformation(
+                identity.Token,
+                TokenOwner,
+                buffer,
+                requiredLength,
+                out uint returnedLength))
+            {
+                throw new IOException(
+                    $"Could not read the current Windows token owner (Win32 {Marshal.GetLastWin32Error()}).");
+            }
+            if (returnedLength > requiredLength)
+            {
+                throw new IOException("The current Windows token owner exceeded its bounded buffer.");
+            }
+            TokenOwnerInformation owner = Marshal.PtrToStructure<TokenOwnerInformation>(buffer);
+            if (owner.Owner == IntPtr.Zero)
+            {
+                throw new IOException("The current Windows token has no default owner SID.");
+            }
+            return new SecurityIdentifier(owner.Owner);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static WindowsPermissionFacts GetWindowsPermissionFacts(
+        SafeFileHandle handle,
+        bool directory,
+        uint fileAttributes)
+    {
+        uint status = GetSecurityInfo(
+            handle,
+            SeFileObject,
+            OwnerSecurityInformation | DaclSecurityInformation,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            out IntPtr descriptorPointer);
+        using SafeLocalMemoryHandle descriptor = new(descriptorPointer);
+        if (status != 0)
+        {
+            throw new IOException(
+                $"Could not inspect the opened Windows object's owner and DACL (Win32 {status}).");
+        }
+        uint descriptorLength = GetSecurityDescriptorLength(descriptor.DangerousGetHandle());
+        if (descriptorLength == 0)
+        {
+            throw new IOException("The opened Windows object returned an invalid security descriptor.");
+        }
+        byte[] descriptorBytes = new byte[checked((int)descriptorLength)];
+        Marshal.Copy(descriptor.DangerousGetHandle(), descriptorBytes, 0, descriptorBytes.Length);
+        FileSystemSecurity security = directory ? new DirectorySecurity() : new FileSecurity();
+        security.SetSecurityDescriptorBinaryForm(
+            descriptorBytes,
+            AccessControlSections.Access | AccessControlSections.Owner);
+        SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
             ?? throw new IOException("The current Windows identity has no SID.");
+        SecurityIdentifier currentTokenOwner = GetCurrentTokenOwnerSid();
         SecurityIdentifier owner = (SecurityIdentifier)security.GetOwner(typeof(SecurityIdentifier));
         AuthorizationRuleCollection rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
         FileSystemRights writeMask = FileSystemRights.WriteData | FileSystemRights.AppendData |
@@ -1185,27 +1284,27 @@ public static class GraphKitAuthStageCapture
             FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize;
         bool ownerWritable = false;
         bool hasInheritedAccessRules = false;
-        bool ownerOnlyAccess = owner.Equals(current) && rules.Count >= 1;
+        bool ownerOnlyAccess = owner.Equals(currentTokenOwner) && rules.Count >= 1;
         bool exactOwnerOnlyAccess = security.AreAccessRulesProtected &&
-            owner.Equals(current) && rules.Count == 1;
+            owner.Equals(currentTokenOwner) && rules.Count == 1;
         bool exactWritableOwnerOnlyDirectoryAccess = directory &&
-            security.AreAccessRulesProtected && owner.Equals(current) && rules.Count == 1;
+            security.AreAccessRulesProtected && owner.Equals(currentTokenOwner) && rules.Count == 1;
         foreach (FileSystemAccessRule rule in rules)
         {
             hasInheritedAccessRules |= rule.IsInherited;
-            ownerOnlyAccess &= rule.IdentityReference.Equals(current) &&
+            ownerOnlyAccess &= rule.IdentityReference.Equals(currentIdentity) &&
                 rule.AccessControlType == AccessControlType.Allow;
             if (rule.AccessControlType == AccessControlType.Allow && (rule.FileSystemRights & writeMask) != 0)
             {
                 ownerWritable = true;
             }
-            exactOwnerOnlyAccess &= rule.IdentityReference.Equals(current) &&
+            exactOwnerOnlyAccess &= rule.IdentityReference.Equals(currentIdentity) &&
                 !rule.IsInherited &&
                 rule.AccessControlType == AccessControlType.Allow &&
                 rule.FileSystemRights == expectedRights &&
                 rule.InheritanceFlags == InheritanceFlags.None &&
                 rule.PropagationFlags == PropagationFlags.None;
-            exactWritableOwnerOnlyDirectoryAccess &= rule.IdentityReference.Equals(current) &&
+            exactWritableOwnerOnlyDirectoryAccess &= rule.IdentityReference.Equals(currentIdentity) &&
                 !rule.IsInherited &&
                 rule.AccessControlType == AccessControlType.Allow &&
                 rule.FileSystemRights == FileSystemRights.FullControl &&
@@ -1213,12 +1312,13 @@ public static class GraphKitAuthStageCapture
                 rule.PropagationFlags == PropagationFlags.None;
         }
         bool fileReadOnly = directory ||
-            (File.GetAttributes(path) & FileAttributes.ReadOnly) == FileAttributes.ReadOnly;
+            (fileAttributes & FileAttributeReadOnly) == FileAttributeReadOnly;
         return new WindowsPermissionFacts(
             security.GetSecurityDescriptorSddlForm(AccessControlSections.Access | AccessControlSections.Owner),
             ownerWritable,
             owner.Value,
-            current.Value,
+            currentIdentity.Value,
+            currentTokenOwner.Value,
             security.AreAccessRulesProtected,
             hasInheritedAccessRules,
             ownerOnlyAccess,
@@ -1236,12 +1336,11 @@ public static class GraphKitAuthStageCapture
                 new FileInfo(path), AccessControlSections.Owner);
         SecurityIdentifier currentOwner = (SecurityIdentifier)currentSecurity.GetOwner(
             typeof(SecurityIdentifier));
-        SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
-            ?? throw new IOException("The current Windows identity has no SID.");
-        if (!currentOwner.Equals(currentIdentity))
+        SecurityIdentifier currentTokenOwner = GetCurrentTokenOwnerSid();
+        if (!currentOwner.Equals(currentTokenOwner))
         {
             throw new IOException(
-                $"Owner-only access refused for '{path}' because its owner is not the current Windows identity.");
+                $"Owner-only access refused for '{path}' because its owner is not the current Windows token owner.");
         }
         FileSystemSecurity security = CreateOwnerOnlyWindowsSecurity(
             directory, writable, setOwner: false);
@@ -1272,8 +1371,9 @@ public static class GraphKitAuthStageCapture
         bool writable,
         bool setOwner)
     {
-        WindowsIdentity identity = WindowsIdentity.GetCurrent();
-        SecurityIdentifier owner = identity.User ?? throw new IOException("The current Windows identity has no SID.");
+        SecurityIdentifier currentIdentity = WindowsIdentity.GetCurrent().User
+            ?? throw new IOException("The current Windows identity has no SID.");
+        SecurityIdentifier owner = GetCurrentTokenOwnerSid();
         FileSystemSecurity security = directory ? new DirectorySecurity() : new FileSecurity();
         if (setOwner)
         {
@@ -1284,7 +1384,7 @@ public static class GraphKitAuthStageCapture
             ? FileSystemRights.FullControl
             : FileSystemRights.ReadAndExecute;
         InheritanceFlags inheritance = directory && writable ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None;
-        security.AddAccessRule(new FileSystemAccessRule(owner, rights, inheritance,
+        security.AddAccessRule(new FileSystemAccessRule(currentIdentity, rights, inheritance,
             PropagationFlags.None, AccessControlType.Allow));
         return security;
     }
@@ -1292,7 +1392,8 @@ public static class GraphKitAuthStageCapture
     private sealed class WindowsPermissionFacts
     {
         internal WindowsPermissionFacts(string sddl, bool ownerWritable, string ownerSid,
-            string currentIdentitySid, bool accessRulesProtected, bool hasInheritedAccessRules,
+            string currentIdentitySid, string currentOwnerSid, bool accessRulesProtected,
+            bool hasInheritedAccessRules,
             bool ownerOnlyAccess, bool exactOwnerOnlyAccess,
             bool exactWritableOwnerOnlyDirectoryAccess, bool fileReadOnly)
         {
@@ -1300,6 +1401,7 @@ public static class GraphKitAuthStageCapture
             OwnerWritable = ownerWritable;
             OwnerSid = ownerSid;
             CurrentIdentitySid = currentIdentitySid;
+            CurrentOwnerSid = currentOwnerSid;
             AccessRulesProtected = accessRulesProtected;
             HasInheritedAccessRules = hasInheritedAccessRules;
             OwnerOnlyAccess = ownerOnlyAccess;
@@ -1311,6 +1413,7 @@ public static class GraphKitAuthStageCapture
         internal bool OwnerWritable { get; }
         internal string OwnerSid { get; }
         internal string CurrentIdentitySid { get; }
+        internal string CurrentOwnerSid { get; }
         internal bool AccessRulesProtected { get; }
         internal bool HasInheritedAccessRules { get; }
         internal bool OwnerOnlyAccess { get; }
@@ -1319,12 +1422,24 @@ public static class GraphKitAuthStageCapture
         internal bool FileReadOnly { get; }
     }
 
+    private sealed class SafeLocalMemoryHandle : SafeHandleZeroOrMinusOneIsInvalid
+    {
+        internal SafeLocalMemoryHandle(IntPtr handle) : base(ownsHandle: true)
+        {
+            SetHandle(handle);
+        }
+
+        protected override bool ReleaseHandle() => LocalFree(handle) == IntPtr.Zero;
+    }
+
     private sealed class NativeFacts
     {
         internal NativeFacts(string identity, string physicalPath, long length, long linkCount,
-            int unixMode, bool isDirectory, bool isRegularFile, bool isReparsePoint,
+            int unixMode, uint ownerUid, uint effectiveUid, bool isDirectory,
+            bool isRegularFile, bool isReparsePoint,
             bool ownerWritable, string permissionEvidence, string ownerSid,
-            string currentIdentitySid, bool accessRulesProtected, bool hasInheritedAccessRules,
+            string currentIdentitySid, string currentOwnerSid, bool accessRulesProtected,
+            bool hasInheritedAccessRules,
             bool ownerOnlyAccess, bool exactOwnerOnlyAccess,
             bool exactWritableOwnerOnlyDirectoryAccess, bool fileReadOnly)
         {
@@ -1333,6 +1448,8 @@ public static class GraphKitAuthStageCapture
             Length = length;
             LinkCount = linkCount;
             UnixMode = unixMode;
+            OwnerUid = ownerUid;
+            EffectiveUid = effectiveUid;
             IsDirectory = isDirectory;
             IsRegularFile = isRegularFile;
             IsReparsePoint = isReparsePoint;
@@ -1340,6 +1457,7 @@ public static class GraphKitAuthStageCapture
             PermissionEvidence = permissionEvidence;
             OwnerSid = ownerSid;
             CurrentIdentitySid = currentIdentitySid;
+            CurrentOwnerSid = currentOwnerSid;
             AccessRulesProtected = accessRulesProtected;
             HasInheritedAccessRules = hasInheritedAccessRules;
             OwnerOnlyAccess = ownerOnlyAccess;
@@ -1352,6 +1470,8 @@ public static class GraphKitAuthStageCapture
         internal long Length { get; }
         internal long LinkCount { get; }
         internal int UnixMode { get; }
+        internal uint OwnerUid { get; }
+        internal uint EffectiveUid { get; }
         internal bool IsDirectory { get; }
         internal bool IsRegularFile { get; }
         internal bool IsReparsePoint { get; }
@@ -1359,6 +1479,7 @@ public static class GraphKitAuthStageCapture
         internal string PermissionEvidence { get; }
         internal string OwnerSid { get; }
         internal string CurrentIdentitySid { get; }
+        internal string CurrentOwnerSid { get; }
         internal bool AccessRulesProtected { get; }
         internal bool HasInheritedAccessRules { get; }
         internal bool OwnerOnlyAccess { get; }
@@ -1386,6 +1507,12 @@ public static class GraphKitAuthStageCapture
         public int Length;
         public IntPtr SecurityDescriptor;
         public int InheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenOwnerInformation
+    {
+        public IntPtr Owner;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1418,6 +1545,31 @@ public static class GraphKitAuthStageCapture
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
 
+    [DllImport("advapi32.dll")]
+    private static extern uint GetSecurityInfo(
+        SafeFileHandle handle,
+        int objectType,
+        uint securityInfo,
+        IntPtr ownerSid,
+        IntPtr groupSid,
+        IntPtr dacl,
+        IntPtr sacl,
+        out IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(
+        IntPtr token,
+        int informationClass,
+        IntPtr information,
+        uint informationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(
         SafeFileHandle file,
@@ -1440,6 +1592,9 @@ public static class GraphKitAuthStageCapture
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fstat(int descriptor, [Out] byte[] stat);
+
+    [DllImport("libc")]
+    private static extern uint geteuid();
 
     [DllImport("libc", EntryPoint = "__fxstat", SetLastError = true)]
     private static extern int fxstat(int version, int descriptor, [Out] byte[] stat);

@@ -1154,7 +1154,9 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
             $observed.Count | Should -Be 1
             if ($IsWindows) {
-                $observed[0].OwnerSid | Should -BeExactly $observed[0].CurrentIdentitySid
+                $observed[0].OwnerSid | Should -BeExactly $observed[0].CurrentOwnerSid
+                $observed[0].CurrentIdentitySid | Should -BeExactly (
+                    [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
                 $observed[0].AccessRulesProtected | Should -BeTrue
                 $observed[0].HasInheritedAccessRules | Should -BeFalse
                 $observed[0].ExactWritableOwnerOnlyDirectoryAccess | Should -BeTrue
@@ -2213,7 +2215,9 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             if ($IsWindows) {
                 $fixture.ManifestInitialEvidence.OwnerOnlyAccess | Should -BeTrue
                 $fixture.ManifestInitialEvidence.OwnerSid |
-                    Should -BeExactly $fixture.ManifestInitialEvidence.CurrentIdentitySid
+                    Should -BeExactly $fixture.ManifestInitialEvidence.CurrentOwnerSid
+                $fixture.ManifestInitialEvidence.CurrentIdentitySid | Should -BeExactly (
+                    [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
             }
             else {
                 $fixture.ManifestInitialEvidence.UnixMode | Should -Be 0x180
@@ -2225,15 +2229,23 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
     }
 
-    It 'does not call wrong-owner Windows evidence owner-only at initial creation' {
+    It 'rejects owner-mismatched initial and sealed evidence' {
         Initialize-GraphKitAuthStageCapture
         $evidence = [Activator]::CreateInstance($script:GraphKitAuthStageCaptureType.Assembly.GetType(
             $script:GraphKitAuthStageCaptureType.Namespace + '.GraphKitAuthPathEvidence'))
         $evidence.OwnerOnlyAccess = $true
         $evidence.OwnerSid = 'S-1-5-21-111'
-        $evidence.CurrentIdentitySid = 'S-1-5-21-222'
+        $evidence.CurrentIdentitySid = 'S-1-5-21-333'
+        $evidence.CurrentOwnerSid = 'S-1-5-21-222'
 
         $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyAccess($evidence) | Should -BeFalse
+        if (-not $IsWindows) {
+            $evidence.UnixMode = 0x100
+            $evidence.OwnerUid = [uint32] 1
+            $evidence.EffectiveUid = [uint32] 2
+            (Test-GraphKitAuthSealedPermission -Evidence $evidence -Directory $false) |
+                Should -BeFalse
+        }
     }
 
     It 'records link count one for regular files but not directories' {
@@ -2407,7 +2419,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         Get-Command Set-GraphKitAuthWindowsAclMutation -CommandType Function -ErrorAction Stop |
             Should -Not -BeNullOrEmpty
         foreach ($property in @(
-            'OwnerSid', 'CurrentIdentitySid', 'AccessRulesProtected',
+            'OwnerSid', 'CurrentIdentitySid', 'CurrentOwnerSid', 'AccessRulesProtected',
             'HasInheritedAccessRules', 'ExactOwnerOnlyAccess'
         )) {
             $helper | Should -Match ([regex]::Escape($property + ' { get; init; }'))
@@ -2434,6 +2446,21 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $handleSetter | Should -Match (
             'FileSystemAclExtensions\.SetAccessControl\(\s*stream,\s*security\)')
         $handleSetter | Should -Not -Match 'SetOwnerOnlyWindows|new FileInfo|File\.SetAttributes'
+        $nativeFacts = [regex]::Match($helper,
+            '(?ms)^    private static NativeFacts GetNativeFacts\(.*?(?=^    private static )').Value
+        $nativeFacts | Should -Match (
+            'GetWindowsPermissionFacts\(\s*handle,\s*directory,\s*info\.FileAttributes\)')
+        $nativeFacts | Should -Match 'ownerUid\s*=\s*BitConverter\.ToUInt32\(stat,\s*16\)'
+        $nativeFacts | Should -Match 'ownerUid\s*=\s*BitConverter\.ToUInt32\(stat,\s*24\)'
+        $nativeFacts | Should -Match 'ownerUid\s*=\s*BitConverter\.ToUInt32\(stat,\s*28\)'
+        $nativeFacts | Should -Match 'effectiveUid\s*=\s*geteuid\(\)'
+        $permissionReader = [regex]::Match($helper,
+            '(?ms)^    private static WindowsPermissionFacts GetWindowsPermissionFacts\(.*?(?=^    private static )').Value
+        $permissionReader | Should -Match 'GetSecurityInfo\(\s*handle,'
+        $permissionReader | Should -Match 'fileAttributes\s*&\s*FileAttributeReadOnly'
+        $permissionReader | Should -Match 'GetCurrentTokenOwnerSid\(\)'
+        $permissionReader | Should -Not -Match 'new DirectoryInfo|new FileInfo|File\.GetAttributes'
+        $helper | Should -Match 'GetTokenInformation\(\s*identity\.Token,\s*TokenOwner'
         $openDestination = [regex]::Match($helper,
             '(?ms)^    private static FileStream OpenDestinationCreateNew\(.*?(?=^    private static )').Value
         $openDestination | Should -Match (
@@ -2444,7 +2471,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $pathSetter = [regex]::Match($helper,
             '(?ms)^    private static void SetOwnerOnlyWindows\(.*?(?=^    private )').Value
         $pathSetter | Should -Match (
-            '(?s)if \(!currentOwner\.Equals\(currentIdentity\)\).*?throw new IOException')
+            '(?s)currentTokenOwner = GetCurrentTokenOwnerSid\(\);.*?if \(!currentOwner\.Equals\(currentTokenOwner\)\).*?throw new IOException')
         $pathSetter | Should -Match (
             'CreateOwnerOnlyWindowsSecurity\(\s*directory,\s*writable,\s*setOwner: false\)')
         $pathSetter | Should -Not -Match 'security\.SetOwner|setOwner\s*='
@@ -2522,7 +2549,31 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
         $parentEvidence = $script:GraphKitAuthStageCaptureType::InspectDirectory($root, 'destination')
         $parentEvidence.UnixMode | Should -Be 0x1C0
+        $parentEvidence.PSObject.Properties.Name | Should -Contain 'OwnerUid'
+        $parentEvidence.PSObject.Properties.Name | Should -Contain 'EffectiveUid'
+        $parentEvidence.OwnerUid | Should -Be $parentEvidence.EffectiveUid
+        $wrongDirectoryOwner = [Activator]::CreateInstance($parentEvidence.GetType())
+        $wrongDirectoryOwner.GetType().GetProperty('UnixMode').SetValue(
+            $wrongDirectoryOwner, [int] 0x1C0)
+        $wrongDirectoryOwner.GetType().GetProperty('IsDirectory').SetValue(
+            $wrongDirectoryOwner, $true)
+        $wrongDirectoryOwner.GetType().GetProperty('OwnerUid').SetValue(
+            $wrongDirectoryOwner, [uint32] 1)
+        $wrongDirectoryOwner.GetType().GetProperty('EffectiveUid').SetValue(
+            $wrongDirectoryOwner, [uint32] 2)
+        $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyDirectoryAccess(
+            $wrongDirectoryOwner) | Should -BeFalse
         $copy.DestinationInitial.UnixMode | Should -Be 0x180
+        $copy.DestinationInitial.OwnerUid | Should -Be $copy.DestinationInitial.EffectiveUid
+        $wrongFileOwner = [Activator]::CreateInstance($copy.DestinationInitial.GetType())
+        $wrongFileOwner.GetType().GetProperty('UnixMode').SetValue(
+            $wrongFileOwner, [int] 0x180)
+        $wrongFileOwner.GetType().GetProperty('OwnerUid').SetValue(
+            $wrongFileOwner, [uint32] 1)
+        $wrongFileOwner.GetType().GetProperty('EffectiveUid').SetValue(
+            $wrongFileOwner, [uint32] 2)
+        $script:GraphKitAuthStageCaptureType::HasInitialOwnerOnlyAccess(
+            $wrongFileOwner) | Should -BeFalse
         $copy.Destination.UnixMode | Should -Be 0x180
     }
 
@@ -2559,9 +2610,9 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $destination, 'ordinary.bin', $ordinaryBytes, $false)
 
         $copy.DestinationInitial.OwnerOnlyAccess | Should -BeTrue
-        $copy.DestinationInitial.OwnerSid | Should -BeExactly $currentSid.Value
-        $copy.DestinationInitial.CurrentIdentitySid |
-            Should -BeExactly $currentSid.Value
+        $copy.DestinationInitial.OwnerSid |
+            Should -BeExactly $copy.DestinationInitial.CurrentOwnerSid
+        $copy.DestinationInitial.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         $copy.DestinationInitial.AccessRulesProtected | Should -BeTrue
         $copy.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
         $copy.Destination.PhysicalPath.StartsWith('\\?\', [StringComparison]::Ordinal) |
@@ -2571,9 +2622,60 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $ordinaryWrite.Destination.Sha256 | Should -BeExactly (
             [Convert]::ToHexString(
                 [Security.Cryptography.SHA256]::HashData($ordinaryBytes)).ToLowerInvariant())
+        $ordinaryPath = Join-Path $destination 'ordinary.bin'
+        $ordinaryOwner = [IO.FileSystemAclExtensions]::GetAccessControl(
+            [IO.FileInfo]::new($ordinaryPath),
+            [Security.AccessControl.AccessControlSections]::Owner
+        ).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $ordinaryWrite.Destination.OwnerSid | Should -BeExactly $ordinaryOwner
+        $ordinaryWrite.Destination.CurrentOwnerSid | Should -BeExactly $ordinaryOwner
+        $ordinaryWrite.Destination.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         { $script:GraphKitAuthStageCaptureType::WriteFileCreateNew(
             $destination, 'ordinary.bin', $ordinaryBytes, $false) } |
             Should -Throw '*Atomic file destination collision*'
+
+        $raceOriginalName = 'permission-original.bin'
+        $raceReplacementName = 'permission-replacement.bin'
+        $raceParkedName = 'permission-original-parked.bin'
+        $raceOriginal = Join-Path $destination $raceOriginalName
+        $raceReplacement = Join-Path $destination $raceReplacementName
+        $raceParked = Join-Path $destination $raceParkedName
+        $raceWrite = $script:GraphKitAuthStageCaptureType::WriteFileCreateNew(
+            $destination, $raceOriginalName,
+            [Text.Encoding]::UTF8.GetBytes('original-handle-object'), $true)
+        [IO.File]::WriteAllText($raceReplacement, 'replacement-path-object')
+        $privateStatic = [Reflection.BindingFlags]'NonPublic, Static'
+        $openReadNoFollow = $script:GraphKitAuthStageCaptureType.GetMethod(
+            'OpenReadNoFollow', $privateStatic)
+        $getNativeFacts = $script:GraphKitAuthStageCaptureType.GetMethod(
+            'GetNativeFacts', $privateStatic)
+        $openReadNoFollow | Should -Not -BeNullOrEmpty
+        $getNativeFacts | Should -Not -BeNullOrEmpty
+        $raceHandle = $openReadNoFollow.Invoke(
+            $null, [object[]] @($raceOriginal, $false))
+        try {
+            [IO.File]::Move($raceOriginal, $raceParked)
+            [IO.File]::Move($raceReplacement, $raceOriginal)
+            [IO.File]::SetAttributes($raceOriginal, [IO.FileAttributes]::ReadOnly)
+            $handleFacts = $getNativeFacts.Invoke(
+                $null, [object[]] @($raceHandle, $raceOriginal))
+            $factsType = $handleFacts.GetType()
+            $instanceNonPublic = [Reflection.BindingFlags]'Instance, NonPublic'
+            $factsType.GetProperty('Identity', $instanceNonPublic).GetValue($handleFacts) |
+                Should -BeExactly $raceWrite.Destination.NativeIdentity
+            $factsType.GetProperty('PermissionEvidence', $instanceNonPublic).GetValue($handleFacts) |
+                Should -BeExactly $raceWrite.Destination.PermissionEvidence
+            $factsType.GetProperty('OwnerOnlyAccess', $instanceNonPublic).GetValue($handleFacts) |
+                Should -BeTrue
+            $factsType.GetProperty('FileReadOnly', $instanceNonPublic).GetValue($handleFacts) |
+                Should -BeFalse
+        }
+        finally {
+            $raceHandle.Dispose()
+            if (Test-Path -LiteralPath $raceOriginal -PathType Leaf) {
+                [IO.File]::SetAttributes($raceOriginal, [IO.FileAttributes]::Normal)
+            }
+        }
         $moveSource = $script:GraphKitAuthStageCaptureType::CreateDirectoryOwnerOnly(
             $root, 'move-source')
         $moveDestination = Join-Path $root 'move-destination'
@@ -2589,7 +2691,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $false)
         $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $false)
         $sealed = $script:GraphKitAuthStageCaptureType::InspectFile($destination, 'candidate.dll')
-        $sealed.OwnerSid | Should -BeExactly $currentSid.Value
+        $sealed.OwnerSid | Should -BeExactly $sealed.CurrentOwnerSid
+        $sealed.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         $sealed.ExactOwnerOnlyAccess | Should -BeTrue
         $sealed.OwnerWritable | Should -BeFalse
         $sealed.FileReadOnly | Should -BeTrue
@@ -2598,7 +2701,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $true)
         $script:GraphKitAuthStageCaptureType::SetOwnerOnly($captured, $false, $true)
         $unsealed = $script:GraphKitAuthStageCaptureType::InspectFile($destination, 'candidate.dll')
-        $unsealed.OwnerSid | Should -BeExactly $currentSid.Value
+        $unsealed.OwnerSid | Should -BeExactly $unsealed.CurrentOwnerSid
+        $unsealed.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         $unsealed.AccessRulesProtected | Should -BeTrue
         $unsealed.HasInheritedAccessRules | Should -BeFalse
         $unsealed.OwnerOnlyAccess | Should -BeTrue
@@ -2642,7 +2746,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $ordinary = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
             $source, 'candidate.dll', $destination, 'candidate.dll', $false)
         $ordinary.DestinationInitial.OwnerOnlyAccess | Should -BeFalse
-        $ordinary.Destination.OwnerSid | Should -BeExactly $currentSid.Value
+        $ordinary.Destination.OwnerSid | Should -BeExactly $ordinary.Destination.CurrentOwnerSid
+        $ordinary.Destination.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         $ordinary.Destination.AccessRulesProtected | Should -BeTrue
         $ordinary.Destination.HasInheritedAccessRules | Should -BeFalse
         $ordinary.Destination.OwnerOnlyAccess | Should -BeTrue
@@ -2654,7 +2759,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             Should -BeTrue
         $sealed.DestinationInitial.AccessRulesProtected | Should -BeTrue
         $sealed.DestinationInitial.HasInheritedAccessRules | Should -BeFalse
-        $sealed.Destination.OwnerSid | Should -BeExactly $currentSid.Value
+        $sealed.Destination.OwnerSid | Should -BeExactly $sealed.Destination.CurrentOwnerSid
+        $sealed.Destination.CurrentIdentitySid | Should -BeExactly $currentSid.Value
         $sealed.Destination.AccessRulesProtected | Should -BeTrue
         $sealed.Destination.HasInheritedAccessRules | Should -BeFalse
         $sealed.Destination.OwnerOnlyAccess | Should -BeTrue

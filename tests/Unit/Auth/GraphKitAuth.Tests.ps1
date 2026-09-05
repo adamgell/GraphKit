@@ -2559,7 +2559,9 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
         $result = Invoke-GraphKitAuthContractsCandidateProbe -CandidatePath $candidatePath -PreloadPath $stalePath
 
         $result.ExitCode | Should -Not -Be 0 -Because 'a different preloaded assembly must never satisfy candidate inspection'
-        $result.Output | Should -Match '(?s)Default ALC already contains.*refusing\s+candidate'
+        $result.Output | Should -Match (
+            '(?s)Default ALC already contains.*refusing' +
+            '(?:\x1b\[[0-?]*[ -/]*[@-~]|\s|\|)+candidate')
     }
 
     It 'binds a fresh synthetic candidate by exact location bytes and MVID' {

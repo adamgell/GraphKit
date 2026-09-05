@@ -614,7 +614,8 @@ function Test-GraphKitAuthSealedPermission {
     if ($Evidence.OwnerWritable) { return $false }
     if ($IsWindows) {
         $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        return [string]$Evidence.OwnerSid -ceq $currentSid -and
+        return -not [string]::IsNullOrWhiteSpace([string]$Evidence.CurrentOwnerSid) -and
+            [string]$Evidence.OwnerSid -ceq [string]$Evidence.CurrentOwnerSid -and
             [string]$Evidence.CurrentIdentitySid -ceq $currentSid -and
             [bool]$Evidence.AccessRulesProtected -and
             -not [bool]$Evidence.HasInheritedAccessRules -and
@@ -622,7 +623,8 @@ function Test-GraphKitAuthSealedPermission {
             ($Directory -or [bool]$Evidence.FileReadOnly)
     }
     $expected = if ($Directory) { 0x140 } else { 0x100 } # 0500 / 0400
-    return [int]$Evidence.UnixMode -eq $expected
+    return [int]$Evidence.UnixMode -eq $expected -and
+        [uint32]$Evidence.OwnerUid -eq [uint32]$Evidence.EffectiveUid
 }
 
 function Test-GraphKitAuthOwnerOnlyWritableDirectory {
