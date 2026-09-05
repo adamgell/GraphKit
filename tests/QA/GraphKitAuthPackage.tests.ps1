@@ -452,9 +452,99 @@ public static class GraphKitAuthPackageLinkFixture
         Assert-GraphKitAuthStageCommands
         if (-not $script:stagePath) { throw 'The packed candidate has no sealed source stage to use as fixture input.' }
         $fixtureOutput = Join-Path $TestDrive ("stage-fixture-$Name-" + [guid]::NewGuid().ToString('N'))
-        New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput `
-            -FullVersion ("0.4.0-r8.fixture.$Name." + [guid]::NewGuid().ToString('N')) `
-            -PayloadSourceRoot (Join-Path $script:stagePath 'payload')
+        try {
+            $fixture = New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput `
+                -FullVersion ("0.4.0-r8.fixture.$Name." + [guid]::NewGuid().ToString('N')) `
+                -PayloadSourceRoot (Join-Path $script:stagePath 'payload')
+            $fixture | Add-Member -NotePropertyName TestOutputRoot -NotePropertyValue $fixtureOutput
+            return $fixture
+        }
+        catch {
+            $primaryFailure = $_
+            try { Remove-GraphKitAuthTestFixtureOutputRoot -OutputRoot $fixtureOutput }
+            catch {
+                throw [AggregateException]::new(
+                    'GraphKit.Auth stage fixture creation and bounded cleanup both failed.',
+                    [Exception[]]@($primaryFailure.Exception, $_.Exception))
+            }
+            throw $primaryFailure
+        }
+    }
+
+    function Resolve-GraphKitAuthTestFixtureOutputRoot {
+        param([Parameter(Mandatory)][string] $OutputRoot)
+        $outputRoot = [IO.Path]::GetFullPath($OutputRoot)
+        $testDriveRoot = [IO.Path]::GetFullPath([string] $TestDrive).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)
+        $comparison = if ($IsWindows) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else { [StringComparison]::Ordinal }
+        if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($outputRoot), $testDriveRoot, $comparison) -or
+            [IO.Path]::GetFileName($outputRoot) -notmatch '^stage-fixture-.+-[0-9a-f]{32}$') {
+            throw 'GraphKit.Auth test stage cleanup refused a non-fixture output root.'
+        }
+        return $outputRoot
+    }
+
+    function Assert-GraphKitAuthTestPhysicalFixtureTree {
+        param([Parameter(Mandatory)][string] $OutputRoot)
+        if (-not [IO.Directory]::Exists($OutputRoot)) { return }
+        $rootItem = Get-Item -LiteralPath $OutputRoot -Force -ErrorAction Stop
+        if (-not (Test-GraphKitAuthTestAclMutationSafe -Item $rootItem)) {
+            throw 'GraphKit.Auth test stage cleanup refused a link or reparse root.'
+        }
+        $items = @(
+            Get-ChildItem -LiteralPath $OutputRoot -Recurse -Force -ErrorAction Stop
+        ) + @($rootItem)
+        if (@($items | Where-Object {
+            -not (Test-GraphKitAuthTestAclMutationSafe -Item $_)
+        }).Count -gt 0) {
+            throw 'GraphKit.Auth test stage cleanup refused a link or reparse entry.'
+        }
+    }
+
+    function Remove-GraphKitAuthTestFixtureOutputRoot {
+        param([Parameter(Mandatory)][string] $OutputRoot)
+        $outputRoot = Resolve-GraphKitAuthTestFixtureOutputRoot -OutputRoot $OutputRoot
+        if ([IO.Directory]::Exists($outputRoot)) {
+            Assert-GraphKitAuthTestPhysicalFixtureTree -OutputRoot $outputRoot
+            Set-GraphKitAuthTestTreeWritable -Path $outputRoot
+            [IO.Directory]::Delete($outputRoot, $true)
+        }
+    }
+
+    function Remove-GraphKitAuthTestStageFixture {
+        param([Parameter(Mandatory)] $Fixture)
+        $outputRoot = Resolve-GraphKitAuthTestFixtureOutputRoot `
+            -OutputRoot ([string] $Fixture.TestOutputRoot)
+        $stagePath = [IO.Path]::GetFullPath([string] $Fixture.StagePath)
+        $fullVersion = [string] $Fixture.FullVersion
+        $manifestSha256 = [string] $Fixture.ManifestSha256
+        Assert-GraphKitAuthSafeSegment -Value $fullVersion -Kind 'test fixture full version'
+        if ($manifestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'GraphKit.Auth test stage cleanup refused an invalid manifest digest.'
+        }
+        $expectedStagePath = [IO.Path]::GetFullPath([IO.Path]::Combine(
+            $outputRoot,
+            'GraphKit.Auth',
+            'stage',
+            $fullVersion,
+            $manifestSha256))
+        $comparison = if ($IsWindows) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else { [StringComparison]::Ordinal }
+        if (-not [string]::Equals($stagePath, $expectedStagePath, $comparison)) {
+            throw 'GraphKit.Auth test stage cleanup refused a mismatched stage path.'
+        }
+        Assert-GraphKitAuthTestPhysicalFixtureTree -OutputRoot $outputRoot
+        if ([IO.Directory]::Exists($stagePath)) {
+            Set-GraphKitAuthTestStageWritable -StagePath $stagePath
+        }
+        Remove-GraphKitAuthTestFixtureOutputRoot -OutputRoot $outputRoot
     }
 
     function Invoke-GraphKitAuthStageMutation {
@@ -975,13 +1065,13 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             [IO.File]::WriteAllText($manifestPath, '{"forged":true}')
             Set-GraphKitAuthTestStageSealed -StagePath $fixture.StagePath
 
-            { Invoke-GraphKitAuthPrepareClean -OutputRoot (Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) } |
+            { Invoke-GraphKitAuthPrepareClean -OutputRoot $fixture.TestOutputRoot } |
                 Should -Throw '*manifest digest does not match*'
             Test-Path -LiteralPath $fixture.StagePath -PathType Container | Should -BeTrue
             (Get-Content -LiteralPath $manifestPath -Raw) | Should -BeExactly '{"forged":true}'
         }
         finally {
-            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -1012,7 +1102,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
         finally {
             Remove-GraphKitAuthTestMutationArtifacts -Artifacts $cleanupArtifacts
-            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -1026,8 +1116,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Should -Not -Throw
         }
         finally {
-            Invoke-GraphKitAuthPrepareClean -OutputRoot (
-                Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) | Out-Null
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -1055,7 +1144,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         }
         finally {
             Remove-GraphKitAuthTestMutationArtifacts -Artifacts $cleanupArtifacts
-            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -2028,8 +2117,8 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         @{ RootKind = 'stage' }
     ) {
         $fixture = New-GraphKitAuthStageFixture -Name ('prepare-root-policy-' + $RootKind)
-        $authRoot = Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent
-        $outputRoot = Split-Path $authRoot -Parent
+        $outputRoot = $fixture.TestOutputRoot
+        $authRoot = Join-Path $outputRoot 'GraphKit.Auth'
         $roots = [ordered]@{
             auth = $authRoot
             capture = Join-Path $authRoot 'capture'
@@ -2072,8 +2161,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Should -BeExactly $versionSecurityBefore
         }
         finally {
-            Set-GraphKitAuthTestTreeWritable -Path $outputRoot
-            Remove-Item -LiteralPath $outputRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -2451,8 +2539,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             }
         }
         finally {
-            Invoke-GraphKitAuthPrepareClean -OutputRoot (
-                Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) | Out-Null
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -3006,17 +3093,13 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
     It 'rejects a sealed stage after Windows ACL <Kind> mutation' -ForEach $windowsAclMutationCases -AllowNullOrEmptyForEach {
         $fixture = New-GraphKitAuthStageFixture -Name ('windows-acl-' + $Kind.Replace(' ', '-'))
-        $fixtureOutput = Split-Path (
-            Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) -Parent
         try {
             Set-GraphKitAuthWindowsAclMutation -StagePath $fixture.StagePath -Kind $Kind
             { Test-GraphKitAuthSealedStage -StagePath $fixture.StagePath -FullVersion $fixture.FullVersion } |
                 Should -Throw
         }
         finally {
-            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
-            Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
-            [IO.Directory]::Delete($fixtureOutput, $true)
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 
@@ -3024,8 +3107,6 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         if ($IsWindows) { @(@{}) } else { @() }
     ) -AllowNullOrEmptyForEach {
         $fixture = New-GraphKitAuthStageFixture -Name 'windows-wrong-owner-evidence'
-        $fixtureOutput = Split-Path (
-            Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) -Parent
         try {
             $evidence = $script:GraphKitAuthStageCaptureType::InspectFile($fixture.StagePath, 'manifest.json')
             $mutated = $evidence | Select-Object *
@@ -3035,9 +3116,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Should -BeFalse
         }
         finally {
-            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
-            Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
-            [IO.Directory]::Delete($fixtureOutput, $true)
+            Remove-GraphKitAuthTestStageFixture -Fixture $fixture
         }
     }
 

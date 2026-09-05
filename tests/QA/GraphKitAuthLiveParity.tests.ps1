@@ -2046,29 +2046,59 @@ finally {
         $Invocation.Data.failureCode | Should -BeExactly $Code
     }
 
-    function Remove-Task8ResidualFixturePath {
+    function Resolve-Task8ResidualFixturePath {
         param([AllowNull()][string] $Path)
-        if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+        if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
         $full = [IO.Path]::GetFullPath($Path)
-        $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-        if (-not $full.StartsWith($temp, [StringComparison]::Ordinal) -or
+        $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)
+        $comparison = if ($IsWindows) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else { [StringComparison]::Ordinal }
+        if (-not [string]::Equals(
+                [IO.Path]::GetDirectoryName($full), $temp, $comparison) -or
             [IO.Path]::GetFileName($full) -notmatch '^graphkit-task8-') {
             throw 'Task 8 fixture cleanup refused a non-literal residual path.'
         }
+        return $full
+    }
+
+    function Remove-Task8ResidualFixturePath {
+        param(
+            [AllowNull()][string] $Path,
+            [switch] $OwnedHardLink
+        )
+        $full = Resolve-Task8ResidualFixturePath -Path $Path
+        if ($null -eq $full -or -not (Test-Path -LiteralPath $full)) { return }
         $rootItem = Get-Item -LiteralPath $full -Force -ErrorAction Stop
-        if (-not [string]::IsNullOrEmpty([string] $rootItem.LinkType) -or
+        if ($OwnedHardLink) {
+            if ($rootItem.PSIsContainer -or
+                ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [string] $rootItem.LinkType -cne 'HardLink' -or
+                [IO.Path]::GetFileName($full) -cnotmatch
+                    '^graphkit-task8-link-target-[0-9a-f]{32}$') {
+                throw 'Task 8 owned hard-link cleanup refused an unexpected entry.'
+            }
+            $paths = @($rootItem)
+        }
+        elseif (-not [string]::IsNullOrEmpty([string] $rootItem.LinkType) -or
             ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             Remove-Item -LiteralPath $full -Force -ErrorAction Stop
             return
         }
-        $paths = @(
-            Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue |
-                Sort-Object { $_.FullName.Length } -Descending
-        ) + @($rootItem)
+        else {
+            $paths = @(
+                Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue |
+                    Sort-Object { $_.FullName.Length } -Descending
+            ) + @($rootItem)
+        }
         if ($IsWindows) {
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
             foreach ($item in $paths) {
-                if (-not [string]::IsNullOrEmpty([string] $item.LinkType) -or
+                if ((-not $OwnedHardLink -and
+                        -not [string]::IsNullOrEmpty([string] $item.LinkType)) -or
                     ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                     continue
                 }
@@ -2116,7 +2146,8 @@ finally {
         }
         else {
             foreach ($item in $paths) {
-                if (-not [string]::IsNullOrEmpty([string] $item.LinkType) -or
+                if ((-not $OwnedHardLink -and
+                        -not [string]::IsNullOrEmpty([string] $item.LinkType)) -or
                     ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                     continue
                 }
@@ -2136,6 +2167,25 @@ finally {
             }
         }
         Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+    }
+
+    function Remove-Task8OwnedHardLinkFixtureTree {
+        param(
+            [AllowNull()][string] $OutsidePath,
+            [AllowNull()][string] $RootPath
+        )
+        $failures = [Collections.Generic.List[Exception]]::new()
+        try {
+            Remove-Task8ResidualFixturePath -Path $OutsidePath -OwnedHardLink
+        }
+        catch { $failures.Add($_.Exception) | Out-Null }
+        try { Remove-Task8ResidualFixturePath -Path $RootPath }
+        catch { $failures.Add($_.Exception) | Out-Null }
+        if ($failures.Count -gt 0) {
+            throw [AggregateException]::new(
+                'Task 8 owned hard-link fixture cleanup failed.',
+                $failures.ToArray())
+        }
     }
 
     function New-Task8ModeRecordFixture {
@@ -3187,8 +3237,8 @@ Describe 'Task 8 isolated import, routing, and cleanup' {
                 (Test-Path -LiteralPath $root -PathType Container) | Should -BeTrue
             }
             finally {
-                Remove-Task8ResidualFixturePath -Path $root
-                Remove-Task8ResidualFixturePath -Path $outside
+                Remove-Task8OwnedHardLinkFixtureTree `
+                    -OutsidePath $outside -RootPath $root
             }
             if ($null -ne $outside) {
                 (Test-Path -LiteralPath $outside) | Should -BeFalse
@@ -3234,8 +3284,8 @@ Describe 'Task 8 isolated import, routing, and cleanup' {
                 (Test-Path -LiteralPath $root -PathType Container) | Should -BeTrue
             }
             finally {
-                Remove-Task8ResidualFixturePath -Path $root
-                Remove-Task8ResidualFixturePath -Path $outside
+                Remove-Task8OwnedHardLinkFixtureTree `
+                    -OutsidePath $outside -RootPath $root
             }
             if ($null -ne $outside) {
                 (Test-Path -LiteralPath $outside) | Should -BeFalse
