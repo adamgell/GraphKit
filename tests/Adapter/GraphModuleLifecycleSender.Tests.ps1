@@ -460,7 +460,6 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
         }
         finally {
             try { $client.CancelPendingRequests() } catch { }
-            $client.Dispose()
             if ($null -ne $sendAsync -and -not $sendReceived) {
                 if ($sendAsync.AsyncWaitHandle.WaitOne(10000)) {
                     try { $null = $sendPipeline.EndInvoke($sendAsync) } catch { }
@@ -477,6 +476,7 @@ Describe 'Send-GraphHttpRequest module lifecycle adapter' {
                     try { $stopPipeline.Stop() } catch { }
                 }
             }
+            try { $client.Dispose() } catch { }
             if ($null -ne $sendPipeline) { $sendPipeline.Dispose() }
             if ($null -ne $stopPipeline) { $stopPipeline.Dispose() }
             if ($null -ne $sendRunspace) {

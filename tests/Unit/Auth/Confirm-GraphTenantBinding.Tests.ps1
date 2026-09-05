@@ -188,7 +188,7 @@ Describe 'Confirm-GraphTenantBinding' {
 
         It 'performs the proof on a new fingerprint and records the binding' {
             $cache = @{}
-            $transport = { param($Context, $Descriptor, $Uri) $script:proofCalls++; return $script:proofEnvelope }
+            $transport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) $script:proofCalls++; return $script:proofEnvelope }
 
             $result = InModuleScope GraphKit -ArgumentList $cache, (New-TestContext), (New-TestTokenResult), $transport {
                 param($Cache, $Context, $TokenResult, $Transport)
@@ -203,7 +203,7 @@ Describe 'Confirm-GraphTenantBinding' {
 
         It 'skips the proof call when the binding is already cached' {
             $cache = @{}
-            $transport = { param($Context, $Descriptor, $Uri) $script:proofCalls++; return $script:proofEnvelope }
+            $transport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) $script:proofCalls++; return $script:proofEnvelope }
 
             $null = InModuleScope GraphKit -ArgumentList $cache, (New-TestContext), (New-TestTokenResult), $transport {
                 param($Cache, $Context, $TokenResult, $Transport)
@@ -221,7 +221,7 @@ Describe 'Confirm-GraphTenantBinding' {
 
         It 're-proves when the fingerprint changes even with the same generation and tenant' {
             $cache = @{}
-            $transport = { param($Context, $Descriptor, $Uri) $script:proofCalls++; return $script:proofEnvelope }
+            $transport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) $script:proofCalls++; return $script:proofEnvelope }
 
             $null = InModuleScope GraphKit -ArgumentList $cache, (New-TestContext), (New-TestTokenResult -Fingerprint 'fp-a'), $transport {
                 param($Cache, $Context, $TokenResult, $Transport)
@@ -247,7 +247,7 @@ Describe 'Confirm-GraphTenantBinding' {
             $tokenResult = New-TestTokenResult
             $tokenResult.$Field = $Value
             $transport = {
-                param($Context, $Descriptor, $Uri)
+                param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline)
                 $script:proofCalls++
                 return $script:proofEnvelope
             }
@@ -267,7 +267,7 @@ Describe 'Confirm-GraphTenantBinding' {
         It 'cannot reuse one empty-metadata binding for two distinct bearer tokens' {
             $cache = @{}
             $transport = {
-                param($Context, $Descriptor, $Uri)
+                param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline)
                 $script:proofCalls++
                 return $script:proofEnvelope
             }
@@ -311,7 +311,7 @@ Describe 'Confirm-GraphTenantBinding' {
         It 'still proves when a provider claims a tenant without a recorded binding' {
             $cache = @{}
             $script:proofEnvelope = New-TestProofEnvelope
-            $transport = { param($Context, $Descriptor, $Uri) $script:proofCalls++; return $script:proofEnvelope }
+            $transport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) $script:proofCalls++; return $script:proofEnvelope }
 
             # The result already carries the tenant id (a provider's claim); the
             # prover must not trust it and must still issue the proof read.
@@ -330,7 +330,7 @@ Describe 'Confirm-GraphTenantBinding' {
                 Outcome = 'Succeeded'
                 Data    = @{ value = @( @{ id = $script:OtherTenantId.ToString() } ) }
             }
-            $transport = { param($Context, $Descriptor, $Uri) return $script:proofEnvelope }
+            $transport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) return $script:proofEnvelope }
 
             $message = InModuleScope GraphKit -ArgumentList $cache, (New-TestContext), (New-TestTokenResult), $transport {
                 param($Cache, $Context, $TokenResult, $Transport)
@@ -468,7 +468,10 @@ Describe 'Confirm-GraphTenantBinding' {
                         Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult `
                             -ProofCache $Cache -CancellationToken $CancellationToken `
                             -RemainingDeadline ([TimeSpan]::Zero) `
-                            -ProofTransport { throw 'proof transport must not run at the cancelled boundary' }
+                            -ProofTransport {
+                                param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline)
+                                throw 'proof transport must not run at the cancelled boundary'
+                            }
                         return $null
                     }
                     catch {
@@ -579,7 +582,7 @@ Describe 'Send-GraphHttpRequest tenant-proof wiring' {
             $tokenSource = New-TestTokenSource -Fingerprint 'fp-verified' -Generation 'g1' -VerifiedTenantId $script:TenantId.ToString()
             $prover = { param($Context, $TokenResult) $script:proverCalls++ }
             $script:proofEnvelope = New-TestProofEnvelope
-            $proofTransport = { param($Context, $Descriptor, $Uri) $script:proofCalls++; return $script:proofEnvelope }
+            $proofTransport = { param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline) $script:proofCalls++; return $script:proofEnvelope }
 
             $result = InModuleScope GraphKit -ArgumentList $authority, $tokenSource, $prover, $proofTransport, $script:TenantId {
                 param($Authority, $TokenSource, $Prover, $ProofTransport, $TenantId)
