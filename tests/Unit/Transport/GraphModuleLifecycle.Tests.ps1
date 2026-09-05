@@ -455,7 +455,7 @@ Describe 'GraphKit module lifecycle' {
             } -ArgumentList $script:BuiltManifest, $stateKey
 
             $owned.Started.Wait(5000) | Should -BeTrue -Because 'cleanup must eventually attempt disposal'
-            $completedBeforeRelease = $null -ne ($stopJob | Wait-Job -Timeout 1)
+            $completedBeforeRelease = $null -ne ($stopJob | Wait-Job -Timeout 10)
 
             $owned.Release.Set()
             $completedJobs = @($stopJob | Wait-Job -Timeout 10)

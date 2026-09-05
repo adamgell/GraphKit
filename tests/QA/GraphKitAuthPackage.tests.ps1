@@ -550,6 +550,77 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $taskSource | Should -Match 'if \(\$LASTEXITCODE -ne 1\)' `
             -Because 'only git check-ignore exit 1 proves the unrelated sentinel is not ignored'
         { Assert-GraphKitAuthStageCommands } | Should -Not -Throw
+
+        $fixtureRoot = Join-Path $TestDrive ('quarantine-' + [guid]::NewGuid().ToString('N'))
+        $generatedRoot = Join-Path $fixtureRoot 'src/GraphKit.Auth/GraphKit.Auth/bin'
+        $quarantine = $null
+        try {
+            $null = [IO.Directory]::CreateDirectory($generatedRoot)
+            [IO.File]::WriteAllText((Join-Path $generatedRoot 'generated.dll'), 'fixture')
+
+            $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $fixtureRoot
+
+            $relativeQuarantine = [IO.Path]::GetRelativePath(
+                [IO.Path]::GetFullPath($fixtureRoot),
+                [IO.Path]::GetFullPath($quarantine))
+            [IO.Path]::IsPathRooted($relativeQuarantine) | Should -BeFalse
+            $relativeQuarantine | Should -Not -Match '^\.\.(?:[\\/]|$)' `
+                -Because 'generated roots must be renamed onto the repository volume'
+            Test-Path -LiteralPath $generatedRoot | Should -BeFalse
+            Test-Path -LiteralPath (
+                Join-Path $quarantine 'src__GraphKit.Auth__GraphKit.Auth__bin/generated.dll') `
+                -PathType Leaf | Should -BeTrue
+        }
+        finally {
+            if ($quarantine -and (Test-Path -LiteralPath $quarantine)) {
+                Remove-Item -LiteralPath $quarantine -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+            }
+        }
+    }
+
+    It 'preserves the primary build failure when fallback quarantine also fails' {
+        $observed = & {
+            $tasks = @{}
+            function task {
+                param([string] $Name, [scriptblock] $Action)
+                $tasks[$Name] = $Action
+            }
+
+            . $script:taskPath
+
+            $cleanupCalls = [Collections.Generic.List[string]]::new()
+            function Initialize-GraphKitAuthStageCapture {}
+            function Initialize-GraphKitAuthBuildAuthorityRoot {
+                throw [InvalidOperationException]::new('injected primary build failure')
+            }
+            function Invoke-GraphKitAuthLiteralQuarantine {
+                param([string] $RepositoryRoot)
+                $cleanupCalls.Add($RepositoryRoot)
+                throw [IO.IOException]::new('injected secondary quarantine failure')
+            }
+
+            $BuildRoot = Join-Path $TestDrive ('primary-failure-' + [guid]::NewGuid().ToString('N'))
+            $caught = $null
+            try {
+                & $tasks['Build_GraphKitAuth']
+            }
+            catch {
+                $caught = $_
+            }
+
+            [pscustomobject]@{
+                Error = $caught
+                CleanupCalls = $cleanupCalls.Count
+            }
+        }
+
+        $observed.CleanupCalls | Should -Be 1
+        $observed.Error | Should -Not -BeNullOrEmpty
+        $observed.Error.Exception.GetType().FullName | Should -BeExactly 'System.InvalidOperationException'
+        $observed.Error.Exception.Message | Should -BeExactly 'injected primary build failure'
     }
 
     It 'refuses an existing full-version stage without changing its bytes' {

@@ -212,11 +212,13 @@ function Confirm-GraphTenantBinding {
     if ($null -eq $transport) {
         $transport = {
             param($Context, $Descriptor, $Uri, $CancellationToken, $RemainingDeadline)
-            $deadlineSeconds = [int] [Math]::Ceiling(([TimeSpan] $RemainingDeadline).TotalSeconds)
+            $deadlineSecondsValue = [Math]::Min(
+                86400.0,
+                [Math]::Ceiling(([TimeSpan] $RemainingDeadline).TotalSeconds))
+            $deadlineSeconds = [int] $deadlineSecondsValue
             if ($deadlineSeconds -lt 1) {
                 throw (New-GraphTenantBindingDeadlineException)
             }
-            $deadlineSeconds = [Math]::Min(86400, $deadlineSeconds)
             Invoke-GraphRetry -Context $Context -Descriptor $Descriptor -Uri $Uri -Method GET `
                 -Headers @{} -Body $null -CancellationToken $CancellationToken `
                 -DeadlineSeconds $deadlineSeconds

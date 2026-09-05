@@ -990,7 +990,11 @@ function Invoke-GraphKitAuthPrepareClean {
 
 function Invoke-GraphKitAuthLiteralQuarantine {
     param([Parameter(Mandatory)][string] $RepositoryRoot)
-    $quarantine = Join-Path ([IO.Path]::GetTempPath()) ('graphkit-auth-task5-' + [guid]::NewGuid().ToString('N'))
+    # Directory.Move is the identity-preserving quarantine primitive. Keep its
+    # destination beneath the repository output tree so source and destination
+    # remain on the same volume instead of depending on the OS temp volume.
+    $quarantine = Join-Path (Join-Path $RepositoryRoot 'output') `
+        ('GraphKit.Auth.quarantine-' + [guid]::NewGuid().ToString('N'))
     $null = [IO.Directory]::CreateDirectory($quarantine)
     $relativeRoots = @(
         'src/GraphKit.Auth/GraphKit.Auth.Contracts/bin'
@@ -1382,6 +1386,7 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
         $payloadSource = Join-Path $publishRoot 'payload'
         $resultRoot = Join-Path $authOutput "dotnet-test/$runId"
         $quarantine = $null
+        $primaryFailure = $null
         try {
             $null = Initialize-GraphKitAuthBuildAuthorityRoot -OutputRoot (Join-Path $BuildRoot 'output')
             if ((& dotnet --version) -cne '10.0.400') { throw 'GraphKit.Auth requires dotnet SDK 10.0.400 exactly.' }
@@ -1456,11 +1461,21 @@ if (-not $SkipTaskRegistration -and (Get-Command task -ErrorAction SilentlyConti
             $version = & (Join-Path $BuildRoot 'scripts/Get-GraphKitTrainVersion.ps1') -RepositoryRoot $BuildRoot -AsObject
             $script:GraphKitAuthStage = New-GraphKitAuthSealedStage -OutputRoot (Join-Path $BuildRoot 'output') -FullVersion $version.version -PayloadSourceRoot $payloadSource
         }
+        catch {
+            $primaryFailure = $_
+            throw
+        }
         finally {
             if ($null -eq $quarantine) {
-                $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $BuildRoot
-                $script:GraphKitAuthQuarantine = $quarantine
-                Write-Host "GraphKit.Auth generated roots quarantined at '$quarantine'."
+                try {
+                    $quarantine = Invoke-GraphKitAuthLiteralQuarantine -RepositoryRoot $BuildRoot
+                    $script:GraphKitAuthQuarantine = $quarantine
+                    Write-Host "GraphKit.Auth generated roots quarantined at '$quarantine'."
+                }
+                catch {
+                    if ($null -eq $primaryFailure) { throw }
+                    Write-Warning 'GraphKit.Auth generated-root quarantine also failed; the earlier build failure remains authoritative.'
+                }
             }
         }
     }

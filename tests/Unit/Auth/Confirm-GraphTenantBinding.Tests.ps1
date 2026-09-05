@@ -390,6 +390,14 @@ Describe 'Confirm-GraphTenantBinding' {
             $script:proofCall.Scope.CoarseKey | Should -BeExactly 'Global|00000000-0000-0000-0000-000000000001|00000000-0000-0000-0000-000000000010|Read'
             $script:proofCall.Scope.LeafKey | Should -BeExactly 'Global|00000000-0000-0000-0000-000000000001|00000000-0000-0000-0000-000000000010|Read|Graph.Directory'
             $script:proofCall.DeadlineSeconds | Should -Be 17
+
+            $maximumDeadlineCache = @{}
+            $null = InModuleScope GraphKit -ArgumentList $maximumDeadlineCache, (New-TestContext), (New-TestTokenResult) {
+                param($Cache, $Context, $TokenResult)
+                Confirm-GraphTenantBinding -Context $Context -TokenResult $TokenResult `
+                    -ProofCache $Cache -RemainingDeadline ([TimeSpan]::MaxValue)
+            }
+            $script:proofCall.DeadlineSeconds | Should -Be 86400
         }
 
         It 'forwards the caller cancellation token into the proof retry pipeline' {
