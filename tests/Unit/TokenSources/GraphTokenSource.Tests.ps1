@@ -40,13 +40,8 @@ public static class Task6CredentialFixture
 
     public static SecureString CreateSecret()
     {
-        return CreateSecret("task6-secret");
-    }
-
-    public static SecureString CreateSecret(string value)
-    {
         SecureString secret = new();
-        foreach (char character in value) secret.AppendChar(character);
+        foreach (char character in "task6-secret") secret.AppendChar(character);
         secret.MakeReadOnly();
         return secret;
     }
@@ -757,7 +752,12 @@ Describe 'GraphTokenSource' {
                 }
             }
             Mock Resolve-GraphVaultPassword -ModuleName GraphKit {
-                [GraphKit.Tests.Task6CredentialFixture]::CreateSecret($passwordText)
+                $secret = [Security.SecureString]::new()
+                foreach ($character in $passwordText.ToCharArray()) {
+                    $secret.AppendChar($character)
+                }
+                $secret.MakeReadOnly()
+                $secret
             }
 
             $source = $null

@@ -560,9 +560,9 @@ function Get-GraphFingerprint {
 function Get-GraphPfxSnapshot {
     <#
         Read a persisted PFX once and bind its canonical path, exact bytes and
-        SHA-256 identity together. Callers that construct a certificate use the
-        returned Bytes property rather than reopening the path, so the material
-        cannot change between generation verification and import.
+        SHA-256 identity together. The compiled bridge imports the returned
+        Bytes directly. The legacy factory seam instead reopens the bound
+        canonical path after the snapshot bytes have been zeroed.
     #>
     [CmdletBinding()]
     [OutputType([System.Management.Automation.PSCustomObject])]
@@ -649,9 +649,10 @@ function Get-GraphCredentialGeneration {
         [Parameter(Mandatory)]
         [hashtable] $TenantProfile,
 
-        # Internal snapshot seam: the PFX resolver has already read the exact
-        # bytes it will import, so it supplies their digest/path to avoid a
-        # second path read and a generation-to-load TOCTOU window.
+        # Internal snapshot seam: the PFX resolver supplies the already-bound
+        # digest/path so generation derivation never re-resolves a caller's
+        # relative path. The compiled path imports the captured bytes, while
+        # the legacy compatibility factory reopens the captured canonical path.
         [string] $PfxContentSha256,
 
         [string] $PfxCanonicalPath

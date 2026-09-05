@@ -148,6 +148,7 @@ BeforeAll {
             [bool] $Executed = $true,
             [switch] $ForGenerator,
             [switch] $IncludeGraphKitAuth,
+            [switch] $NoRequiredModules,
             [string] $BaseVersion = '0.4.0',
             [switch] $DirtySource,
             [int] $Total = 1462
@@ -208,6 +209,18 @@ internal static class Fixture { internal const string Value = "public fixture"; 
             "    RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')`n"
         }
         else { '' }
+        $requiredModulesLine = if ($NoRequiredModules) {
+            '    RequiredModules = @()'
+        }
+        else {
+            "    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' })"
+        }
+        $dependenciesMarkup = if ($NoRequiredModules) {
+            ''
+        }
+        else {
+            '<dependencies><dependency id="Microsoft.Graph.Authentication" version="2.38.1" /></dependencies>'
+        }
 
         $payloads = [ordered] @{
             'Data/Operations/Probe.List.psd1' = "@{ SchemaVersion = 1; Type = 'Probe'; Operation = 'List' }`n"
@@ -222,7 +235,7 @@ internal static class Fixture { internal const string Value = "public fixture"; 
     Copyright = '(c) Fixture Author'
     Description = 'Fixture GraphKit release-proof module package.'
     FunctionsToExport = @('Get-GraphProbe')
-$requiredAssembliesLine    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' })
+$requiredAssembliesLine$requiredModulesLine
     PrivateData = @{ PSData = @{
         Tags = @('Fixture', 'Graph')
         LicenseUri = 'https://opensource.org/licenses/MIT'
@@ -264,7 +277,7 @@ $requiredAssembliesLine    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.
             }
             Add-GraphKitFixtureArchiveText -Archive $archive -EntryName 'GraphKit.nuspec' -Content @"
 <?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"><metadata><id>GraphKit</id><version>$version</version><authors>Fixture Author</authors><owners>Fixture Author</owners><requireLicenseAcceptance>false</requireLicenseAcceptance><licenseUrl>https://opensource.org/licenses/MIT</licenseUrl><description>Fixture GraphKit release-proof module package.</description><releaseNotes>Fixture release notes.</releaseNotes><copyright>(c) Fixture Author</copyright><tags>Fixture Graph PSModule PSIncludes_Function PSFunction_Get-GraphProbe PSCommand_Get-GraphProbe</tags><dependencies><dependency id="Microsoft.Graph.Authentication" version="2.38.1" /></dependencies></metadata></package>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"><metadata><id>GraphKit</id><version>$version</version><authors>Fixture Author</authors><owners>Fixture Author</owners><requireLicenseAcceptance>false</requireLicenseAcceptance><licenseUrl>https://opensource.org/licenses/MIT</licenseUrl><description>Fixture GraphKit release-proof module package.</description><releaseNotes>Fixture release notes.</releaseNotes><copyright>(c) Fixture Author</copyright><tags>Fixture Graph PSModule PSIncludes_Function PSFunction_Get-GraphProbe PSCommand_Get-GraphProbe</tags>$dependenciesMarkup</metadata></package>
 "@
             Add-GraphKitFixtureArchiveText -Archive $archive -EntryName '_rels/.rels' -Content '<Relationships />'
             Add-GraphKitFixtureArchiveText -Archive $archive -EntryName '[Content_Types].xml' -Content '<Types />'
@@ -588,7 +601,7 @@ Describe 'Canonical tested release proof' {
         }
     }
 
-    It 'accepts one proof binding the module, package, full result, and every shipped file' {
+    It 'accepts one proof binding every shipped file and exact optional dependency metadata' {
         $script:fixture = New-GraphKitReleaseProofFixture
 
         $result = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
@@ -596,6 +609,18 @@ Describe 'Canonical tested release proof' {
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Output | Should -Match 'VERIFIED TESTED RELEASE'
         $result.Output | Should -Match '5 shipped file'
+
+        Remove-Item -LiteralPath $script:fixture.Root -Recurse -Force
+        $script:fixture = New-GraphKitReleaseProofFixture -NoRequiredModules
+        $withoutDependencies = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+        $withoutDependencies.ExitCode | Should -Be 0 -Because $withoutDependencies.Output
+
+        $nuspec = Get-GraphKitFixtureArchiveEntryText -Fixture $script:fixture -EntryName 'GraphKit.nuspec'
+        $withEmptyDependencies = $nuspec.Replace('</metadata>', '<dependencies /></metadata>')
+        Set-GraphKitFixtureArchiveEntryText -Fixture $script:fixture -EntryName 'GraphKit.nuspec' `
+            -Content $withEmptyDependencies
+        $emptyDependencies = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+        $emptyDependencies.ExitCode | Should -Be 0 -Because $emptyDependencies.Output
     }
 
     It 'accepts GraphKit.Auth runtime bytes when the data-file Hashtable declares the exact contracts prerequisite' {
@@ -1034,7 +1059,7 @@ Describe 'Test workflow release-proof generation' {
         Test-Path -LiteralPath (Join-Path $script:fixture.Root 'output/testResults/candidate-release-input.json') | Should -BeTrue
     }
 
-    It 'finalize emits the one proof only after the captured candidate and result pair pass' {
+    It 'finalize atomically emits one proof and preserves the candidate when replacement fails' {
         $script:fixture = New-GraphKitReleaseProofFixture -ForGenerator
         $nunitBytes = [System.IO.File]::ReadAllBytes($script:fixture.NUnitPath)
         $pesterObjectBytes = [System.IO.File]::ReadAllBytes($script:fixture.PesterObjectPath)
@@ -1056,6 +1081,22 @@ Describe 'Test workflow release-proof generation' {
         $proof.testRun.summary.total | Should -Be 1462
         $proof.testRun.summary.notRun | Should -Be 0
         Test-Path -LiteralPath (Join-Path $script:fixture.Root 'output/testResults/candidate-release-input.json') | Should -BeFalse
+
+        Remove-Item -LiteralPath $script:fixture.Root -Recurse -Force
+        $script:fixture = New-GraphKitReleaseProofFixture -ForGenerator
+        $nunitBytes = [System.IO.File]::ReadAllBytes($script:fixture.NUnitPath)
+        $pesterObjectBytes = [System.IO.File]::ReadAllBytes($script:fixture.PesterObjectPath)
+        (Invoke-GraphKitReleaseProofGenerator -Fixture $script:fixture -Stage Capture).ExitCode | Should -Be 0
+        [System.IO.File]::WriteAllBytes($script:fixture.NUnitPath, $nunitBytes)
+        [System.IO.File]::WriteAllBytes($script:fixture.PesterObjectPath, $pesterObjectBytes)
+        New-Item -ItemType Directory -Path $script:fixture.ProofPath | Out-Null
+
+        $failedReplacement = Invoke-GraphKitReleaseProofGenerator -Fixture $script:fixture -Stage Finalize
+
+        $failedReplacement.ExitCode | Should -Not -Be 0
+        Test-Path -LiteralPath (
+            Join-Path $script:fixture.Root 'output/testResults/candidate-release-input.json') `
+            -PathType Leaf | Should -BeTrue
     }
 
     It 'finalize refuses module drift after capture and leaves no tested proof' {

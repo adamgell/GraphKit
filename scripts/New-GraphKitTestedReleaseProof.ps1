@@ -410,8 +410,8 @@ try {
         throw "The staged tested release proof failed canonical verification: $flatVerificationOutput"
     }
 
-    Remove-Item -LiteralPath $candidatePath -Force
     [System.IO.File]::Move($stagedProofPath, $proofPath, $true)
+    Remove-Item -LiteralPath $candidatePath -Force
 }
 finally {
     Remove-Item -LiteralPath $stagedProofPath -Force -ErrorAction SilentlyContinue

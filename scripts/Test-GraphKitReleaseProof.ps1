@@ -414,7 +414,7 @@ try {
     if ($null -eq $metadataNode) {
         throw "Package '$($package.Name)' has no canonical nuspec metadata node."
     }
-    $supportedMetadataNames = @(
+    $requiredMetadataNames = @(
         'id',
         'version',
         'authors',
@@ -424,9 +424,10 @@ try {
         'description',
         'releaseNotes',
         'copyright',
-        'tags',
-        'dependencies'
+        'tags'
     )
+    $supportedMetadataNames = @($requiredMetadataNames) + 'dependencies'
+    $dependenciesRequired = @($builtManifest.RequiredModules).Count -gt 0
     $metadataNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     if ($metadataNode.Attributes.Count -ne 0) {
         throw 'Package nuspec contains unsupported nuspec metadata attributes.'
@@ -438,7 +439,11 @@ try {
             throw "Package nuspec contains an unsupported nuspec metadata field '$($metadataChild.LocalName)' or duplicate field."
         }
     }
-    if ($metadataNameSet.Count -ne $supportedMetadataNames.Count) {
+    $missingRequiredMetadata = @(
+        $requiredMetadataNames | Where-Object { -not $metadataNameSet.Contains($_) })
+    if ($missingRequiredMetadata.Count -ne 0 -or
+        ($dependenciesRequired -and -not $metadataNameSet.Contains('dependencies')) -or
+        $metadataNameSet.Count -gt $supportedMetadataNames.Count) {
         throw 'Package nuspec does not contain the exact supported nuspec metadata field set.'
     }
     function Get-NuspecMetadataValue {
@@ -548,11 +553,17 @@ try {
     }
 
     $dependencyContainers = @($metadataNode.SelectNodes('n:dependencies', $namespace))
-    if ($dependencyContainers.Count -ne 1) {
+    if (($expectedDependencies.Count -gt 0 -and $dependencyContainers.Count -ne 1) -or
+        ($expectedDependencies.Count -eq 0 -and $dependencyContainers.Count -gt 1)) {
         throw 'Package nuspec must contain exactly one dependencies element matching the built manifest.'
     }
     $actualDependencies = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($dependencyNode in @($dependencyContainers[0].ChildNodes | Where-Object NodeType -EQ ([System.Xml.XmlNodeType]::Element))) {
+    $dependencyNodes = @()
+    if ($dependencyContainers.Count -eq 1) {
+        $dependencyNodes = @($dependencyContainers[0].ChildNodes |
+            Where-Object NodeType -EQ ([System.Xml.XmlNodeType]::Element))
+    }
+    foreach ($dependencyNode in $dependencyNodes) {
         $attributeNames = @($dependencyNode.Attributes | ForEach-Object Name | Sort-Object)
         if ($dependencyNode.LocalName -cne 'dependency' -or
             $dependencyNode.NamespaceURI -cne $nuspec.DocumentElement.NamespaceURI -or

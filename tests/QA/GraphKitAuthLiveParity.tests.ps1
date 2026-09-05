@@ -1962,8 +1962,11 @@ Describe 'Task 8 canonical GraphKit.Auth ABI gate' -Tag 'Task8Abi' {
     }
 
     It 'projects the exact 161-record Task 7 contract surface and expected digest' {
-        $contractsPath = Join-Path $script:repoRoot `
-            'output/module/GraphKit/0.4.0/Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+        $sourceManifest = Import-PowerShellDataFile -Path (
+            Join-Path $script:repoRoot 'source/GraphKit.psd1')
+        $contractsPath = Join-Path $script:repoRoot (
+            'output/module/GraphKit/{0}/Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll' -f
+                [string] $sourceManifest.ModuleVersion)
         $contractsPath | Should -Exist
         $assembly = [Reflection.Assembly]::LoadFile(
             (Resolve-Path -LiteralPath $contractsPath).ProviderPath)
