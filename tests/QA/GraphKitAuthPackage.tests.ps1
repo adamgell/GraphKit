@@ -955,7 +955,15 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             (Get-FileHash -LiteralPath (Join-Path $first.StagePath 'manifest.json') -Algorithm SHA256).Hash | Should -BeExactly $before
         }
         finally {
-            Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput | Out-Null
+            try {
+                Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput | Out-Null
+            }
+            finally {
+                if ([IO.Directory]::Exists($fixtureOutput)) {
+                    Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
+                    [IO.Directory]::Delete($fixtureOutput, $true)
+                }
+            }
         }
     }
 
@@ -2397,8 +2405,11 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Join-Path $authRoot 'stage'
             }
         }
-        $null = New-Item -ItemType Junction -Path $linkPath -Target $external
+        $linkCreated = $false
         try {
+            $null = New-Item -ItemType Junction -Path $linkPath -Target $external `
+                -ErrorAction Stop
+            $linkCreated = $true
             { New-GraphKitAuthSealedStage -OutputRoot $fixtureOutput -FullVersion "0.4.0-r8.fixture.junction-$RootKind" `
                 -PayloadSourceRoot (Join-Path $script:stagePath 'payload') } |
                 Should -Throw '*not the required no-follow directory*'
@@ -2409,9 +2420,16 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                 Should -BeExactly @('caller-owned.txt')
         }
         finally {
-            $stageItem = Get-Item -LiteralPath (Join-Path $authRoot 'stage') -Force -ErrorAction SilentlyContinue
-            if ($null -ne $stageItem -and $stageItem.LinkType -notin @('SymbolicLink','Junction')) {
-                Invoke-GraphKitAuthPrepareClean -OutputRoot $fixtureOutput | Out-Null
+            try {
+                if ($linkCreated -and [IO.Directory]::Exists($linkPath)) {
+                    [IO.Directory]::Delete($linkPath, $false)
+                }
+            }
+            finally {
+                if ([IO.Directory]::Exists($fixtureRoot)) {
+                    Set-GraphKitAuthTestTreeWritable -Path $fixtureRoot
+                    [IO.Directory]::Delete($fixtureRoot, $true)
+                }
             }
         }
     }
@@ -2988,20 +3006,39 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
     It 'rejects a sealed stage after Windows ACL <Kind> mutation' -ForEach $windowsAclMutationCases -AllowNullOrEmptyForEach {
         $fixture = New-GraphKitAuthStageFixture -Name ('windows-acl-' + $Kind.Replace(' ', '-'))
-        Set-GraphKitAuthWindowsAclMutation -StagePath $fixture.StagePath -Kind $Kind
-        { Test-GraphKitAuthSealedStage -StagePath $fixture.StagePath -FullVersion $fixture.FullVersion } |
-            Should -Throw
+        $fixtureOutput = Split-Path (
+            Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) -Parent
+        try {
+            Set-GraphKitAuthWindowsAclMutation -StagePath $fixture.StagePath -Kind $Kind
+            { Test-GraphKitAuthSealedStage -StagePath $fixture.StagePath -FullVersion $fixture.FullVersion } |
+                Should -Throw
+        }
+        finally {
+            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
+            [IO.Directory]::Delete($fixtureOutput, $true)
+        }
     }
 
     It 'rejects a Windows permission record whose owner is not the current identity' -ForEach $(
         if ($IsWindows) { @(@{}) } else { @() }
     ) -AllowNullOrEmptyForEach {
         $fixture = New-GraphKitAuthStageFixture -Name 'windows-wrong-owner-evidence'
-        $evidence = $script:GraphKitAuthStageCaptureType::InspectFile($fixture.StagePath, 'manifest.json')
-        $mutated = $evidence | Select-Object *
-        $mutated.OwnerSid = [Security.Principal.SecurityIdentifier]::new(
-            [Security.Principal.WellKnownSidType]::WorldSid, $null).Value
-        (Test-GraphKitAuthSealedPermission -Evidence $mutated -Directory $false) | Should -BeFalse
+        $fixtureOutput = Split-Path (
+            Split-Path (Split-Path (Split-Path $fixture.StagePath -Parent) -Parent) -Parent) -Parent
+        try {
+            $evidence = $script:GraphKitAuthStageCaptureType::InspectFile($fixture.StagePath, 'manifest.json')
+            $mutated = $evidence | Select-Object *
+            $mutated.OwnerSid = [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::WorldSid, $null).Value
+            (Test-GraphKitAuthSealedPermission -Evidence $mutated -Directory $false) |
+                Should -BeFalse
+        }
+        finally {
+            Set-GraphKitAuthTestStageWritable -StagePath $fixture.StagePath
+            Set-GraphKitAuthTestTreeWritable -Path $fixtureOutput
+            [IO.Directory]::Delete($fixtureOutput, $true)
+        }
     }
 
     It 'rejects a projected file after <Kind> without deleting it' -ForEach @(
@@ -3019,32 +3056,59 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $root `
             -RelativePath 'destination/candidate.dll' -Expected $copy.Destination } | Should -Not -Throw
         if ($Kind -ceq 'byte mutation') {
+            $aliasCleanup = [Collections.Generic.List[object]]::new()
             $physicalAncestor = Join-Path $TestDrive ('projection-physical-ancestor-' + [guid]::NewGuid().ToString('N'))
             $physicalRepository = Join-Path $physicalAncestor 'nested/repository'
             $aliasAncestor = Join-Path $TestDrive ('projection-alias-ancestor-' + [guid]::NewGuid().ToString('N'))
-            $null = New-Item -ItemType Directory -Path (
-                Join-Path $physicalRepository 'source'), (Join-Path $physicalRepository 'destination') -Force
-            $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
-                -Path $aliasAncestor -Target $physicalAncestor -ErrorAction Stop
-            $aliasRepository = Join-Path $aliasAncestor 'nested/repository'
-            [IO.File]::WriteAllBytes((Join-Path $aliasRepository 'source/candidate.dll'), [byte[]](1..32))
-            $aliasCopy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
-                (Join-Path $aliasRepository 'source'), 'candidate.dll',
-                (Join-Path $aliasRepository 'destination'), 'candidate.dll')
+            try {
+                $physicalArtifact = [pscustomobject]@{
+                    Path = $physicalAncestor; Directory = $true; Link = $false
+                    RestorePath = ''; Created = $false
+                }
+                $aliasCleanup.Add($physicalArtifact) | Out-Null
+                $null = New-Item -ItemType Directory -Path $physicalAncestor -ErrorAction Stop
+                $physicalArtifact.Created = $true
+                $null = New-Item -ItemType Directory -Path (
+                    Join-Path $physicalRepository 'source'), (
+                    Join-Path $physicalRepository 'destination') -Force -ErrorAction Stop
 
-            { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $aliasRepository `
-                -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
-                Should -Not -Throw -Because (
-                    'containment must compare the resolved physical repository root when an ' +
-                    'otherwise physical repository has an aliased ancestor')
+                $aliasArtifact = [pscustomobject]@{
+                    Path = $aliasAncestor; Directory = $true; Link = $true
+                    RestorePath = ''; Created = $false
+                }
+                $aliasCleanup.Add($aliasArtifact) | Out-Null
+                $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
+                    -Path $aliasAncestor -Target $physicalAncestor -ErrorAction Stop
+                $aliasArtifact.Created = $true
+                $aliasRepository = Join-Path $aliasAncestor 'nested/repository'
+                [IO.File]::WriteAllBytes((Join-Path $aliasRepository 'source/candidate.dll'), [byte[]](1..32))
+                $aliasCopy = $script:GraphKitAuthStageCaptureType::CopyFileCreateNew(
+                    (Join-Path $aliasRepository 'source'), 'candidate.dll',
+                    (Join-Path $aliasRepository 'destination'), 'candidate.dll')
 
-            $repositoryAlias = Join-Path $TestDrive (
-                'projection-repository-alias-' + [guid]::NewGuid().ToString('N'))
-            $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
-                -Path $repositoryAlias -Target $physicalRepository -ErrorAction Stop
-            { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $repositoryAlias `
-                -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
-                Should -Throw -Because 'the repository root itself must remain one no-follow directory'
+                { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $aliasRepository `
+                    -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
+                    Should -Not -Throw -Because (
+                        'containment must compare the resolved physical repository root when an ' +
+                        'otherwise physical repository has an aliased ancestor')
+
+                $repositoryAlias = Join-Path $TestDrive (
+                    'projection-repository-alias-' + [guid]::NewGuid().ToString('N'))
+                $repositoryAliasArtifact = [pscustomobject]@{
+                    Path = $repositoryAlias; Directory = $true; Link = $true
+                    RestorePath = ''; Created = $false
+                }
+                $aliasCleanup.Add($repositoryAliasArtifact) | Out-Null
+                $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
+                    -Path $repositoryAlias -Target $physicalRepository -ErrorAction Stop
+                $repositoryAliasArtifact.Created = $true
+                { Assert-GraphKitAuthAbiProjectedFileEvidence -RepositoryRoot $repositoryAlias `
+                    -RelativePath 'destination/candidate.dll' -Expected $aliasCopy.Destination } |
+                    Should -Throw -Because 'the repository root itself must remain one no-follow directory'
+            }
+            finally {
+                Remove-GraphKitAuthTestMutationArtifacts -Artifacts $aliasCleanup
+            }
         }
         $candidate = Join-Path $destination 'candidate.dll'
         switch ($Kind) {

@@ -607,6 +607,7 @@ function New-Task8FixtureHardLink {
     $failures = [Collections.Generic.List[Exception]]::new()
     $sourceDirectory = $null
     $linkCreated = $false
+    $targetWritableTransitionAttempted = $false
     if ($IsWindows) {
         $sourceDirectory = [IO.Path]::GetDirectoryName($targetPath)
         try {
@@ -614,10 +615,21 @@ function New-Task8FixtureHardLink {
         }
         catch { $failures.Add($_.Exception) | Out-Null }
         if ($failures.Count -eq 0) {
+            $targetWritableTransitionAttempted = $true
+            try {
+                Set-Task8FixtureOwnerWritable -Path $targetPath -Directory $false
+            }
+            catch { $failures.Add($_.Exception) | Out-Null }
+        }
+        if ($failures.Count -eq 0) {
             try {
                 [GraphKitTask8HardLinkFixture]::Create($LinkPath, $targetPath)
                 $linkCreated = $true
             }
+            catch { $failures.Add($_.Exception) | Out-Null }
+        }
+        if ($targetWritableTransitionAttempted) {
+            try { $nativeType::SetOwnerOnly($targetPath, $false, $false) }
             catch { $failures.Add($_.Exception) | Out-Null }
         }
         try {
@@ -651,10 +663,10 @@ function New-Task8FixtureHardLink {
             }
             try { [IO.File]::Delete($LinkPath) }
             catch { $failures.Add($_.Exception) | Out-Null }
-            if ($IsWindows) {
-                try { $nativeType::SetOwnerOnly($targetPath, $false, $false) }
-                catch { $failures.Add($_.Exception) | Out-Null }
-            }
+        }
+        if ($IsWindows -and $targetWritableTransitionAttempted) {
+            try { $nativeType::SetOwnerOnly($targetPath, $false, $false) }
+            catch { $failures.Add($_.Exception) | Out-Null }
         }
         if ($IsWindows -and $null -ne $sourceDirectory) {
             try { $nativeType::SetOwnerOnly($sourceDirectory, $true, $false) }
