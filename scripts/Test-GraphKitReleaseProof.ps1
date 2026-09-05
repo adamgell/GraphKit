@@ -427,7 +427,11 @@ try {
         'tags'
     )
     $supportedMetadataNames = @($requiredMetadataNames) + 'dependencies'
-    $dependenciesRequired = @($builtManifest.RequiredModules).Count -gt 0
+    $declaredRequiredModules = [object[]]::new(0)
+    if ($builtManifest.ContainsKey('RequiredModules') -and $null -ne $builtManifest['RequiredModules']) {
+        $declaredRequiredModules = [object[]] @($builtManifest['RequiredModules'])
+    }
+    $dependenciesRequired = $declaredRequiredModules.Count -gt 0
     $metadataNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     if ($metadataNode.Attributes.Count -ne 0) {
         throw 'Package nuspec contains unsupported nuspec metadata attributes.'
@@ -514,7 +518,7 @@ try {
     }
 
     $expectedDependencies = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($requiredModule in @($builtManifest.RequiredModules)) {
+    foreach ($requiredModule in $declaredRequiredModules) {
         $requiredIsDictionary = $requiredModule -is [System.Collections.IDictionary]
         $requiredName = if ($requiredModule -is [string]) {
             [string] $requiredModule

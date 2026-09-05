@@ -149,6 +149,8 @@ BeforeAll {
             [switch] $ForGenerator,
             [switch] $IncludeGraphKitAuth,
             [switch] $NoRequiredModules,
+            [switch] $OmitRequiredModules,
+            [switch] $NullRequiredModules,
             [string] $BaseVersion = '0.4.0',
             [switch] $DirtySource,
             [int] $Total = 1462
@@ -209,13 +211,19 @@ internal static class Fixture { internal const string Value = "public fixture"; 
             "    RequiredAssemblies = @('Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll')`n"
         }
         else { '' }
-        $requiredModulesLine = if ($NoRequiredModules) {
+        $requiredModulesLine = if ($OmitRequiredModules) {
+            ''
+        }
+        elseif ($NullRequiredModules) {
+            '    RequiredModules = $null'
+        }
+        elseif ($NoRequiredModules) {
             '    RequiredModules = @()'
         }
         else {
             "    RequiredModules = @(@{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.38.1' })"
         }
-        $dependenciesMarkup = if ($NoRequiredModules) {
+        $dependenciesMarkup = if ($NoRequiredModules -or $OmitRequiredModules -or $NullRequiredModules) {
             ''
         }
         else {
@@ -621,6 +629,16 @@ Describe 'Canonical tested release proof' {
             -Content $withEmptyDependencies
         $emptyDependencies = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
         $emptyDependencies.ExitCode | Should -Be 0 -Because $emptyDependencies.Output
+
+        Remove-Item -LiteralPath $script:fixture.Root -Recurse -Force
+        $script:fixture = New-GraphKitReleaseProofFixture -OmitRequiredModules
+        $withoutRequiredModulesKey = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+        $withoutRequiredModulesKey.ExitCode | Should -Be 0 -Because $withoutRequiredModulesKey.Output
+
+        Remove-Item -LiteralPath $script:fixture.Root -Recurse -Force
+        $script:fixture = New-GraphKitReleaseProofFixture -NullRequiredModules
+        $withNullRequiredModules = Invoke-GraphKitReleaseProofVerifier -Fixture $script:fixture
+        $withNullRequiredModules.ExitCode | Should -Be 0 -Because $withNullRequiredModules.Output
     }
 
     It 'accepts GraphKit.Auth runtime bytes when the data-file Hashtable declares the exact contracts prerequisite' {

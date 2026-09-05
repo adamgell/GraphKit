@@ -1805,35 +1805,52 @@ Describe 'GraphTokenSource' {
             $original = Join-Path $TestDrive 'relative-pfx-origin'
             $elsewhere = Join-Path $TestDrive 'relative-pfx-elsewhere'
             $captureKey = 'GraphKitTest.CanonicalFactoryPfxPath'
+            $argumentCountKey = 'GraphKitTest.NoArgumentFactoryArgumentCount'
             [System.AppDomain]::CurrentDomain.SetData($captureKey, $null)
+            [System.AppDomain]::CurrentDomain.SetData($argumentCountKey, $null)
             $null = New-Item -ItemType Directory -Path $original, $elsewhere -Force
             [System.IO.File]::WriteAllBytes((Join-Path $original 'credential.pfx'), [byte[]] @(1, 3, 3, 7))
-            $source = InModuleScope GraphKit -Parameters @{ Origin = $original; CaptureKey = $captureKey } {
-                param($Origin, $CaptureKey)
+            $sources = InModuleScope GraphKit -Parameters @{
+                Origin = $original
+                CaptureKey = $captureKey
+                ArgumentCountKey = $argumentCountKey
+            } {
+                param($Origin, $CaptureKey, $ArgumentCountKey)
                 Push-Location $Origin
                 try {
-                    New-GraphTokenSource -Profile @{
-                            TenantId = '00000000-0000-0000-0000-000000000001'
-                            ClientId = '00000000-0000-0000-0000-000000000002'
-                            AuthMethod = 'Certificate'
-                            Credential = @{
-                                PfxPath = 'credential.pfx'
-                                Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
-                            }
-                        } -Cloud @{
-                            Resource = 'https://graph.microsoft.com'
-                            Authority = 'https://login.microsoftonline.com'
-                        } -MsalFactory {
-                            param($FactoryProfile)
-                            $capturedPath = if ($null -eq $FactoryProfile) {
-                                '<null>'
-                            }
-                            else {
-                                [string] $FactoryProfile.Credential.PfxPath
-                            }
-                            [System.AppDomain]::CurrentDomain.SetData($CaptureKey, $capturedPath)
-                            [pscustomobject] @{ Kind = 'compatibility-factory-fixture' }
-                        }.GetNewClosure()
+                    $tenantProfile = @{
+                        TenantId = '00000000-0000-0000-0000-000000000001'
+                        ClientId = '00000000-0000-0000-0000-000000000002'
+                        AuthMethod = 'Certificate'
+                        Credential = @{
+                            PfxPath = 'credential.pfx'
+                            Password = @{ VaultName = 'vault'; SecretName = 'password'; Version = 'v1' }
+                        }
+                    }
+                    $cloud = @{
+                        Resource = 'https://graph.microsoft.com'
+                        Authority = 'https://login.microsoftonline.com'
+                    }
+                    [pscustomobject] @{
+                        ProfileBound = New-GraphTokenSource -Profile $tenantProfile -Cloud $cloud -MsalFactory {
+                                param($FactoryProfile)
+                                $capturedPath = if ($null -eq $FactoryProfile) {
+                                    '<null>'
+                                }
+                                else {
+                                    [string] $FactoryProfile.Credential.PfxPath
+                                }
+                                [System.AppDomain]::CurrentDomain.SetData($CaptureKey, $capturedPath)
+                                [pscustomobject] @{ Kind = 'profile-bound-compatibility-factory-fixture' }
+                            }.GetNewClosure()
+                        NoArgument = New-GraphTokenSource -Profile $tenantProfile -Cloud $cloud -MsalFactory {
+                                [System.AppDomain]::CurrentDomain.SetData($ArgumentCountKey, $args.Count)
+                                if ($args.Count -ne 0) {
+                                    throw 'The no-argument compatibility factory received an unexpected profile argument.'
+                                }
+                                [pscustomobject] @{ Kind = 'no-argument-compatibility-factory-fixture' }
+                            }.GetNewClosure()
+                    }
                 }
                 finally {
                     Pop-Location
@@ -1842,15 +1859,18 @@ Describe 'GraphTokenSource' {
 
             Push-Location $elsewhere
             try {
-                $null = $source.GetApplication()
-                $source.CredentialGeneration | Should -Match '^g1\|Certificate\.PFX\|.+\|71:sha256:[0-9a-f]{64}\|5:vault\|8:password\|2:v1$'
+                $null = $sources.ProfileBound.GetApplication()
+                $null = $sources.NoArgument.GetApplication()
+                $sources.ProfileBound.CredentialGeneration | Should -Match '^g1\|Certificate\.PFX\|.+\|71:sha256:[0-9a-f]{64}\|5:vault\|8:password\|2:v1$'
                 $canonicalPath = [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
-                $source.CredentialGeneration | Should -Match ([regex]::Escape($canonicalPath))
+                $sources.ProfileBound.CredentialGeneration | Should -Match ([regex]::Escape($canonicalPath))
                 [System.AppDomain]::CurrentDomain.GetData($captureKey) | Should -BeExactly $canonicalPath
+                [System.AppDomain]::CurrentDomain.GetData($argumentCountKey) | Should -Be 0
             }
             finally {
                 Pop-Location
                 [System.AppDomain]::CurrentDomain.SetData($captureKey, $null)
+                [System.AppDomain]::CurrentDomain.SetData($argumentCountKey, $null)
             }
         }
 

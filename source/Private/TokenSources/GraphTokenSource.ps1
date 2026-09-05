@@ -1041,8 +1041,15 @@ function New-GraphTokenSource {
             $factoryProfile.Credential = $factoryCredential
             $callerFactory = $MsalFactory
             $canonicalFactoryProfile = $factoryProfile
+            $factoryAcceptsProfile = $null -ne $callerFactory.Ast.ParamBlock -and
+                $callerFactory.Ast.ParamBlock.Parameters.Count -gt 0
             $resolvedMsalFactory = {
-                & $callerFactory $canonicalFactoryProfile
+                if ($factoryAcceptsProfile) {
+                    & $callerFactory $canonicalFactoryProfile
+                }
+                else {
+                    & $callerFactory
+                }
             }.GetNewClosure()
         }
         finally {
