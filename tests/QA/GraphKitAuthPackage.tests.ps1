@@ -543,6 +543,10 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
         $helperSource = Get-Content -LiteralPath $helperPath -Raw
         $helperSource | Should -Match 'EntryPoint = "fstat\$INODE64"'
         $helperSource | Should -Match 'Architecture\.X64 => fstat_inode64\('
+        $helperSource | Should -Match 'EntryPoint = "__fxstat"' `
+            -Because 'glibc before 2.33 exposes the compatibility fstat symbol instead of public fstat'
+        $helperSource | Should -Match '(?s)catch \(EntryPointNotFoundException\s+\w+\).*?fxstat\(' `
+            -Because 'Linux stage capture must fall back only when the modern libc symbol is absent'
         $taskSource | Should -Match 'if \(\$LASTEXITCODE -ne 1\)' `
             -Because 'only git check-ignore exit 1 proves the unrelated sentinel is not ignored'
         { Assert-GraphKitAuthStageCommands } | Should -Not -Throw

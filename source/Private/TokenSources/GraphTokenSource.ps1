@@ -1023,6 +1023,7 @@ function New-GraphTokenSource {
     }
 
     $factoryProfile = $Profile
+    $resolvedMsalFactory = $MsalFactory
     if ($authMethod -eq 'Certificate' -and
         -not [string]::IsNullOrEmpty([string] $Profile.Credential.PfxPath)) {
         # Capture the canonical path at context/source construction. Lazy vault
@@ -1037,6 +1038,11 @@ function New-GraphTokenSource {
             $factoryCredential = $Profile.Credential.Clone()
             $factoryCredential.PfxPath = [string] $snapshot.Path
             $factoryProfile.Credential = $factoryCredential
+            $callerFactory = $MsalFactory
+            $canonicalFactoryProfile = $factoryProfile
+            $resolvedMsalFactory = {
+                & $callerFactory $canonicalFactoryProfile
+            }.GetNewClosure()
         }
         finally {
             if ($snapshot.Bytes -is [byte[]]) {
@@ -1061,7 +1067,7 @@ function New-GraphTokenSource {
             # A caller-supplied factory selects this legacy same-runspace compatibility
             # path. Built-in authentication returned through GraphKit.Auth above.
             return [ConfidentialClientTokenSource]::new(
-                $MsalFactory, 'Certificate', $audience, $clientId, $generation)
+                $resolvedMsalFactory, 'Certificate', $audience, $clientId, $generation)
         }
         'ClientSecret' {
             return [ConfidentialClientTokenSource]::new(

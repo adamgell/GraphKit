@@ -803,7 +803,31 @@ public static class GraphKitAuthStageCapture
                 throw new PlatformNotSupportedException(
                     $"GraphKit.Auth stage capture cannot inspect Unix metadata on '{RuntimeInformation.OSDescription}'.");
             }
-            return fstat(descriptor, stat);
+            try
+            {
+                return fstat(descriptor, stat);
+            }
+            catch (EntryPointNotFoundException modernException)
+            {
+                int compatibilityVersion = RuntimeInformation.ProcessArchitecture switch
+                {
+                    Architecture.X64 => 1,
+                    Architecture.Arm64 => 0,
+                    _ => throw new PlatformNotSupportedException(
+                        $"GraphKit.Auth stage capture does not define a glibc fstat compatibility ABI for '{RuntimeInformation.ProcessArchitecture}'.",
+                        modernException)
+                };
+                try
+                {
+                    return fxstat(compatibilityVersion, descriptor, stat);
+                }
+                catch (EntryPointNotFoundException compatibilityException)
+                {
+                    throw new PlatformNotSupportedException(
+                        "GraphKit.Auth stage capture requires either the libc fstat or __fxstat entry point.",
+                        new AggregateException(modernException, compatibilityException));
+                }
+            }
         }
         catch (EntryPointNotFoundException exception)
         {
@@ -1047,6 +1071,9 @@ public static class GraphKitAuthStageCapture
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fstat(int descriptor, [Out] byte[] stat);
+
+    [DllImport("libc", EntryPoint = "__fxstat", SetLastError = true)]
+    private static extern int fxstat(int version, int descriptor, [Out] byte[] stat);
 
     [DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
     private static extern int fstat_inode64(int descriptor, [Out] byte[] stat);

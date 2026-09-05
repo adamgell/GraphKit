@@ -293,7 +293,7 @@ internal static class ProviderBoundaryFailure
                 graphFailure.RetryAfter is { } retryAfter && retryAfter >= TimeSpan.Zero
                     ? retryAfter
                     : null,
-                SafeCorrelation(graphFailure.CorrelationId) ?? string.Empty);
+                SafeCorrelation(graphFailure.CorrelationId));
         }
 
         return new GraphAuthException(

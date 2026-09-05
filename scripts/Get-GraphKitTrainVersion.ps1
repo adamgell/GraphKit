@@ -11,11 +11,20 @@ function Invoke-GraphKitGitBytes {
     $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; $null = $process.Start()
-    if ($InputBytes.Length) { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) }
-    $process.StandardInput.Close()
     $standardErrorTask = $process.StandardError.ReadToEndAsync()
     $output = [IO.MemoryStream]::new()
-    $process.StandardOutput.BaseStream.CopyTo($output)
+    $standardOutputTask = $process.StandardOutput.BaseStream.CopyToAsync($output)
+    try {
+        if ($InputBytes.Length) {
+            $standardInputTask = $process.StandardInput.BaseStream.WriteAsync(
+                $InputBytes, 0, $InputBytes.Length)
+            $null = $standardInputTask.GetAwaiter().GetResult()
+        }
+    }
+    finally {
+        $process.StandardInput.Close()
+    }
+    $null = $standardOutputTask.GetAwaiter().GetResult()
     $standardError = $standardErrorTask.GetAwaiter().GetResult()
     $process.WaitForExit()
     if ($process.ExitCode -notin $AllowedExitCodes) { throw "git $($Arguments -join ' ') failed: $standardError" }

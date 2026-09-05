@@ -337,28 +337,28 @@ function Get-GraphKitAuthParityPublicAbiRecords {
                 "nullable=$(Get-GraphKitAuthParityAbiNullabilityDisplay -Info $nullabilityContext.Create($returnParameter))")
         }
 
-        foreach ($event in @($type.GetEvents($flags) | Sort-Object Name)) {
+        foreach ($eventInfo in @($type.GetEvents($flags) | Sort-Object Name)) {
             $accessors = [Collections.Generic.List[string]]::new()
-            if ($null -ne $event.AddMethod -and $event.AddMethod.IsPublic) {
+            if ($null -ne $eventInfo.AddMethod -and $eventInfo.AddMethod.IsPublic) {
                 $accessors.Add('add')
             }
-            if ($null -ne $event.RemoveMethod -and $event.RemoveMethod.IsPublic) {
+            if ($null -ne $eventInfo.RemoveMethod -and $eventInfo.RemoveMethod.IsPublic) {
                 $accessors.Add('remove')
             }
             $lines.Add(
-                "EVENT|$($type.FullName)|$($event.Name)|" +
-                "$(Get-GraphKitAuthParityAbiTypeDisplayName -Type $event.EventHandlerType)|" +
+                "EVENT|$($type.FullName)|$($eventInfo.Name)|" +
+                "$(Get-GraphKitAuthParityAbiTypeDisplayName -Type $eventInfo.EventHandlerType)|" +
                 "$($accessors -join ',')")
-            $eventAccessor = if ($null -ne $event.AddMethod) {
-                $event.AddMethod
+            $eventAccessor = if ($null -ne $eventInfo.AddMethod) {
+                $eventInfo.AddMethod
             }
             else {
-                $event.RemoveMethod
+                $eventInfo.RemoveMethod
             }
             $lines.Add(
-                "EVENT-META|$($type.FullName)::$($event.Name)|" +
+                "EVENT-META|$($type.FullName)::$($eventInfo.Name)|" +
                 "static=$($eventAccessor.IsStatic.ToString().ToLowerInvariant())|" +
-                "nullable=$(Get-GraphKitAuthParityAbiNullabilityDisplay -Info $nullabilityContext.Create($event))")
+                "nullable=$(Get-GraphKitAuthParityAbiNullabilityDisplay -Info $nullabilityContext.Create($eventInfo))")
         }
 
         foreach ($field in @($type.GetFields($flags) |

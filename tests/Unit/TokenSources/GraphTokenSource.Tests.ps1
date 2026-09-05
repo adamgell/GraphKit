@@ -40,8 +40,13 @@ public static class Task6CredentialFixture
 
     public static SecureString CreateSecret()
     {
+        return CreateSecret("task6-secret");
+    }
+
+    public static SecureString CreateSecret(string value)
+    {
         SecureString secret = new();
-        foreach (char value in "task6-secret") secret.AppendChar(value);
+        foreach (char character in value) secret.AppendChar(character);
         secret.MakeReadOnly();
         return secret;
     }
@@ -752,7 +757,7 @@ Describe 'GraphTokenSource' {
                 }
             }
             Mock Resolve-GraphVaultPassword -ModuleName GraphKit {
-                ConvertTo-SecureString $passwordText -AsPlainText -Force
+                [GraphKit.Tests.Task6CredentialFixture]::CreateSecret($passwordText)
             }
 
             $source = $null
@@ -1221,7 +1226,8 @@ Describe 'GraphTokenSource' {
                         $null = $ready.Signal()
                         $null = $go.Wait()
                         & (Get-Module GraphKit) {
-                            Invoke-GraphTokenSingleFlight -Key $key -AcquireScript {
+                            param($FlightKey)
+                            Invoke-GraphTokenSingleFlight -Key $FlightKey -AcquireScript {
                                 $calls = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryCalls')
                                 $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryEntered')
                                 $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.OrdinaryRelease')
@@ -1230,7 +1236,7 @@ Describe 'GraphTokenSource' {
                                 $null = $release.Wait()
                                 [pscustomobject]@{ Token = [guid]::NewGuid().ToString() }
                             }
-                        }
+                        } $key
                     } -ArgumentList $key, $script:BuiltManifest
                 }
 
@@ -1296,7 +1302,8 @@ Describe 'GraphTokenSource' {
                         $null = $go.Wait()
                         try {
                             $null = & (Get-Module GraphKit) {
-                                Invoke-GraphTokenSingleFlight -Key $key -AcquireScript {
+                                param($FlightKey)
+                                Invoke-GraphTokenSingleFlight -Key $FlightKey -AcquireScript {
                                     $calls = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureCalls')
                                     $entered = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureEntered')
                                     $release = [System.AppDomain]::CurrentDomain.GetData('GraphKitTest.FailureRelease')
@@ -1305,7 +1312,7 @@ Describe 'GraphTokenSource' {
                                     $null = $release.Wait()
                                     throw 'acquisition failed'
                                 }
-                            }
+                            } $key
                             'ok'
                         }
                         catch {
@@ -1797,10 +1804,12 @@ Describe 'GraphTokenSource' {
         It 'pins a relative PFX path into the legacy generation selected by a compatibility factory' {
             $original = Join-Path $TestDrive 'relative-pfx-origin'
             $elsewhere = Join-Path $TestDrive 'relative-pfx-elsewhere'
+            $captureKey = 'GraphKitTest.CanonicalFactoryPfxPath'
+            [System.AppDomain]::CurrentDomain.SetData($captureKey, $null)
             $null = New-Item -ItemType Directory -Path $original, $elsewhere -Force
             [System.IO.File]::WriteAllBytes((Join-Path $original 'credential.pfx'), [byte[]] @(1, 3, 3, 7))
-            $source = InModuleScope GraphKit -Parameters @{ Origin = $original } {
-                param($Origin)
+            $source = InModuleScope GraphKit -Parameters @{ Origin = $original; CaptureKey = $captureKey } {
+                param($Origin, $CaptureKey)
                 Push-Location $Origin
                 try {
                     New-GraphTokenSource -Profile @{
@@ -1814,7 +1823,17 @@ Describe 'GraphTokenSource' {
                         } -Cloud @{
                             Resource = 'https://graph.microsoft.com'
                             Authority = 'https://login.microsoftonline.com'
-                        } -MsalFactory { throw 'canonical-path capture test must not acquire' }
+                        } -MsalFactory {
+                            param($FactoryProfile)
+                            $capturedPath = if ($null -eq $FactoryProfile) {
+                                '<null>'
+                            }
+                            else {
+                                [string] $FactoryProfile.Credential.PfxPath
+                            }
+                            [System.AppDomain]::CurrentDomain.SetData($CaptureKey, $capturedPath)
+                            [pscustomobject] @{ Kind = 'compatibility-factory-fixture' }
+                        }.GetNewClosure()
                 }
                 finally {
                     Pop-Location
@@ -1823,13 +1842,15 @@ Describe 'GraphTokenSource' {
 
             Push-Location $elsewhere
             try {
+                $null = $source.GetApplication()
                 $source.CredentialGeneration | Should -Match '^g1\|Certificate\.PFX\|.+\|71:sha256:[0-9a-f]{64}\|5:vault\|8:password\|2:v1$'
-                $source.CredentialGeneration | Should -Match ([regex]::Escape(
-                    [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
-                ))
+                $canonicalPath = [System.IO.Path]::GetFullPath((Join-Path $original 'credential.pfx'))
+                $source.CredentialGeneration | Should -Match ([regex]::Escape($canonicalPath))
+                [System.AppDomain]::CurrentDomain.GetData($captureKey) | Should -BeExactly $canonicalPath
             }
             finally {
                 Pop-Location
+                [System.AppDomain]::CurrentDomain.SetData($captureKey, $null)
             }
         }
 

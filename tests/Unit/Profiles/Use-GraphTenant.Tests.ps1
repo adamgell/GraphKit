@@ -22,9 +22,12 @@ Describe 'Use-GraphTenant' {
 
     BeforeEach {
         Mock Get-GraphVaultCredential -ModuleName GraphKit {
+            $material = [Security.SecureString]::new()
+            $material.AppendChar('x')
+            $material.MakeReadOnly()
             [pscustomobject]@{
                 AuthMethod           = 'ClientSecret'
-                Material             = ConvertTo-SecureString 'use-graph-tenant-test' -AsPlainText -Force
+                Material             = $material
                 OwnsMaterial         = $true
                 CredentialGeneration = 'g1|ClientSecret|fixture'
             }

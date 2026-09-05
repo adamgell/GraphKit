@@ -87,6 +87,7 @@ BeforeAll {
                 'case-collision',
                 'normalization-collision',
                 'stderr-flood',
+                'stdin-stdout-flood',
                 'reverse-untracked'
             )] [string] $Mode,
             [hashtable] $Configuration = @{}
@@ -277,6 +278,24 @@ switch ($payload.Mode) {
                 Output = [Text.Encoding]::ASCII.GetBytes("sha1`n")
                 Error = ''
             })
+        }
+        Write-Result (Invoke-RealGit $gitArguments)
+    }
+    'stdin-stdout-flood' {
+        if ($isCheckIgnore) {
+            $stdout = [Console]::OpenStandardOutput()
+            $padding = [Text.Encoding]::ASCII.GetBytes(([string]::new([char] 'x', 8192)) + [char] 0)
+            foreach ($index in 1..128) {
+                $stdout.Write($padding, 0, $padding.Length)
+            }
+            $stdout.Flush()
+
+            $inputBytes = [IO.MemoryStream]::new()
+            [Console]::OpenStandardInput().CopyTo($inputBytes)
+            $input = $inputBytes.ToArray()
+            $stdout.Write($input, 0, $input.Length)
+            $stdout.Flush()
+            exit 0
         }
         Write-Result (Invoke-RealGit $gitArguments)
     }
@@ -587,6 +606,29 @@ Describe 'GraphKit R8 train source-entry identity' -Tag 'QA' {
             -Because 'stdout and stderr must drain concurrently even when stderr exceeds the pipe buffer'
         $floodResult.ExitCode | Should -Be 0 -Because $floodResult.Output
         $floodResult.Output | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}$'
+
+        $bidirectionalRoot = New-R8TrainVersionFixture
+        $ignoredRoot = Join-Path $bidirectionalRoot 'output'
+        $null = New-Item -ItemType Directory -Path $ignoredRoot -Force
+        foreach ($index in 1..1024) {
+            $name = 'ignored-{0:D4}-{1}.tmp' -f $index, ([string]::new([char] 'y', 80))
+            [IO.File]::WriteAllBytes((Join-Path $ignoredRoot $name), [byte[]] @(1))
+        }
+        $bidirectionalShim = New-R8PortableGitShim -Mode stdin-stdout-flood
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$bidirectionalShim$([IO.Path]::PathSeparator)$savedPath"
+            $bidirectionalResult = Get-R8TrainVersionWithTimeout `
+                -RepositoryRoot $bidirectionalRoot -TimeoutMilliseconds 30000
+        }
+        finally {
+            $env:PATH = $savedPath
+        }
+        Assert-R8PortableGitShimInvoked -ShimDirectory $bidirectionalShim
+        $bidirectionalResult.Running | Should -BeFalse `
+            -Because 'Git stdin and stdout must drain concurrently when both exceed the pipe buffer'
+        $bidirectionalResult.ExitCode | Should -Be 0 -Because $bidirectionalResult.Output
+        $bidirectionalResult.Output | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}(?:\.d[0-9a-f]{12})?$'
     }
 
     It 'ignores a malicious ambient legacy helper and remains deterministic across repeated calls in one process' {
@@ -658,8 +700,8 @@ $source
 
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
-        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts'
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry|Git source paths collide by case or Unicode normalization'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts|Git source paths collide by case or Unicode normalization'
     }
 
     It 'binds a physically internal proof helper when RepositoryRoot is a Unix symlink or Windows junction alias' {
@@ -678,8 +720,8 @@ $source
 
         Assert-R8PortableGitShimInvoked -ShimDirectory $shimDirectory
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry'
-        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts'
+        $result.Output | Should -Match 'source-capture helper inside RepositoryRoot requires|Cannot root-anchored no-follow capture source entry|Git source paths collide by case or Unicode normalization'
+        $result.Output | Should -Match 'exactly one exact raw inventory record|Source path segment[\s\S]*Scripts|Git source paths collide by case or Unicode normalization'
     }
 
     It 'allows a genuinely external proof helper when RepositoryRoot is a filesystem alias' {
@@ -1081,8 +1123,8 @@ $source
         }
         finally { $env:GRAPHKIT_TEST_CAPTURE_IDENTITY = $savedIdentity }
 
-        $state.sourceStateSha256 | Should -Be '2580391fda4b94fd209d16941dda7e9472f049a5fa5f9bb5dfe8f73d63f7844a'
-        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d2580391fda4b$'
+        $state.sourceStateSha256 | Should -Be '88365586a59840cef20946c650bc5973567bf9be407728c3568af70d4d4cfcea'
+        $state.version | Should -Match '^0\.4\.0-r8\.g[0-9a-f]{12}\.d88365586a598$'
     }
 }
 
