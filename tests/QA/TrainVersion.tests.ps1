@@ -1111,7 +1111,10 @@ $source
             & /usr/bin/mkfifo $fifo
         }
 
-        $result = Get-R8TrainVersionWithTimeout -RepositoryRoot $root -TimeoutMilliseconds 3000
+        # This bound covers fresh-process startup and proof-bound Add-Type compilation as well as
+        # the capture itself.  Keep it comfortably below an actual FIFO-open hang without making
+        # scheduler pressure look like a source-capture regression.
+        $result = Get-R8TrainVersionWithTimeout -RepositoryRoot $root -TimeoutMilliseconds 15000
 
         $result.Running | Should -BeFalse -Because 'special files must be rejected rather than opened'
         $result.ExitCode | Should -Not -Be 0
