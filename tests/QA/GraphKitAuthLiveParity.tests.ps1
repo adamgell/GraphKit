@@ -1000,7 +1000,11 @@ switch ($HookKind) {
                     [string]$ready.heldPath -cne $heldPath -or
                     $ready.escapedSession.GetType() -ne [bool] -or
                     [bool]$ready.escapedSession -ne $expectedEscape) {
-                    try { $child.Kill($true) } catch {}
+                    try {
+                        if (-not $child.HasExited) { $child.Kill($true) }
+                        $null = $child.WaitForExit(5000)
+                    }
+                    catch {}
                     throw 'The Task 8 residual-tree fixture did not become ready.'
                 }
                 Write-Task8Trace -Event 'grandchild-ready' -Data @{
