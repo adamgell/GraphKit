@@ -251,6 +251,7 @@ public static class GraphKitAuthPackageLinkFixture
             $isDirectory = [bool] $artifact.Directory
             $isLink = [bool] $artifact.Link
             $restorePath = [string] $artifact.RestorePath
+            $widenParent = [bool] $artifact.WidenParent
             if ($isLink) {
                 $parent = [IO.Path]::GetDirectoryName($path)
                 if ($IsWindows) {
@@ -261,7 +262,10 @@ public static class GraphKitAuthPackageLinkFixture
                         # rights from every sibling fixture below it.
                         Set-GraphKitAuthTestWindowsPathWritable -Path $path -Directory $false
                     }
-                    else {
+                    elseif ($widenParent) {
+                        # Only in-stage reparse fixtures have an intentionally sealed
+                        # parent. External aliases live directly under TestDrive and
+                        # must be removed without rewriting that shared parent DACL.
                         Set-GraphKitAuthTestWindowsPathWritable -Path $parent -Directory $true
                     }
                 }
@@ -581,7 +585,7 @@ public static class GraphKitAuthPackageLinkFixture
                 $outsideLink = Join-Path $TestDrive ('GraphKit.Auth.hardlink-' + [guid]::NewGuid().ToString('N') + '.dll')
                 $linkArtifact = [pscustomobject]@{
                     Path = $outsideLink; Directory = $false; Link = $true
-                    RestorePath = $targetPath; Created = $false
+                    RestorePath = $targetPath; WidenParent = $false; Created = $false
                 }
                 $CleanupArtifacts.Add($linkArtifact) | Out-Null
                 New-GraphKitAuthTestHardLink -LinkPath $outsideLink -TargetPath $targetPath
@@ -614,7 +618,7 @@ public static class GraphKitAuthPackageLinkFixture
                 [IO.File]::Delete($targetPath)
                 $linkArtifact = [pscustomobject]@{
                     Path = $targetPath; Directory = $false; Link = $true
-                    RestorePath = $null; Created = $false
+                    RestorePath = $null; WidenParent = $true; Created = $false
                 }
                 $CleanupArtifacts.Add($linkArtifact) | Out-Null
                 New-GraphKitAuthTestFileSymbolicLink -LinkPath $targetPath -TargetPath $outsidePath
@@ -667,7 +671,7 @@ public static class GraphKitAuthPackageLinkFixture
                 $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
                 $linkArtifact = [pscustomobject]@{
                     Path = $payloadPath; Directory = $true; Link = $true
-                    RestorePath = $null; Created = $false
+                    RestorePath = $null; WidenParent = $true; Created = $false
                 }
                 $CleanupArtifacts.Add($linkArtifact) | Out-Null
                 $null = New-Item -ItemType $kind -Path $payloadPath -Target $outsidePayload -ErrorAction Stop
@@ -1135,7 +1139,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
             $outsideLink = Join-Path $TestDrive ('manifest-hard-link-' + [guid]::NewGuid().ToString('N') + '.json')
             $linkArtifact = [pscustomobject]@{
                 Path = $outsideLink; Directory = $false; Link = $true
-                RestorePath = $manifestPath; Created = $false
+                RestorePath = $manifestPath; WidenParent = $false; Created = $false
             }
             $cleanupArtifacts.Add($linkArtifact) | Out-Null
             New-GraphKitAuthTestHardLink -LinkPath $outsideLink -TargetPath $manifestPath
@@ -3159,7 +3163,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
 
                 $aliasArtifact = [pscustomobject]@{
                     Path = $aliasAncestor; Directory = $true; Link = $true
-                    RestorePath = ''; Created = $false
+                    RestorePath = ''; WidenParent = $false; Created = $false
                 }
                 $aliasCleanup.Add($aliasArtifact) | Out-Null
                 $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
@@ -3181,7 +3185,7 @@ Describe 'GraphKit.Auth sealed staging implementation' -Tag 'QA' {
                     'projection-repository-alias-' + [guid]::NewGuid().ToString('N'))
                 $repositoryAliasArtifact = [pscustomobject]@{
                     Path = $repositoryAlias; Directory = $true; Link = $true
-                    RestorePath = ''; Created = $false
+                    RestorePath = ''; WidenParent = $false; Created = $false
                 }
                 $aliasCleanup.Add($repositoryAliasArtifact) | Out-Null
                 $null = New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) `
