@@ -217,7 +217,7 @@ Describe 'Import-GraphLegacyProfile' {
             # reports zero skips - a skipped test turns the whole NUnit result to 'Ignored'.
             $store = Join-Path $TestDrive 'platform.json'
             $path = New-LegacyFile -Root $TestDrive -Content @{
-                tenants = @(@{ name = 'Winonly'; tenantId = $script:tenantA; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); certificateStore = 'CurrentUser'; environment = 'Global' })
+                tenants = @(@{ name = 'Winonly'; tenantId = $script:tenantA; clientId = '7d6e5f44-9999-8888-7777-666655554444'; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); certificateStore = 'CurrentUser'; environment = 'Global' })
             }
             $report = Import-GraphLegacyProfile -Path $path -StorePath $store
 

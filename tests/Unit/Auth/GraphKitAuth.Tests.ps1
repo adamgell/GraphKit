@@ -2313,17 +2313,15 @@ switch ($Scenario) {
         $residentMvid = [GraphKit.Auth.GraphAuthHost].Assembly.ManifestModule.ModuleVersionId.ToString('D')
         $resolvedReplacement = (Resolve-Path -LiteralPath $ReplacementContractsPath).ProviderPath
         $resolvedContracts = (Resolve-Path -LiteralPath $ContractsPath).ProviderPath
-        if ($IsWindows) {
-            [IO.File]::Copy($resolvedReplacement, $resolvedContracts, $true)
-        }
-        else {
-            # Never truncate an assembly that CoreCLR may have memory-mapped: Linux can
-            # terminate with SIGBUS when a mapped page disappears. An atomic rename gives
-            # the path new bytes while the resident assembly retains its original inode.
-            $atomicReplacement = "$resolvedContracts.replacement.$([guid]::NewGuid().ToString('N'))"
-            [IO.File]::Copy($resolvedReplacement, $atomicReplacement)
-            [IO.File]::Move($atomicReplacement, $resolvedContracts, $true)
-        }
+        # Never truncate or overwrite an assembly CoreCLR may have image-mapped. Windows
+        # permits an in-use DLL to be renamed, so park the resident image and atomically
+        # move a prepared candidate into the now-free package path. The child process owns
+        # both temporary names and exits before Pester removes its TestDrive.
+        $parkedResident = "$resolvedContracts.resident.$([guid]::NewGuid().ToString('N'))"
+        $atomicReplacement = "$resolvedContracts.replacement.$([guid]::NewGuid().ToString('N'))"
+        [IO.File]::Copy($resolvedReplacement, $atomicReplacement)
+        [IO.File]::Move($resolvedContracts, $parkedResident)
+        [IO.File]::Move($atomicReplacement, $resolvedContracts)
         $message = Get-Rejection {
             $replacementHost = [GraphKit.Auth.GraphAuthHost]::new($PayloadRoot, [version]'1.0.0.0', [timespan]::FromSeconds(2))
             $replacementHost.Dispose()
@@ -2561,7 +2559,7 @@ Describe 'GraphKit.Auth ABI v1 contract' -Tag 'Unit' {
         $result = Invoke-GraphKitAuthContractsCandidateProbe -CandidatePath $candidatePath -PreloadPath $stalePath
 
         $result.ExitCode | Should -Not -Be 0 -Because 'a different preloaded assembly must never satisfy candidate inspection'
-        $result.Output | Should -Match '(?s)Default ALC already contains.*refusing candidate'
+        $result.Output | Should -Match '(?s)Default ALC already contains.*refusing\s+candidate'
     }
 
     It 'binds a fresh synthetic candidate by exact location bytes and MVID' {

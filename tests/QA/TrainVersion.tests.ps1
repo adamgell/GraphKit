@@ -9,6 +9,7 @@ BeforeAll {
         Set-Content -LiteralPath (Join-Path $root 'source/Private/Tracked-One.ps1') -Value "'one'`n" -NoNewline -Encoding utf8NoBOM
         Set-Content -LiteralPath (Join-Path $root 'source/Private/Tracked-Two.ps1') -Value "'two'`n" -NoNewline -Encoding utf8NoBOM
         & git -C $root init --quiet
+        & git -C $root config core.autocrlf false
         & git -C $root add .gitignore source
         & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'fixture'
         return $root
@@ -486,10 +487,10 @@ internal static class GitShimLauncher
         $source = (Get-Content -LiteralPath $script:sourceCaptureHelper -Raw).Replace("`r`n", "`n")
         $needle = 'return new CapturedSourceFile(before.Mode, before.HasExecutableMode, before.Identity, before.Length, content);'
         if (-not $source.Contains($needle)) { throw 'The controlled-identity fixture could not locate the capture return contract.' }
-        $replacement = @'
+        $replacement = (@'
 string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE_IDENTITY") ?? before.Identity;
             return new CapturedSourceFile(before.Mode, before.HasExecutableMode, proofIdentity, before.Length, content);
-'@
+'@).Replace("`r`n", "`n")
         Set-Content -LiteralPath $helper -Value $source.Replace($needle, $replacement) -NoNewline -Encoding utf8NoBOM
         & git -C $root add scripts
         & git -C $root -c user.name='GraphKit QA' -c user.email='qa@example.invalid' commit --quiet -m 'controlled helper'
@@ -510,11 +511,11 @@ string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE
         Copy-Item -LiteralPath $script:sourceCaptureHelper -Destination $helper
         if ($CaptureSentinel) {
             $source = (Get-Content -LiteralPath $helper -Raw).Replace("`r`n", "`n")
-            $needle = @'
+            $needle = (@'
         public static CapturedSourceFile Capture(string repositoryRoot, string relativePath)
         {
-'@
-            $replacement = @'
+'@).Replace("`r`n", "`n")
+            $replacement = (@'
         public static CapturedSourceFile Capture(string repositoryRoot, string relativePath)
         {
             string? captureSentinel = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE_SENTINEL");
@@ -522,7 +523,7 @@ string proofIdentity = Environment.GetEnvironmentVariable("GRAPHKIT_TEST_CAPTURE
             {
                 File.AppendAllText(captureSentinel, relativePath + Environment.NewLine);
             }
-'@
+'@).Replace("`r`n", "`n")
             if (-not $source.Contains($needle)) { throw 'The proof-bound sentinel fixture could not locate the generated Capture entry point.' }
             Set-Content -LiteralPath $helper -Value $source.Replace($needle, $replacement) -NoNewline -Encoding utf8NoBOM
         }
@@ -1071,7 +1072,7 @@ $source
 
     It 'accepts a platform-valid untracked path containing special and non-ASCII characters' {
         $root = New-R8TrainVersionFixture
-        $relative = if ($IsWindows) { "source/Private/tab`t雪.ps1" } else { "source/Private/tab`tline`n雪.ps1" }
+        $relative = if ($IsWindows) { 'source/Private/hash # 雪.ps1' } else { "source/Private/tab`tline`n雪.ps1" }
         $path = Join-Path $root $relative
         Set-Content -LiteralPath $path -Value "'valid path'`n" -NoNewline -Encoding utf8NoBOM
 

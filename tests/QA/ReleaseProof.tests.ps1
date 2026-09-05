@@ -201,6 +201,7 @@ internal static class Fixture { internal const string Value = "public fixture"; 
                 -Destination (Join-Path $privateScriptsDir 'GraphKit.SourceCapture.cs')
             Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') -Value "output/`nLICENSE`n" -NoNewline -Encoding utf8NoBOM
             & git -C $fixtureRoot init --quiet
+            & git -C $fixtureRoot config core.autocrlf false
             & git -C $fixtureRoot add .gitignore scripts src tests
             & git -C $fixtureRoot -c user.name='GraphKit Fixture' -c user.email='fixture@example.invalid' commit --quiet -m 'fixture source'
             $revision = (& git -C $fixtureRoot rev-parse HEAD).Trim().ToLowerInvariant()
