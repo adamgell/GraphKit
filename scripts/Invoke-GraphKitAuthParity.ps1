@@ -2918,8 +2918,11 @@ function Invoke-GraphKitAuthParityWorkerProcess {
     $stderrBuffer = [byte[]]::new(4096)
     $clock = $null
     $operationDeadlineMilliseconds = [long]$TimeoutSeconds * 1000L
+    # Termination is not complete until the root is reaped, the owned tree is empty,
+    # and both redirected streams reach EOF.  Preserve enough proof time for those
+    # observations even when a short test deadline expires under scheduler pressure.
     $teardownAllowanceMilliseconds = [Math]::Min(
-        10000L, [Math]::Max(2000L, [long]($operationDeadlineMilliseconds / 4L)))
+        10000L, [Math]::Max(5000L, [long]($operationDeadlineMilliseconds / 4L)))
     $hardDeadlineMilliseconds =
         $operationDeadlineMilliseconds + $teardownAllowanceMilliseconds
     $workerResult = $null

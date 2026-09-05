@@ -3960,11 +3960,11 @@ Describe 'Task 8 evidence schema and stream guard' {
         $noReadExit[0].data.forcedTermination | Should -BeTrue
         $noReadExit[0].data.protocolFailure | Should -BeExactly 'Timeout'
         [long]$noReadExit[0].data.operationDeadlineMilliseconds | Should -Be 3000
-        [long]$noReadExit[0].data.hardDeadlineMilliseconds | Should -Be 5000
+        [long]$noReadExit[0].data.hardDeadlineMilliseconds | Should -Be 8000
         [long]$noReadExit[0].data.elapsedMilliseconds |
             Should -BeGreaterOrEqual (
                 [long]$noReadExit[0].data.operationDeadlineMilliseconds)
-        [long]$noReadExit[0].data.elapsedMilliseconds | Should -BeLessOrEqual 7000
+        [long]$noReadExit[0].data.elapsedMilliseconds | Should -BeLessOrEqual 10000
         $noReadCleanup.Count | Should -Be 1
         [Array]::IndexOf($noReadTrace, $noReadExit[0]) |
             Should -BeLessThan ([Array]::IndexOf($noReadTrace, $noReadCleanup[0]))
