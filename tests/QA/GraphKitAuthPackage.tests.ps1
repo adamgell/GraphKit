@@ -254,9 +254,15 @@ public static class GraphKitAuthPackageLinkFixture
             if ($isLink) {
                 $parent = [IO.Path]::GetDirectoryName($path)
                 if ($IsWindows) {
-                    Set-GraphKitAuthTestWindowsPathWritable -Path $parent -Directory $true
                     if (-not [string]::IsNullOrWhiteSpace($restorePath)) {
+                        # A hard link shares its file security descriptor with the
+                        # sealed in-tree name. Grant DELETE on that owned link only;
+                        # rewriting TestDrive's DACL would strip inherited traversal
+                        # rights from every sibling fixture below it.
                         Set-GraphKitAuthTestWindowsPathWritable -Path $path -Directory $false
+                    }
+                    else {
+                        Set-GraphKitAuthTestWindowsPathWritable -Path $parent -Directory $true
                     }
                 }
                 else {
