@@ -6,6 +6,27 @@ BeforeAll {
     Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force
 
     $script:catalog = @(Get-GraphOperation -List)
+
+    $script:Context = [PSCustomObject]@{
+        Cloud         = 'Global'
+        GraphBaseUri  = [uri] 'https://graph.microsoft.com'
+        ProfileId     = 'contract-test'
+        TenantId      = [guid] '00000000-0000-0000-0000-000000000001'
+        IdentityState = 'VerifiedForToken'
+    }
+
+    function New-ContractEnvelope {
+        param([object[]] $Data)
+
+        [PSCustomObject]@{
+            PSTypeName = 'GraphKit.OperationResult'
+            Data       = $Data
+            Outcome    = 'Succeeded'
+            Certainty  = 'Known'
+            Telemetry  = @()
+            Provenance = $null
+        }
+    }
 }
 
 Describe 'TenantPulse collection descriptor contracts' {
@@ -94,5 +115,109 @@ Describe 'TenantPulse collection descriptor contracts' {
         @($script:catalog | Where-Object {
             $_.PathTemplate -eq '/deviceManagement/managedDeviceCleanupSettings'
         }).Count | Should -Be 0
+    }
+
+    It 'ships the beta Apple enrollment-profile child collection needed by the IHA successor' {
+        $descriptor = $script:catalog | Where-Object {
+            $_.Type -eq 'AppleEnrollmentProfile' -and $_.Operation -eq 'ListByToken'
+        }
+
+        $descriptor | Should -Not -BeNullOrEmpty
+        $descriptor.PathTemplate | Should -BeExactly '/deviceManagement/depOnboardingSettings/{depOnboardingSettingId}/enrollmentProfiles'
+        $descriptor.ApiVersion | Should -BeExactly 'beta'
+        $descriptor.Stability | Should -BeExactly 'BetaOnly'
+        $descriptor.OperationKind | Should -BeExactly 'Collection'
+        $descriptor.HandlerStrategyId | Should -BeExactly 'Collection.Default'
+        $descriptor.PagingStrategy | Should -BeExactly 'NextLink'
+        $descriptor.DeduplicationKey | Should -BeExactly 'id'
+        $descriptor.ReplayPolicy | Should -BeExactly 'Safe'
+        @($descriptor.RequiredPermissions.Value) | Should -Be @('DeviceManagementServiceConfig.Read.All')
+    }
+
+    It 'routes Apple enrollment profiles through the public paged read without dropping subtype fields' {
+        $script:AppleProfile = [pscustomobject]@{
+            '@odata.type' = '#microsoft.graph.depIOSEnrollmentProfile'
+            id = 'profile-1'
+            displayName = 'Corporate iOS'
+            description = 'Automated enrollment'
+            requiresUserAuthentication = $true
+            configurationEndpointUrl = 'https://example.test/configuration'
+            enableAuthenticationViaCompanyPortal = $true
+            requireCompanyPortalOnSetupAssistantEnrolledDevices = $true
+            isDefault = $true
+            isMandatory = $false
+        }
+
+        Mock Invoke-GraphPaging -ModuleName GraphKit {
+            New-ContractEnvelope -Data @($script:AppleProfile)
+        }
+        Mock Invoke-GraphHandlerStrategy -ModuleName GraphKit { throw 'unexpected singleton strategy call' }
+
+        $rows = @(Get-GraphObject -Context $script:Context -Type AppleEnrollmentProfile `
+            -Operation ListByToken -Parameters @{ depOnboardingSettingId = 'token-1' })
+
+        $rows | Should -HaveCount 1
+        $rows[0].PSObject.TypeNames | Should -Contain 'GraphKit.AppleEnrollmentProfile'
+        $rows[0].'@odata.type' | Should -BeExactly '#microsoft.graph.depIOSEnrollmentProfile'
+        $rows[0].displayName | Should -BeExactly 'Corporate iOS'
+        $rows[0].requiresUserAuthentication | Should -BeTrue
+        $rows[0].isDefault | Should -BeTrue
+        $rows[0].isMandatory | Should -BeFalse
+        Should-Invoke Invoke-GraphPaging -ModuleName GraphKit -Times 1 -Exactly
+        Should-NotInvoke Invoke-GraphHandlerStrategy -ModuleName GraphKit
+    }
+
+    It 'ships the beta managed-device singleton needed for authoritative hardware detail' {
+        $descriptor = $script:catalog | Where-Object {
+            $_.Type -eq 'ManagedDevice' -and $_.Operation -eq 'GetBeta'
+        }
+
+        $descriptor | Should -Not -BeNullOrEmpty
+        $descriptor.PathTemplate | Should -BeExactly '/deviceManagement/managedDevices/{id}?$select=id,hardwareInformation,deviceHealthAttestationState,physicalMemoryInBytes,processorArchitecture,skuFamily,skuNumber,managementFeatures,roleScopeTagIds,ethernetMacAddress,bootstrapTokenEscrowed'
+        $descriptor.ApiVersion | Should -BeExactly 'beta'
+        $descriptor.Stability | Should -BeExactly 'DualVersion'
+        $descriptor.OperationKind | Should -BeExactly 'Singleton'
+        $descriptor.HandlerStrategyId | Should -BeExactly 'Singleton.Default'
+        $descriptor.PagingStrategy | Should -BeExactly 'None'
+        $descriptor.DeduplicationKey | Should -BeNullOrEmpty
+        $descriptor.ReplayPolicy | Should -BeExactly 'Safe'
+        @($descriptor.RequiredPermissions.Value) | Should -Be @('DeviceManagementManagedDevices.Read.All')
+    }
+
+    It 'routes managed-device detail through the singleton handler without unwrapping the object' {
+        $script:ManagedDeviceDetail = [pscustomobject]@{
+            id = 'device-1'
+            operatingSystem = 'Windows'
+            hardwareInformation = [pscustomobject]@{
+                serialNumber = 'SERIAL'
+                totalStorageSpace = 1024
+                freeStorageSpace = 512
+                tpmVersion = '2.0'
+            }
+            deviceHealthAttestationState = [pscustomobject]@{
+                secureBoot = 'enabled'
+                bitLockerStatus = 'secured'
+                tpmVersion = '2.0'
+            }
+        }
+
+        Mock Invoke-GraphHandlerStrategy -ModuleName GraphKit {
+            New-ContractEnvelope -Data @($script:ManagedDeviceDetail)
+        }
+        Mock Invoke-GraphPaging -ModuleName GraphKit { throw 'unexpected paging call' }
+
+        $rows = @(Get-GraphObject -Context $script:Context -Type ManagedDevice `
+            -Operation GetBeta -Parameters @{ id = 'device-1' })
+
+        $rows | Should -HaveCount 1
+        $rows[0].PSObject.TypeNames | Should -Contain 'GraphKit.ManagedDevice'
+        $rows[0].id | Should -BeExactly 'device-1'
+        $rows[0].hardwareInformation.tpmVersion | Should -BeExactly '2.0'
+        $rows[0].deviceHealthAttestationState.secureBoot | Should -BeExactly 'enabled'
+        Should-Invoke Invoke-GraphHandlerStrategy -ModuleName GraphKit -Times 1 -Exactly -ParameterFilter {
+            $Descriptor.OperationKind -eq 'Singleton' -and
+            $Descriptor.HandlerStrategyId -eq 'Singleton.Default'
+        }
+        Should-NotInvoke Invoke-GraphPaging -ModuleName GraphKit
     }
 }

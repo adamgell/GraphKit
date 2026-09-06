@@ -25,6 +25,11 @@ descriptors described in `CHANGELOG.md`.
 GraphKit `0.2.2` is an immutable predecessor. Its hard SecretManagement contract remains relevant
 only for hosts pinned to that version.
 
+GraphKit `0.3.1` is an unpublished maintenance bridge candidate for TenantPulse. It adds the beta
+Apple enrollment-profile collection and beta managed-device singleton required by the
+IntuneHealthAutomation successor path. Those routes are deterministically tested; no live-service
+verification or PSGallery publication is claimed for `0.3.1`.
+
 ## What it provides
 
 - Immutable, tenant-specific execution contexts
@@ -44,13 +49,14 @@ GraphKit does not use `Connect-MgGraph` or `Invoke-MgGraphRequest` as its transp
 - PowerShell 7.4 or later
 - `Microsoft.Graph.Authentication` 2.38.1 or later, used as the MSAL delivery dependency
 - `Microsoft.PowerShell.SecretManagement` 1.1.2 or later only when using vault-backed credentials;
-  `0.3.0` validates and imports it at first vault use
+  `0.3.0` and later validate and import it at first vault use
 - A registered SecretManagement vault extension when using stored credentials
 
 Published `0.2.2` still declares SecretManagement as a hard dependency. The pinned installer
-preserves that immutable package contract while treating SecretManagement as opt-in for `0.3.0`.
+preserves that immutable package contract while treating SecretManagement as opt-in for `0.3.0`
+and later.
 Import, help, catalog inspection, managed identity, injected credentials, and Windows certificate-
-store credentials do not require SecretManagement in `0.3.0`. The certificate example below uses
+store credentials do not require SecretManagement in `0.3.0` and later. The certificate example below uses
 a vault reference and therefore exercises the optional vault path.
 
 ## Typical usage

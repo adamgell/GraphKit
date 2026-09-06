@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.3.0'
+ModuleVersion = '0.3.1'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -129,9 +129,20 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.3.0
+0.3.1
 
-Integrated next package. The published PSGallery 0.2.2 artifact remains immutable.
+Stable-line maintenance bridge for TenantPulse's successor data path.
+This package has not been published to PSGallery.
+
+ADDED
+- AppleEnrollmentProfile.ListByToken for beta Apple enrollment profile collection reads.
+- ManagedDevice.GetBeta for beta single-device detail reads, including hardware and
+  attestation fields used by TenantPulse evidence collection.
+
+VERIFICATION BOUNDARY
+- Descriptor catalog and routed result-shape behavior are covered deterministically.
+- No live-service verification is claimed for these two maintenance descriptors.
+- The published PSGallery 0.3.0 and 0.2.2 artifacts remain immutable.
 
 CHANGED
 - Microsoft.PowerShell.SecretManagement 1.1.2+ is resolved only at first vault use.
@@ -139,7 +150,7 @@ CHANGED
 - Vault commands are module-qualified and the boundary rejects an unavailable or too-old
   SecretManagement module instead of accepting unrelated same-named functions.
 - Install-GraphKitPinned installs only hard Microsoft.Graph.Authentication by default for
-  0.3.0, offers -InstallSecretManagement for vault hosts, and preserves automatic
+  0.3.1, offers -InstallSecretManagement for vault hosts, and preserves automatic
   SecretManagement installation for immutable 0.2.2 pins.
 
 ADDED AND LIVE-VERIFIED 2026-08-29

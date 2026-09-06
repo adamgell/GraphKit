@@ -23,16 +23,17 @@ BeforeAll {
 }
 
 Describe 'MinimumTests ratchet synchronization' -Tag 'QA' {
-    It 'keeps CI, package verification, operator guidance, and the passing fixture equal' {
+    It 'keeps CI, proof creation, independent verification, and the passing fixture equal' {
         $ci = Get-Content -LiteralPath (Join-Path $script:repoRoot '.github/workflows/ci.yml') -Raw
-        $publisher = Get-Content -LiteralPath (Join-Path $script:repoRoot 'scripts/Publish-GraphKitPackage.ps1') -Raw
-        $publishTests = Get-Content -LiteralPath (Join-Path $script:repoRoot 'tests/QA/PublishChannel.tests.ps1') -Raw
+        $creator = Get-Content -LiteralPath (Join-Path $script:repoRoot 'scripts/New-GraphKitTestedReleaseProof.ps1') -Raw
+        $verifier = Get-Content -LiteralPath (Join-Path $script:repoRoot 'scripts/Test-GraphKitReleaseProof.ps1') -Raw
+        $proofTests = Get-Content -LiteralPath (Join-Path $script:repoRoot 'tests/QA/ReleaseProof.tests.ps1') -Raw
 
         $values = [ordered] @{
             CI = Get-SingleRatchetValue -Text $ci -Pattern '-MinimumTests\s+(\d+)\s+-AllowedSkips' -Location '.github/workflows/ci.yml'
-            PublishCall = Get-SingleRatchetValue -Text $publisher -Pattern '-MinimumTests\s+(\d+)\s+-AllowedSkips' -Location 'scripts/Publish-GraphKitPackage.ps1 gate call'
-            PublishHint = Get-SingleRatchetValue -Text $publisher -Pattern '-MinimumTests\s+(\d+)[\x27\x22]' -Location 'scripts/Publish-GraphKitPackage.ps1 error hint'
-            PassingFixture = Get-SingleRatchetValue -Text $publishTests -Pattern '(?s)function New-PassingResult.*?\[int\]\s+\$Total\s*=\s*(\d+)' -Location 'tests/QA/PublishChannel.tests.ps1'
+            Creator = Get-SingleRatchetValue -Text $creator -Pattern '\$MinimumTests\s*=\s*(\d+)' -Location 'scripts/New-GraphKitTestedReleaseProof.ps1'
+            Verifier = Get-SingleRatchetValue -Text $verifier -Pattern '\$actualCounts\.total\s+-lt\s+(\d+)' -Location 'scripts/Test-GraphKitReleaseProof.ps1'
+            PassingFixture = Get-SingleRatchetValue -Text $proofTests -Pattern '<test-results[^>]+total="(\d+)"' -Location 'tests/QA/ReleaseProof.tests.ps1'
         }
 
         @($values.Values | Select-Object -Unique).Count | Should -Be 1 -Because (
