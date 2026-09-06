@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Beta read-only descriptors for per-token Apple enrollment profiles and selected per-device
+  managed-device hardware/health detail needed by the TenantPulse IHA successor. Both retain
+  explicit beta metadata and separate live permission/response-shape verification gates.
 - The compiled `GraphKit.Auth` authentication boundary. A dependency-free
   `GraphKit.Auth.Contracts.dll` owns the GraphKit ABI-v1 DTOs, interfaces, strict loader,
   proxies, and host lifetime and loads in the default `AssemblyLoadContext`. `GraphKit.Auth.dll`
