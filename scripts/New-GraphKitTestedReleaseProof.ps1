@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory)] [string] $TestResultPath,
     [Parameter(Mandatory)] [string] $OutputPath,
     [string] $RepositoryRoot = (Split-Path $PSScriptRoot -Parent),
-    [ValidateRange(1, [int]::MaxValue)] [int] $MinimumTests = 790
+    [ValidateRange(1, [int]::MaxValue)] [int] $MinimumTests = 791
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,6 +86,10 @@ if ([string] $manifest.ModuleVersion -ne $version) {
 [xml] $resultDocument = Get-Content -LiteralPath $testResult.FullName -Raw
 $resultRoot = $resultDocument.SelectSingleNode('/test-results')
 if ($null -eq $resultRoot) { throw "Test result '$($testResult.FullName)' has no /test-results root." }
+$wholeResultGate = Join-Path $repo 'tests/QA/Assert-GateResult.ps1'
+if (-not (Test-Path -LiteralPath $wholeResultGate -PathType Leaf)) { throw "Whole-result gate '$wholeResultGate' is absent." }
+& pwsh -NoProfile -File $wholeResultGate -ResultPath $testResult.FullName -MinimumTests $MinimumTests -AllowedSkips 0 | Write-Verbose
+if ($LASTEXITCODE -ne 0) { throw "Test result did not pass the whole-result gate at '$wholeResultGate'." }
 $counts = [ordered]@{
     total = [int] $resultRoot.GetAttribute('total')
     failures = [int] $resultRoot.GetAttribute('failures')

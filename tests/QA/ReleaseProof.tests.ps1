@@ -65,7 +65,7 @@ BeforeAll {
         $resultPath = Join-Path $testRoot 'NUnitXml_GraphKit_v0.3.1.Fixture.xml'
         @'
 <?xml version="1.0" encoding="utf-8"?>
-<test-results name="GraphKit 0.3.1" total="790" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0">
+<test-results name="GraphKit 0.3.1" total="791" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0">
   <test-suite type="TestFixture" name="GraphKit" executed="True" result="Success" success="True" />
 </test-results>
 '@ | Set-Content -LiteralPath $resultPath -Encoding utf8
@@ -85,6 +85,10 @@ BeforeAll {
         }
         finally { $archive.Dispose() }
 
+        $fixtureGateRoot = Join-Path $Root 'tests/QA'
+        $null = New-Item -ItemType Directory -Path $fixtureGateRoot -Force
+        Copy-Item -LiteralPath (Join-Path $script:repoRoot 'tests/QA/Assert-GateResult.ps1') `
+            -Destination (Join-Path $fixtureGateRoot 'Assert-GateResult.ps1')
         "/output/*.nupkg`n/proof.json`n" | Set-Content -LiteralPath (Join-Path $Root '.gitignore') -Encoding utf8
         & git -C $Root init --quiet
         & git -C $Root config user.email fixture@example.invalid
@@ -94,7 +98,7 @@ BeforeAll {
         if ($LASTEXITCODE -ne 0) { throw 'Could not commit the release-proof fixture.' }
 
         $proofPath = Join-Path $Root 'proof.json'
-        & $script:createProof -PackagePath $packagePath -TestResultPath $resultPath -OutputPath $proofPath -RepositoryRoot $Root -MinimumTests 790 | Out-Null
+        & $script:createProof -PackagePath $packagePath -TestResultPath $resultPath -OutputPath $proofPath -RepositoryRoot $Root -MinimumTests 791 | Out-Null
 
         return [pscustomobject]@{
             Root = $Root
@@ -123,7 +127,7 @@ Describe 'GraphKit tested-release proof' -Tag 'QA' {
             -RepositoryRoot $fixture.Root -TestResultPath $fixture.ResultPath
 
         $verified.Version | Should -BeExactly '0.3.1'
-        $verified.TestCount | Should -BeGreaterOrEqual 790
+        $verified.TestCount | Should -BeGreaterOrEqual 791
         $verified.ShippedFileCount | Should -BeGreaterThan 2
         $verified.PackageSha256 | Should -Match '^[0-9a-f]{64}$'
         $verified.SourceRevision | Should -Match '^[0-9a-f]{40}$'
@@ -163,7 +167,7 @@ Describe 'GraphKit tested-release proof' -Tag 'QA' {
     }
 
     It 'rejects changed NUnit bytes' {
-        (Get-Content -LiteralPath $fixture.ResultPath -Raw).Replace('total="790"', 'total="791"') |
+        (Get-Content -LiteralPath $fixture.ResultPath -Raw).Replace('total="791"', 'total="792"') |
             Set-Content -LiteralPath $fixture.ResultPath -Encoding utf8
         & git -C $fixture.Root add output/testResults/NUnitXml_GraphKit_v0.3.1.Fixture.xml
         & git -C $fixture.Root commit --quiet -m result-mutation
@@ -207,5 +211,27 @@ Describe 'GraphKit tested-release proof' -Tag 'QA' {
         $proof | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $fixture.ProofPath -Encoding utf8
         { & $script:verifyProof -PackagePath $fixture.PackagePath -ProofPath $fixture.ProofPath -RepositoryRoot $fixture.Root } |
             Should -Throw -ExpectedMessage '*Proof members mismatch*surprise*'
+    }
+
+    It 'rejects a failed nested test container even when root failure counts claim zero' {
+        $content = Get-Content -LiteralPath $fixture.ResultPath -Raw
+        $content = $content.Replace(
+            '<test-suite type="TestFixture" name="GraphKit" executed="True" result="Success" success="True" />',
+            '<test-suite type="TestFixture" name="GraphKit" executed="True" result="Success" success="True"><test-suite type="TestFixture" name="Discovery" result="Failure" /></test-suite>'
+        )
+        $content | Set-Content -LiteralPath $fixture.ResultPath -Encoding utf8
+        & git -C $fixture.Root add output/testResults/NUnitXml_GraphKit_v0.3.1.Fixture.xml
+        & git -C $fixture.Root commit --quiet -m nested-failure
+
+        { & $script:createProof -PackagePath $fixture.PackagePath -TestResultPath $fixture.ResultPath `
+                -OutputPath (Join-Path $fixture.Root 'failed-proof.json') -RepositoryRoot $fixture.Root -MinimumTests 791 } |
+            Should -Throw -ExpectedMessage '*whole-result gate*'
+
+        $proof = Get-Content -LiteralPath $fixture.ProofPath -Raw | ConvertFrom-Json
+        $proof.sourceRevision = (& git -C $fixture.Root rev-parse HEAD).Trim()
+        $proof.testRun.nunit.sha256 = (Get-FileHash -LiteralPath $fixture.ResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $proof | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $fixture.ProofPath -Encoding utf8
+        { & $script:verifyProof -PackagePath $fixture.PackagePath -ProofPath $fixture.ProofPath -RepositoryRoot $fixture.Root } |
+            Should -Throw -ExpectedMessage '*failed container*Discovery*'
     }
 }

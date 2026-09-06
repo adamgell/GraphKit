@@ -163,6 +163,15 @@ if ((Get-LowerFileHash -Path $resultFile.FullName) -cne [string] $proof.testRun.
 [xml] $resultDocument = Get-Content -LiteralPath $resultFile.FullName -Raw
 $resultRoot = $resultDocument.SelectSingleNode('/test-results')
 if ($null -eq $resultRoot) { throw 'Test result has no /test-results root.' }
+$topSuite = $resultRoot.SelectSingleNode('test-suite')
+if ($null -eq $topSuite -or [string] $topSuite.GetAttribute('result') -notin @('Success', 'Passed')) {
+    throw 'Test result overall status is not successful.'
+}
+$failedSuites = @($resultRoot.SelectNodes('//test-suite[@result="Failure" or @result="Error"]'))
+if ($failedSuites.Count -gt 0) {
+    $failedNames = @($failedSuites | ForEach-Object { [string] $_.GetAttribute('name') })
+    throw "$($failedSuites.Count) failed container(s) or discovery error(s): $($failedNames -join ', ')."
+}
 $actualCounts = @{
     total = [int] $resultRoot.GetAttribute('total'); failures = [int] $resultRoot.GetAttribute('failures')
     errors = [int] $resultRoot.GetAttribute('errors'); skipped = [int] $resultRoot.GetAttribute('skipped')
@@ -174,7 +183,7 @@ foreach ($field in $actualCounts.Keys) {
 foreach ($zeroField in @('failures', 'errors', 'skipped', 'inconclusive', 'notRun')) {
     if ($actualCounts[$zeroField] -ne 0) { throw "Test result is not releasable: $zeroField=$($actualCounts[$zeroField])." }
 }
-if ($actualCounts.total -lt 790) { throw "Test result has $($actualCounts.total) tests; release-proof minimum is 790." }
+if ($actualCounts.total -lt 791) { throw "Test result has $($actualCounts.total) tests; release-proof minimum is 791." }
 
 $packageSnapshot = Copy-VerifiedFile -Source $package.FullName -Destination $PackageSnapshotPath -ExpectedHash $packageHash -Label 'Package'
 $proofHash = Get-LowerFileHash -Path $proofFile.FullName
