@@ -62,4 +62,18 @@ Describe 'GraphKit release package identity' -Tag 'QA' {
         $packagedManifest = Import-PowerShellDataFile (Join-Path $extractRoot 'GraphKit.psd1')
         [string] $packagedManifest.ModuleVersion | Should -Be $script:expectedVersion
     }
+
+    It 'keeps internal lab and predecessor project names out of shipped package metadata' {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($script:packagePath)
+        try {
+            foreach ($entryName in @('GraphKit.psd1', 'GraphKit.nuspec')) {
+                $entry = $archive.GetEntry($entryName)
+                $entry | Should -Not -BeNullOrEmpty
+                $reader = [System.IO.StreamReader]::new($entry.Open())
+                try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                $content | Should -Not -Match '(?i)\bivy24\b|\bIntuneHealthAutomation\b'
+            }
+        }
+        finally { $archive.Dispose() }
+    }
 }

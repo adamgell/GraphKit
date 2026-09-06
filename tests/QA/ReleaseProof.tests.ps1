@@ -65,7 +65,7 @@ BeforeAll {
         $resultPath = Join-Path $testRoot 'NUnitXml_GraphKit_v0.3.1.Fixture.xml'
         @'
 <?xml version="1.0" encoding="utf-8"?>
-<test-results name="GraphKit 0.3.1" total="789" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0">
+<test-results name="GraphKit 0.3.1" total="790" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0">
   <test-suite type="TestFixture" name="GraphKit" executed="True" result="Success" success="True" />
 </test-results>
 '@ | Set-Content -LiteralPath $resultPath -Encoding utf8
@@ -94,7 +94,7 @@ BeforeAll {
         if ($LASTEXITCODE -ne 0) { throw 'Could not commit the release-proof fixture.' }
 
         $proofPath = Join-Path $Root 'proof.json'
-        & $script:createProof -PackagePath $packagePath -TestResultPath $resultPath -OutputPath $proofPath -RepositoryRoot $Root -MinimumTests 789 | Out-Null
+        & $script:createProof -PackagePath $packagePath -TestResultPath $resultPath -OutputPath $proofPath -RepositoryRoot $Root -MinimumTests 790 | Out-Null
 
         return [pscustomobject]@{
             Root = $Root
@@ -123,7 +123,7 @@ Describe 'GraphKit tested-release proof' -Tag 'QA' {
             -RepositoryRoot $fixture.Root -TestResultPath $fixture.ResultPath
 
         $verified.Version | Should -BeExactly '0.3.1'
-        $verified.TestCount | Should -BeGreaterOrEqual 789
+        $verified.TestCount | Should -BeGreaterOrEqual 790
         $verified.ShippedFileCount | Should -BeGreaterThan 2
         $verified.PackageSha256 | Should -Match '^[0-9a-f]{64}$'
         $verified.SourceRevision | Should -Match '^[0-9a-f]{40}$'
@@ -163,7 +163,7 @@ Describe 'GraphKit tested-release proof' -Tag 'QA' {
     }
 
     It 'rejects changed NUnit bytes' {
-        (Get-Content -LiteralPath $fixture.ResultPath -Raw).Replace('total="789"', 'total="790"') |
+        (Get-Content -LiteralPath $fixture.ResultPath -Raw).Replace('total="790"', 'total="791"') |
             Set-Content -LiteralPath $fixture.ResultPath -Encoding utf8
         & git -C $fixture.Root add output/testResults/NUnitXml_GraphKit_v0.3.1.Fixture.xml
         & git -C $fixture.Root commit --quiet -m result-mutation

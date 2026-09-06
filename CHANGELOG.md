@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 GraphKit `0.3.1` is an unpublished maintenance bridge candidate for TenantPulse's
-IntuneHealthAutomation successor path. It has not been published to PSGallery and does not replace
+successor data path. It has not been published to PSGallery and does not replace
 the immutable `0.3.0` release evidence below.
 
 ### Added

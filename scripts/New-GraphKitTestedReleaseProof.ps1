@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory)] [string] $TestResultPath,
     [Parameter(Mandatory)] [string] $OutputPath,
     [string] $RepositoryRoot = (Split-Path $PSScriptRoot -Parent),
-    [ValidateRange(1, [int]::MaxValue)] [int] $MinimumTests = 789
+    [ValidateRange(1, [int]::MaxValue)] [int] $MinimumTests = 790
 )
 
 $ErrorActionPreference = 'Stop'

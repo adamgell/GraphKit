@@ -174,7 +174,7 @@ foreach ($field in $actualCounts.Keys) {
 foreach ($zeroField in @('failures', 'errors', 'skipped', 'inconclusive', 'notRun')) {
     if ($actualCounts[$zeroField] -ne 0) { throw "Test result is not releasable: $zeroField=$($actualCounts[$zeroField])." }
 }
-if ($actualCounts.total -lt 789) { throw "Test result has $($actualCounts.total) tests; release-proof minimum is 789." }
+if ($actualCounts.total -lt 790) { throw "Test result has $($actualCounts.total) tests; release-proof minimum is 790." }
 
 $packageSnapshot = Copy-VerifiedFile -Source $package.FullName -Destination $PackageSnapshotPath -ExpectedHash $packageHash -Label 'Package'
 $proofHash = Get-LowerFileHash -Path $proofFile.FullName
