@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+GraphKit `0.3.1` is an unpublished maintenance bridge candidate for TenantPulse's
+IntuneHealthAutomation successor path. It has not been published to PSGallery and does not replace
+the immutable `0.3.0` release evidence below.
+
+### Added
+
+- `AppleEnrollmentProfile.ListByToken`, a beta paged collection descriptor for Apple enrollment
+  profiles scoped to an enrollment program token.
+- `ManagedDevice.GetBeta`, a beta singleton descriptor that retains the hardware and attestation
+  detail required by TenantPulse evidence collection.
+- Deterministic catalog, public-route, nested-shape, and subtype-preservation tests for both
+  descriptors. No live-service verification is claimed for either new operation.
+
 ## [0.3.0] - 2026-08-30
 
 GraphKit `0.3.0` was published to PSGallery at `2026-08-30T04:38:20.12Z`. The 207381-byte public

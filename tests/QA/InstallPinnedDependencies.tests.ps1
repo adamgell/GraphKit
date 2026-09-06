@@ -49,7 +49,7 @@ Describe 'Install-GraphKitPinned dependency selection' -Tag 'QA' {
     }
 
     It 'installs only hard Graph Authentication by default for a next-release package' {
-        $pin = New-TestPin -Root (Join-Path $TestDrive 'next-default') -Version '0.3.0'
+        $pin = New-TestPin -Root (Join-Path $TestDrive 'next-default') -Version '0.3.1'
 
         { & $script:installer -PinPath $pin -RestoreRecordPath (Join-Path $TestDrive 'next-default/restore.json') } |
             Should -Throw -ExpectedMessage '*stop-after-dependencies*'
@@ -58,7 +58,7 @@ Describe 'Install-GraphKitPinned dependency selection' -Tag 'QA' {
     }
 
     It 'installs lazy SecretManagement for a next-release package only when explicitly requested' {
-        $pin = New-TestPin -Root (Join-Path $TestDrive 'next-vault') -Version '0.3.0'
+        $pin = New-TestPin -Root (Join-Path $TestDrive 'next-vault') -Version '0.3.1'
 
         { & $script:installer -PinPath $pin -RestoreRecordPath (Join-Path $TestDrive 'next-vault/restore.json') -InstallSecretManagement } |
             Should -Throw -ExpectedMessage '*stop-after-dependencies*'

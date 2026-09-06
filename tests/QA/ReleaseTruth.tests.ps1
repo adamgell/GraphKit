@@ -5,6 +5,7 @@ BeforeAll {
     $changelog = Get-Content -LiteralPath (Join-Path $repoRoot 'CHANGELOG.md') -Raw
     $integrationPlan = Get-Content -LiteralPath (Join-Path $repoRoot 'docs/superpowers/plans/2026-08-29-graphkit-0.3.0-integration.md') -Raw
     $manifestPath = Join-Path $repoRoot 'source/GraphKit.psd1'
+    $maintenanceScopes = @($readme, $agents, $changelog)
 
     $readmeCurrentRelease = [regex]::Match(
         $readme,
@@ -61,10 +62,15 @@ Describe 'GraphKit current release truth' -Tag 'QA' {
         Assert-CurrentReleaseEvidence -Text $changelogCurrentRelease -Location 'CHANGELOG 0.3.0 release section'
     }
 
-    It 'preserves the immutable released manifest identity' {
+    It 'preserves the immutable 0.3.0 publication evidence while identifying 0.3.1 as unpublished maintenance work' {
+        foreach ($scope in $maintenanceScopes) {
+            $scope | Should -Match '(?is)0\.3\.1.*(?:maintenance|bridge).*(?:candidate|unpublished|not published)'
+        }
+
         $manifest = Import-PowerShellDataFile $manifestPath
-        [string] $manifest.ModuleVersion | Should -Be '0.3.0'
-        [string] $manifest.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.3\.0(?:\r?\n)'
+        [string] $manifest.ModuleVersion | Should -Be '0.3.1'
+        [string] $manifest.PrivateData.PSData.ReleaseNotes | Should -Match '^0\.3\.1(?:\r?\n)'
+        [string] $manifest.PrivateData.PSData.Prerelease | Should -BeNullOrEmpty
     }
 
     It 'marks the dated integration plan as executed and superseded by publication evidence' {
