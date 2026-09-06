@@ -42,7 +42,7 @@
     ResourceFamily      = 'Directory.Device'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'Device.Read.All' }
     )

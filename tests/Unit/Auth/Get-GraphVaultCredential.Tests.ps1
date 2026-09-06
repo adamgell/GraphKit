@@ -55,6 +55,7 @@ Describe 'Get-GraphVaultCredential' {
 
             $result.AuthMethod | Should -Be 'ClientSecret'
             $result.Material | Should -BeOfType [System.Security.SecureString]
+            $result.OwnsMaterial | Should -BeTrue
             [System.Net.NetworkCredential]::new('', $result.Material).Password | Should -Be $script:ClientSecretPlain
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
             $result.PSTypeNames | Should -Contain 'GraphKit.CredentialMaterial'
@@ -100,6 +101,54 @@ Describe 'Get-GraphVaultCredential' {
 
             Should-NotInvoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit
         }
+
+        It 'fails before vault access for a versioned <Case> reference' -ForEach @(
+            @{
+                Case = 'client secret'
+                AuthMethod = 'ClientSecret'
+                Credential = @{ VaultName = 'v'; SecretName = 'client-secret'; Version = 'immutable-v1' }
+            }
+            @{
+                Case = 'bearer token'
+                AuthMethod = 'BearerToken'
+                Credential = @{ VaultName = 'v'; SecretName = 'bearer'; Version = 'immutable-v1' }
+            }
+            @{
+                Case = 'vault certificate'
+                AuthMethod = 'Certificate'
+                Credential = @{ VaultName = 'v'; CertificateName = 'certificate'; Version = 'immutable-v1' }
+            }
+            @{
+                Case = 'PFX password'
+                AuthMethod = 'Certificate'
+                Credential = @{
+                    PfxPath = 'must-not-be-read.pfx'
+                    Password = @{ VaultName = 'v'; SecretName = 'password'; Version = 'immutable-v1' }
+                }
+            }
+            @{
+                Case = 'vault-certificate password'
+                AuthMethod = 'Certificate'
+                Credential = @{
+                    VaultName = 'v'
+                    CertificateName = 'certificate'
+                    Password = @{ VaultName = 'v'; SecretName = 'password'; Version = 'immutable-v1' }
+                }
+            }
+        ) {
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:NoPasswordPfxBytes }
+
+            {
+                InModuleScope GraphKit -Parameters @{ Credential = $Credential; AuthMethod = $AuthMethod } {
+                    Get-GraphVaultCredential -Credential $Credential -AuthMethod $AuthMethod
+                }
+            } | Should -Throw -ExpectedMessage '*does not support per-secret versions*distinct secret name*'
+
+            Should-Invoke Import-GraphSecretManagement -ModuleName GraphKit -Times 1 -Exactly
+            Should-NotInvoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit
+            Should-NotInvoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit
+        }
     }
 
     Context 'BearerToken' {
@@ -107,14 +156,24 @@ Describe 'Get-GraphVaultCredential' {
             Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
             Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:BearerSecret }
 
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ VaultName = 'v'; SecretName = 'bearer' } -AuthMethod BearerToken
+            $credential = @{ VaultName = 'v'; SecretName = 'bearer' }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod BearerToken
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'BearerToken'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'BearerToken'
             $result.Material | Should -BeOfType [string]
             $result.Material | Should -Be $script:BearerPlain
+            $result.OwnsMaterial | Should -BeFalse
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
         }
     }
 
@@ -123,17 +182,92 @@ Describe 'Get-GraphVaultCredential' {
             Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
             Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $script:SecurePassword }
 
-            $result = InModuleScope GraphKit -Parameters @{ Credential = @{
-                    PfxPath  = $script:PfxPath
-                    Password = @{ VaultName = 'v'; SecretName = 'pfx-password' }
-                } } {
+            $credential = @{
+                PfxPath  = $script:PfxPath
+                Password = @{ VaultName = 'v'; SecretName = 'pfx-password' }
+            }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
                 Get-GraphVaultCredential -Credential $Credential -AuthMethod Certificate
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'Certificate'
             $result.Material | Should -BeOfType [System.Security.Cryptography.X509Certificates.X509Certificate2]
             $result.Material.HasPrivateKey | Should -BeTrue
+            $result.OwnsMaterial | Should -BeTrue
+            $result.CredentialGeneration | Should -Be $expectedGeneration
+            $result.CredentialGeneration | Should -Match 'sha256:[0-9a-f]{64}'
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
+        }
+
+        It 'disposes resolved password ownership and zeroes its PFX snapshot when import fails' {
+            $script:PasswordDisposeProbe = [System.Security.SecureString]::new()
+            $script:PasswordDisposeProbe.AppendChar('x')
+            $script:PfxSnapshotProbe = [byte[]] @(1, 2, 3, 4, 5, 6)
+
+            Mock Resolve-GraphVaultPassword -ModuleName GraphKit { $script:PasswordDisposeProbe }
+            Mock Get-GraphPfxSnapshot -ModuleName GraphKit {
+                [pscustomobject] @{
+                    Path = '/test/invalid.pfx'
+                    Bytes = $script:PfxSnapshotProbe
+                    Sha256 = ('a' * 64)
+                }
+            }
+
+            {
+                InModuleScope GraphKit {
+                    Get-GraphVaultCredential -Credential @{
+                        PfxPath = '/test/invalid.pfx'
+                        Password = @{ VaultName = 'v'; SecretName = 'password' }
+                    } -AuthMethod Certificate
+                }
+            } | Should -Throw -ExpectedMessage '*Could not load the PFX certificate*'
+
+            {
+                $pointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:PasswordDisposeProbe)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+            } | Should -Throw -ExpectedMessage '*disposed object*SecureString*'
+            @($script:PfxSnapshotProbe | Where-Object { $_ -ne 0 }).Count | Should -Be 0
+        }
+
+        It 'does not dispose a caller-owned SecureString password after PFX resolution' {
+            $callerPassword = [System.Security.SecureString]::new()
+            foreach ($ch in $script:PfxPassword.ToCharArray()) {
+                $callerPassword.AppendChar($ch)
+            }
+
+            $result = $null
+            try {
+                $result = InModuleScope GraphKit -Parameters @{
+                    Path = $script:PfxPath
+                    Password = $callerPassword
+                } {
+                    param($Path, $Password)
+                    Get-GraphVaultCredential -Credential @{
+                        PfxPath = $Path
+                        Password = $Password
+                    } -AuthMethod Certificate
+                }
+
+                $pointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($callerPassword)
+                try {
+                    [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) | Should -Be $script:PfxPassword
+                }
+                finally {
+                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+                }
+            }
+            finally {
+                if ($null -ne $result) {
+                    $result.Material.Dispose()
+                }
+                $callerPassword.Dispose()
+            }
         }
     }
 
@@ -149,6 +283,7 @@ Describe 'Get-GraphVaultCredential' {
             $result.AuthMethod | Should -Be 'Certificate'
             $result.Material | Should -BeOfType [System.Security.Cryptography.X509Certificates.X509Certificate2]
             $result.Material.HasPrivateKey | Should -BeTrue
+            $result.OwnsMaterial | Should -BeTrue
         }
 
         It 'builds an X509Certificate2 from base64-encoded PFX material' {
@@ -161,6 +296,33 @@ Describe 'Get-GraphVaultCredential' {
 
             $result.Material | Should -BeOfType [System.Security.Cryptography.X509Certificates.X509Certificate2]
             $result.Material.HasPrivateKey | Should -BeTrue
+            $result.OwnsMaterial | Should -BeTrue
+        }
+
+        It 'copies a vault-provided certificate so the provider object remains external' {
+            $external = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $script:NoPasswordPfxBytes
+            )
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { $external }
+
+            $result = $null
+            try {
+                $result = InModuleScope GraphKit {
+                    Get-GraphVaultCredential -Credential @{ VaultName = 'v'; CertificateName = 'cert' } -AuthMethod Certificate
+                }
+
+                [object]::ReferenceEquals($result.Material, $external) | Should -BeFalse
+                $result.OwnsMaterial | Should -BeTrue
+                $result.Material.HasPrivateKey | Should -BeTrue
+                $external.HasPrivateKey | Should -BeTrue
+            }
+            finally {
+                if ($null -ne $result -and $null -ne $result.Material) {
+                    $result.Material.Dispose()
+                }
+                $external.Dispose()
+            }
         }
 
         It 'fails actionably for unusable certificate material, naming supported shapes' {
@@ -172,6 +334,45 @@ Describe 'Get-GraphVaultCredential' {
                     Get-GraphVaultCredential -Credential @{ VaultName = 'v'; CertificateName = 'cert' } -AuthMethod Certificate
                 }
             } | Should -Throw -ExpectedMessage '*neither a PFX byte array, a base64-encoded PFX, nor a path to a PFX file*'
+        }
+
+        It 'disposes an encrypted vault-certificate password when conversion fails' {
+            $script:VaultPasswordDisposeProbe = [System.Security.SecureString]::new()
+            $script:VaultPasswordDisposeProbe.AppendChar('x')
+            Mock Invoke-GraphSecretManagementGetVault -ModuleName GraphKit { New-TestVault }
+            Mock Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit { [byte[]] @(1, 2, 3) }
+            Mock Resolve-GraphVaultPassword -ModuleName GraphKit { $script:VaultPasswordDisposeProbe }
+
+            {
+                InModuleScope GraphKit {
+                    Get-GraphVaultCredential -Credential @{
+                        VaultName = 'v'
+                        CertificateName = 'cert'
+                        Password = @{ VaultName = 'v'; SecretName = 'password' }
+                    } -AuthMethod Certificate
+                }
+            } | Should -Throw -ExpectedMessage '*could not be interpreted as a PFX*'
+
+            {
+                $pointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:VaultPasswordDisposeProbe)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+            } | Should -Throw -ExpectedMessage '*disposed object*SecureString*'
+        }
+
+        It 'copies provider SecureStrings before returning owned secret material' {
+            $ownedCopy = InModuleScope GraphKit -Parameters @{ ProviderSecret = $script:SecureSecret } {
+                param($ProviderSecret)
+                ConvertTo-GraphSecureString -Value $ProviderSecret
+            }
+
+            try {
+                [object]::ReferenceEquals($ownedCopy, $script:SecureSecret) | Should -BeFalse
+                [System.Net.NetworkCredential]::new('', $ownedCopy).Password | Should -Be $script:ClientSecretPlain
+                [System.Net.NetworkCredential]::new('', $script:SecureSecret).Password | Should -Be $script:ClientSecretPlain
+            }
+            finally {
+                $ownedCopy.Dispose()
+            }
         }
     }
 
@@ -199,25 +400,45 @@ Describe 'Get-GraphVaultCredential' {
 
     Context 'ManagedIdentity' {
         It 'returns the user-assigned client id with zero vault calls' {
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ ClientId = '7d6e5f44-9999-8888-7777-666655554444' } -AuthMethod ManagedIdentity
+            $credential = @{ ClientId = '7d6e5f44-9999-8888-7777-666655554444' }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod ManagedIdentity
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'ManagedIdentity'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -Be '7d6e5f44-9999-8888-7777-666655554444'
+            $result.OwnsMaterial | Should -BeFalse
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
             Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
             Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }
 
         It 'returns null for a system-assigned identity with zero vault calls' {
-            $result = InModuleScope GraphKit {
-                Get-GraphVaultCredential -Credential @{ ClientId = $null } -AuthMethod ManagedIdentity
+            $credential = @{ ClientId = $null }
+            $result = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphVaultCredential -Credential $Credential -AuthMethod ManagedIdentity
+            }
+            $expectedGeneration = InModuleScope GraphKit -Parameters @{ Credential = $credential } {
+                Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'ManagedIdentity'
+                    Credential = $Credential
+                }
             }
 
             $result.AuthMethod | Should -Be 'ManagedIdentity'
             $result.Material | Should -BeNullOrEmpty
             $result.ManagedIdentityClientId | Should -BeNullOrEmpty
+            $result.OwnsMaterial | Should -BeFalse
+            $result.CredentialGeneration | Should -Not -BeNullOrEmpty
+            $result.CredentialGeneration | Should -BeExactly $expectedGeneration
             Should-Invoke Invoke-GraphSecretManagementGetVault -ModuleName GraphKit -Times 0 -Exactly
             Should-Invoke Invoke-GraphSecretManagementGetSecret -ModuleName GraphKit -Times 0 -Exactly
         }

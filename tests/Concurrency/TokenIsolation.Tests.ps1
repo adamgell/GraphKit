@@ -7,11 +7,11 @@
     retargets every other. A per-context token source is only an improvement if it
     actually keeps contexts apart.
 
-    Note on structure: token sources are PowerShell classes defined inside the module, so
-    an instance cannot be marshalled into a bare runspace - the concurrent test therefore
-    imports the module and constructs its source INSIDE each child, sharing only a plain
-    ConcurrentDictionary. Properties that are not about concurrency are asserted directly,
-    because a real runspace adds nothing but flakiness to them.
+    Note on structure: this file retains direct per-instance coverage for the legacy
+    PowerShell-class sources. Task 7's GraphKitAuthRunspace.Tests.ps1 separately proves that
+    one exact compiled parent source crosses real thread runspaces by reference. These legacy
+    fixtures stay module-scoped because their compatibility boundary intentionally rejects
+    cross-runspace acquisition.
 #>
 
 BeforeAll {
@@ -34,25 +34,32 @@ BeforeAll {
     # acquisitions and returns a token naming its tenant, so a token reaching the wrong
     # context is immediately identifiable rather than merely "a token".
     $script:SourceFactoryScript = {
-        param([string] $Tenant, $Counter, [int] $DelayMs = 0)
+        param([string] $Tenant, $Counter, $ForceRefreshFlags)
 
         # State is carried on the objects themselves ($this) rather than in closures:
         # ScriptMethod bodies do not reliably see variables captured by GetNewClosure at
         # the point they are later invoked, which silently yields a null Counter.
         $factory = {
-            $app = [pscustomobject] @{ Tenant = $Tenant; Counter = $Counter; DelayMs = $DelayMs }
+            $app = [pscustomobject] @{
+                Tenant            = $Tenant
+                Counter           = $Counter
+                ForceRefreshFlags = $ForceRefreshFlags
+            }
             $app | Add-Member -MemberType ScriptMethod -Name AcquireTokenForClient -Value {
                 param($Scopes)
                 $builder = [pscustomobject] @{
-                    Tenant  = $this.Tenant
-                    Counter = $this.Counter
-                    DelayMs = $this.DelayMs
+                    Tenant            = $this.Tenant
+                    Counter           = $this.Counter
+                    ForceRefreshFlags = $this.ForceRefreshFlags
+                }
+                $builder | Add-Member -MemberType ScriptMethod -Name WithForceRefresh -Value {
+                    param([bool] $ForceRefresh)
+                    $this.ForceRefreshFlags.Enqueue($ForceRefresh)
+                    return $this
                 }
                 $builder | Add-Member -MemberType ScriptMethod -Name ExecuteAsync -Value {
                     param($Cancellation)
                     $null = $this.Counter.AddOrUpdate($this.Tenant, 1, [Func[string, int, int]] { param($k, $v) $v + 1 })
-                    if ($this.DelayMs -gt 0) { Start-Sleep -Milliseconds $this.DelayMs }
-
                     $auth = [pscustomobject] @{
                         AccessToken = "TOKEN-FOR-$($this.Tenant)"
                         ExpiresOn   = [System.DateTimeOffset]::UtcNow.AddHours(1)
@@ -75,10 +82,54 @@ BeforeAll {
     }
 
     function New-TestTokenSource {
-        param([string] $Tenant, $Counter, [int] $DelayMs = 0)
-        InModuleScope GraphKit -Parameters @{ T = $Tenant; C = $Counter; D = $DelayMs; F = $script:SourceFactoryScript } {
-            param($T, $C, $D, $F)
-            & $F $T $C $D
+        param(
+            [string] $Tenant,
+            $Counter,
+            $ForceRefreshFlags = ([System.Collections.Concurrent.ConcurrentQueue[bool]]::new())
+        )
+        InModuleScope GraphKit -Parameters @{ T = $Tenant; C = $Counter; Q = $ForceRefreshFlags; F = $script:SourceFactoryScript } {
+            param($T, $C, $Q, $F)
+            & $F $T $C $Q
+        }
+    }
+
+    function New-TestManagedIdentitySource {
+        param($ForceRefreshFlags)
+
+        InModuleScope GraphKit -Parameters @{ Q = $ForceRefreshFlags } {
+            param($Q)
+
+            $factory = {
+                $app = [pscustomobject] @{ ForceRefreshFlags = $Q }
+                $app | Add-Member -MemberType ScriptMethod -Name AcquireTokenForManagedIdentity -Value {
+                    param($Scope)
+                    $builder = [pscustomobject] @{ ForceRefreshFlags = $this.ForceRefreshFlags }
+                    $builder | Add-Member -MemberType ScriptMethod -Name WithForceRefresh -Value {
+                        param([bool] $ForceRefresh)
+                        $this.ForceRefreshFlags.Enqueue($ForceRefresh)
+                        return $this
+                    }
+                    $builder | Add-Member -MemberType ScriptMethod -Name ExecuteAsync -Value {
+                        param($Cancellation)
+                        $auth = [pscustomobject] @{
+                            AccessToken = 'TOKEN-FOR-MANAGED-IDENTITY'
+                            ExpiresOn   = [System.DateTimeOffset]::UtcNow.AddHours(1)
+                        }
+                        $task = [pscustomobject] @{ Auth = $auth }
+                        $task | Add-Member -MemberType ScriptMethod -Name GetAwaiter -Value {
+                            $awaiter = [pscustomobject] @{ Auth = $this.Auth }
+                            $awaiter | Add-Member -MemberType ScriptMethod -Name GetResult -Value { return $this.Auth }
+                            return $awaiter
+                        }
+                        return $task
+                    }
+                    return $builder
+                }
+                return $app
+            }.GetNewClosure()
+
+            return [ManagedIdentityTokenSource]::new(
+                $factory, 'https://graph.microsoft.com', 'client-id', 'managed-generation')
         }
     }
 }
@@ -125,6 +176,27 @@ Describe 'Token isolation: a context receives only its own token' {
 }
 
 Describe 'Token isolation: refresh and caching stay context-local' {
+
+    It 'forwards the force-refresh decision to the confidential-client builder' {
+        $counter = [System.Collections.Concurrent.ConcurrentDictionary[string, int]]::new()
+        $flags = [System.Collections.Concurrent.ConcurrentQueue[bool]]::new()
+        $source = New-TestTokenSource -Tenant 'force-confidential' -Counter $counter -ForceRefreshFlags $flags
+
+        $null = $source.Acquire($false, [System.Threading.CancellationToken]::None)
+        $null = $source.Acquire($true, [System.Threading.CancellationToken]::None)
+
+        @($flags.ToArray()) | Should -Be @($false, $true)
+    }
+
+    It 'forwards the force-refresh decision to the managed-identity builder' {
+        $flags = [System.Collections.Concurrent.ConcurrentQueue[bool]]::new()
+        $source = New-TestManagedIdentitySource -ForceRefreshFlags $flags
+
+        $null = $source.Acquire($false, [System.Threading.CancellationToken]::None)
+        $null = $source.Acquire($true, [System.Threading.CancellationToken]::None)
+
+        @($flags.ToArray()) | Should -Be @($false, $true)
+    }
 
     It 'a forced refresh on one context leaves another untouched' {
         # The single 401 force-refresh must not be a global event: that is precisely the

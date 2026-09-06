@@ -10,18 +10,34 @@ BeforeAll {
     function New-TestSecretManagementModule {
         param(
             [Parameter(Mandatory)] [string] $Root,
-            [Parameter(Mandatory)] [version] $Version
+            [Parameter(Mandatory)] [version] $Version,
+            [switch] $NoVault
         )
 
         $moduleRoot = Join-Path $Root "Microsoft.PowerShell.SecretManagement/$Version"
         $null = New-Item -ItemType Directory -Path $moduleRoot -Force
         $rootModule = Join-Path $moduleRoot 'Microsoft.PowerShell.SecretManagement.psm1'
-        @'
+        $vaultBody = if ($NoVault) {
+            @'
+function Get-SecretVault {
+    [CmdletBinding()]
+    param([string] $Name)
+    $null = $Name
+    return $null
+}
+'@
+        }
+        else {
+            @'
 function Get-SecretVault {
     [CmdletBinding()]
     param([string] $Name)
     [pscustomobject]@{ Name = $Name; ModuleName = 'Synthetic.SecretStore' }
 }
+'@
+        }
+
+        $moduleBody = $vaultBody + @'
 
 function Get-Secret {
     [CmdletBinding()]
@@ -32,7 +48,8 @@ function Get-Secret {
 }
 
 Export-ModuleMember -Function Get-SecretVault, Get-Secret
-'@ | Set-Content -LiteralPath $rootModule -Encoding utf8
+'@
+        $moduleBody | Set-Content -LiteralPath $rootModule -Encoding utf8
 
         New-ModuleManifest -Path (Join-Path $moduleRoot 'Microsoft.PowerShell.SecretManagement.psd1') `
             -RootModule 'Microsoft.PowerShell.SecretManagement.psm1' -ModuleVersion $Version `
@@ -113,6 +130,38 @@ Describe 'lazy SecretManagement boundary' {
                 Get-GraphVaultCredential -Credential @{ VaultName = 'v'; SecretName = 'client-secret' } -AuthMethod ClientSecret
             }
         } | Should -Throw -ExpectedMessage '*Microsoft.PowerShell.SecretManagement*Install-Module*1.1.2*'
+
+        $script:foreignVaultCalls | Should -Be 0
+        $script:foreignSecretCalls | Should -Be 0
+    }
+
+    It 'resolves managed identity when SecretManagement is not installed' {
+        $emptyModulePath = Join-Path $TestDrive 'empty-mi'
+        $null = New-Item -ItemType Directory -Path $emptyModulePath -Force
+        $env:PSModulePath = $emptyModulePath
+
+        $result = InModuleScope GraphKit {
+            Get-GraphVaultCredential -Credential @{ ClientId = '7d6e5f44-9999-8888-7777-666655554444' } -AuthMethod ManagedIdentity
+        }
+
+        $result.AuthMethod | Should -Be 'ManagedIdentity'
+        $result.ManagedIdentityClientId | Should -Be '7d6e5f44-9999-8888-7777-666655554444'
+        $script:foreignVaultCalls | Should -Be 0
+        $script:foreignSecretCalls | Should -Be 0
+        InModuleScope GraphKit {
+            @(Get-Module Microsoft.PowerShell.SecretManagement).Count | Should -Be 0
+        }
+    }
+
+    It 'distinguishes an unregistered vault from a missing SecretManagement module' {
+        $modulePath = New-TestSecretManagementModule -Root (Join-Path $TestDrive 'novault') -Version '9.9.9' -NoVault
+        $env:PSModulePath = $modulePath
+
+        {
+            InModuleScope GraphKit {
+                Get-GraphVaultCredential -Credential @{ VaultName = 'missing'; SecretName = 'client-secret' } -AuthMethod ClientSecret
+            }
+        } | Should -Throw -ExpectedMessage "*vault 'missing' is not registered*Register-SecretVault*"
 
         $script:foreignVaultCalls | Should -Be 0
         $script:foreignSecretCalls | Should -Be 0

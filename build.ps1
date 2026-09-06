@@ -329,6 +329,21 @@ process
             . $taskFile.FullName
         }
 
+        task package_graphkit_r8_nupkg {
+            . Set-SamplerTaskVariable
+
+            if (-not $BuiltModuleManifest) {
+                throw "No valid manifest found for project $ProjectName."
+            }
+            if (-not (Get-Command -Name Compress-PSResource -ErrorAction SilentlyContinue)) {
+                throw 'Compress-PSResource is required to create GraphKit R8 prerelease packages.'
+            }
+
+            Get-ChildItem -LiteralPath $OutputDirectory -Filter "$ProjectName.*.nupkg" -File -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction Stop
+            Compress-PSResource -Path $BuiltModuleBase -DestinationPath $OutputDirectory -ErrorAction Stop
+        }
+
         # Synopsis: Empty task, useful to test the bootstrap process.
         task noop { }
 
@@ -366,6 +381,37 @@ process
 
 begin
 {
+    function Get-GraphKitValidatedTrainVersion
+    {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param
+        (
+            [Parameter(Mandatory)]
+            [string]
+            $VersionScript,
+
+            [Parameter(Mandatory)]
+            [string]
+            $RepositoryRoot
+        )
+
+        $versionOutput = @(
+            & $VersionScript -RepositoryRoot $RepositoryRoot -ErrorAction Stop
+        )
+        if ($versionOutput.Count -ne 1 -or
+            $versionOutput[0] -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $versionOutput[0]))
+        {
+            throw (
+                "The GraphKit train-version script must return exactly one non-empty string; " +
+                "received $($versionOutput.Count) output object(s)."
+            )
+        }
+
+        return ([string] $versionOutput[0]).Trim()
+    }
+
     # Find build config if not specified.
     if (-not $BuildConfig)
     {
@@ -523,6 +569,10 @@ begin
     if ($MyInvocation.ScriptName -notlike '*Invoke-Build.ps1')
     {
         Write-Verbose -Message "Bootstrap completed. Handing back to InvokeBuild."
+
+        $versionScript = Join-Path $PSScriptRoot 'scripts/Get-GraphKitTrainVersion.ps1'
+        $env:ModuleVersion = Get-GraphKitValidatedTrainVersion `
+            -VersionScript $versionScript -RepositoryRoot $PSScriptRoot
 
         if ($PSBoundParameters.ContainsKey('ResolveDependency'))
         {

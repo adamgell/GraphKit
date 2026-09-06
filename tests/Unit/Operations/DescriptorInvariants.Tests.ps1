@@ -10,6 +10,16 @@ BeforeAll {
 
 Describe 'Descriptor invariants that fail silently if broken' {
 
+    It 'declares every Graph operation compatible with every persisted auth mode' {
+        # All catalogued operations attach a Graph bearer and the persisted source determines
+        # acquisition, not endpoint semantics. Keeping this exact list prevents a fixed bearer
+        # from being silently documented as unsupported while the transport still accepts it.
+        $expected = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
+        foreach ($descriptor in $script:catalog) {
+            $descriptor.SupportedAuthModes | Should -Be $expected -Because "$($descriptor.Type)/$($descriptor.Operation) is GraphBearer"
+        }
+    }
+
     It 'keeps the $select on Organization/GetMdmAuthority' {
         # mobileDeviceManagementAuthority is a workload-extension property: it is returned only
         # when named in $select, on the ENTITY url, and it is absent from /organization
@@ -324,15 +334,13 @@ Describe 'The TenantPulse-unblocking reads keep their official paths' {
         $d.ApiVersion | Should -Be 'beta'
     }
 
-    It 'keeps the $select on Group/Get' {
-        # isAssignableToRole and isManagementRestricted are omitted unless selected. A Get
-        # without $select returns 200 and looks unprotected, which is a silent false Fail
-        # for TP.INT.0013.
+    It 'keeps the exact reporting and protection $select on Group/Get' {
+        # Description feeds normalized assignment reporting. isAssignableToRole and
+        # isManagementRestricted are omitted unless selected. A Get without $select returns
+        # 200 and looks unprotected, which is a silent false Fail for TP.INT.0013.
         $d = $script:catalog | Where-Object { $_.Type -eq 'Group' -and $_.Operation -eq 'Get' }
         $d | Should -Not -BeNullOrEmpty
-        $d.PathTemplate | Should -BeLike '/groups/{id}*$select=*'
-        $d.PathTemplate | Should -BeLike '*isAssignableToRole*'
-        $d.PathTemplate | Should -BeLike '*isManagementRestricted*'
+        $d.PathTemplate | Should -BeExactly '/groups/{id}?$select=id,displayName,description,isAssignableToRole,isManagementRestricted'
         $d.OperationKind | Should -Be 'Singleton'
         $d.PagingStrategy | Should -Be 'None'
     }
@@ -353,5 +361,3 @@ Describe 'The TenantPulse-unblocking reads keep their official paths' {
         $d.ApiVersion | Should -Be 'v1.0'
     }
 }
-
-

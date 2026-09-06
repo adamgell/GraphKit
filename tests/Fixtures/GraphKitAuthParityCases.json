@@ -1,0 +1,198 @@
+{
+  "schemaVersion": 1,
+  "rowCount": 16,
+  "rows": [
+    {
+      "id": "construction-certificate",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "construction",
+      "authMode": "Certificate",
+      "callLayerByRunner": {"xunit-compiled": "construction-only", "pester-legacy": "construction-only"},
+      "input": {"tokens": [], "expiresOnUtc": [], "forceFlags": [], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "construction-client-secret",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "construction",
+      "authMode": "ClientSecret",
+      "callLayerByRunner": {"xunit-compiled": "construction-only", "pester-legacy": "construction-only"},
+      "input": {"tokens": [], "expiresOnUtc": [], "forceFlags": [], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "construction-managed-identity",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "construction",
+      "authMode": "ManagedIdentity",
+      "callLayerByRunner": {"xunit-compiled": "construction-only", "pester-legacy": "construction-only"},
+      "input": {"tokens": [], "expiresOnUtc": [], "forceFlags": [], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "construction-bearer-token",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "construction",
+      "authMode": "BearerToken",
+      "callLayerByRunner": {"xunit-compiled": "construction-only", "pester-legacy": "construction-only"},
+      "input": {"tokens": ["task7-fixed-bearer"], "expiresOnUtc": [], "forceFlags": [], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com/", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": null, "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "ordinary-cache-hit",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "cache-hit",
+      "authMode": "Certificate",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-cache-token"], "expiresOnUtc": ["2099-01-01T00:00:00+00:00"], "forceFlags": [false, false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-cache-token", "task7-cache-token"], "expiriesOnUtc": ["2099-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["04541062146f483873bcfc895119fbad37b329366184fa6853f85b224058ed02", "04541062146f483873bcfc895119fbad37b329366184fa6853f85b224058ed02"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "AllSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-cache-token", "task7-cache-token"], "expiriesOnUtc": ["2099-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["04541062146f483873bcfc895119fbad37b329366184fa6853f85b224058ed02", "04541062146f483873bcfc895119fbad37b329366184fa6853f85b224058ed02"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "AllSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "expired-result-refresh",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "expiry-refresh",
+      "authMode": "ClientSecret",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-expired-token", "task7-refreshed-token"], "expiresOnUtc": ["2000-01-01T00:00:00+00:00", "2099-02-01T00:00:00+00:00"], "forceFlags": [false, false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-02-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-expired-token", "task7-refreshed-token"], "expiriesOnUtc": ["2000-01-01T00:00:00+00:00", "2099-02-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["b92e4ba1ef5d09f503217d3183c0c5800d5b6b41d7428657de83dd13cf70a151", "9fc47689a9665fd18f6533875ee81a073df2735fb1e32e8e7fac98e78889189e"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 2, "forceFlags": [false, false], "referenceIdentity": "AllDistinct", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-02-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-expired-token", "task7-refreshed-token"], "expiriesOnUtc": ["2000-01-01T00:00:00+00:00", "2099-02-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["b92e4ba1ef5d09f503217d3183c0c5800d5b6b41d7428657de83dd13cf70a151", "9fc47689a9665fd18f6533875ee81a073df2735fb1e32e8e7fac98e78889189e"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 2, "forceFlags": [false, false], "referenceIdentity": "AllDistinct", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "ordinary-forced-ordinary",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "force-partition",
+      "authMode": "ManagedIdentity",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-mi-ordinary", "task7-mi-forced"], "expiresOnUtc": ["2099-02-01T00:00:00+00:00", "2099-03-01T00:00:00+00:00"], "forceFlags": [false, true, false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-03-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-mi-ordinary", "task7-mi-forced", "task7-mi-forced"], "expiriesOnUtc": ["2099-02-01T00:00:00+00:00", "2099-03-01T00:00:00+00:00", "2099-03-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null, null], "fingerprints": ["f5398190efdc0448bd241de2daa73362beb3b47655535fcb3523c57efba1f4a7", "365ec8d8974c1d5c5d28946ebf5e4ffee2142fff909ca6c6ae86f7e7ccb698a4", "365ec8d8974c1d5c5d28946ebf5e4ffee2142fff909ca6c6ae86f7e7ccb698a4"], "generations": ["task7-generation", "task7-generation", "task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 2, "forceFlags": [false, true], "referenceIdentity": "SecondAndThirdSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-03-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-mi-ordinary", "task7-mi-forced", "task7-mi-forced"], "expiriesOnUtc": ["2099-02-01T00:00:00+00:00", "2099-03-01T00:00:00+00:00", "2099-03-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null, null], "fingerprints": ["f5398190efdc0448bd241de2daa73362beb3b47655535fcb3523c57efba1f4a7", "365ec8d8974c1d5c5d28946ebf5e4ffee2142fff909ca6c6ae86f7e7ccb698a4", "365ec8d8974c1d5c5d28946ebf5e4ffee2142fff909ca6c6ae86f7e7ccb698a4"], "generations": ["task7-generation", "task7-generation", "task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 2, "forceFlags": [false, true], "referenceIdentity": "SecondAndThirdSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "acquisition-failure-fanout-retry",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "failure-fanout-retry",
+      "authMode": "Certificate",
+      "callLayerByRunner": {"xunit-compiled": "compiled-internal-source-flight", "pester-legacy": "legacy-production-outer-keyed-flight"},
+      "input": {"tokens": ["task7-failure", "task7-recovered"], "expiresOnUtc": ["2099-04-01T00:00:00+00:00", "2099-04-01T00:00:00+00:00"], "forceFlags": [false, false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-04-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-recovered"], "expiriesOnUtc": ["2099-04-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["210b0c9a5a87ec611b26321b4af0372a51a5c37e5285ca760c61e4d6d57fa0cd"], "generations": ["task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 2, "forceFlags": [false, false], "referenceIdentity": "Single", "failureKind": "AcquisitionFailure", "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-04-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-recovered"], "expiriesOnUtc": ["2099-04-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["210b0c9a5a87ec611b26321b4af0372a51a5c37e5285ca760c61e4d6d57fa0cd"], "generations": ["task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 0, "providerAcquisitionCount": 2, "forceFlags": [false, false], "referenceIdentity": "Single", "failureKind": "AcquisitionFailure", "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "caller-cancellation-no-cache",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "caller-cancellation",
+      "authMode": "ClientSecret",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-cancelled-token"], "expiresOnUtc": ["2099-04-01T00:00:00+00:00"], "forceFlags": [false], "cancelCaller": true, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "None", "failureKind": "Canceled", "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "None", "failureKind": "Canceled", "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "fixed-bearer-cache-force-refusal",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "fixed-bearer",
+      "authMode": "BearerToken",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-fixed-bearer"], "expiresOnUtc": [], "forceFlags": [false, false, true], "cancelCaller": false, "fingerprintInput": null, "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com/", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fixed-bearer", "task7-fixed-bearer"], "expiriesOnUtc": ["0001-01-01T00:00:00+00:00", "0001-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["031a543f823d15bda5771f6126880f7f6d7ece11e42fdff37b01324ad0cb58a6", "031a543f823d15bda5771f6126880f7f6d7ece11e42fdff37b01324ad0cb58a6"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "AllSame", "failureKind": "RefreshRefused", "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fixed-bearer", "task7-fixed-bearer"], "expiriesOnUtc": ["0001-01-01T00:00:00+00:00", "0001-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer", "Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"], ["https://graph.microsoft.com/.default"]], "tenantProofs": [null, null], "fingerprints": ["031a543f823d15bda5771f6126880f7f6d7ece11e42fdff37b01324ad0cb58a6", "031a543f823d15bda5771f6126880f7f6d7ece11e42fdff37b01324ad0cb58a6"], "generations": ["task7-generation", "task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "AllSame", "failureKind": "RefreshRefused", "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "fingerprint-certificate",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "fingerprint",
+      "authMode": "Certificate",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-fingerprint-certificate"], "expiresOnUtc": ["2099-05-01T00:00:00+00:00"], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": "task7-fingerprint-certificate", "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-certificate"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["245d574cc6b41262c018a65535f9937601045f29abff3df9d112e491048948b6"], "generations": ["task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-certificate"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["245d574cc6b41262c018a65535f9937601045f29abff3df9d112e491048948b6"], "generations": ["task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "fingerprint-client-secret",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "fingerprint",
+      "authMode": "ClientSecret",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-fingerprint-client-secret"], "expiresOnUtc": ["2099-05-01T00:00:00+00:00"], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": "task7-fingerprint-client-secret", "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-client-secret"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["b4ec6c20d74417b5be0b54ce83bc39a9f0b2e990ec173e6ee9373491a65de55e"], "generations": ["task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ClientSecret", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-client-secret"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["b4ec6c20d74417b5be0b54ce83bc39a9f0b2e990ec173e6ee9373491a65de55e"], "generations": ["task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "fingerprint-managed-identity",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "fingerprint",
+      "authMode": "ManagedIdentity",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-fingerprint-managed-identity"], "expiresOnUtc": ["2099-05-01T00:00:00+00:00"], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": "task7-fingerprint-managed-identity", "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-managed-identity"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["6973fa751d466a0429077804c84708dc98188047d415ca992a583a6bf7744866"], "generations": ["task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-05-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-managed-identity"], "expiriesOnUtc": ["2099-05-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["6973fa751d466a0429077804c84708dc98188047d415ca992a583a6bf7744866"], "generations": ["task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 1, "providerAcquisitionCount": 1, "forceFlags": [false], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "fingerprint-bearer-token",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "fingerprint",
+      "authMode": "BearerToken",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": ["task7-fingerprint-bearer-token"], "expiresOnUtc": [], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": "task7-fingerprint-bearer-token", "adoptToken": null, "adoptGeneration": null, "adoptReceivedOnUtc": null, "adoptExpiresOnUtc": null, "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com/", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-bearer-token"], "expiriesOnUtc": ["0001-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["04fa2face75f1b6e4df7e9270266abec23741a9e91c7fad9b12b1c8585c30bca"], "generations": ["task7-generation"], "receivedTimeRule": "InjectedClock", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": false, "authMode": "BearerToken", "audience": "https://graph.microsoft.com", "clientId": null, "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": ["task7-fingerprint-bearer-token"], "expiriesOnUtc": ["0001-01-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": [null], "fingerprints": ["04fa2face75f1b6e4df7e9270266abec23741a9e91c7fad9b12b1c8585c30bca"], "generations": ["task7-generation"], "receivedTimeRule": "WallClock", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "Single", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "adoption-generation-mismatch",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "adoption-mismatch",
+      "authMode": "Certificate",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": [], "expiresOnUtc": [], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": "task7-wrong-generation", "adoptGeneration": "task7-other-generation", "adoptReceivedOnUtc": "2026-08-31T12:00:00+00:00", "adoptExpiresOnUtc": "2099-06-01T00:00:00+00:00", "adoptTenantProof": null},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 1, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": "GenerationMismatch", "cacheState": "Empty", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "Certificate", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000002", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "0001-01-01T00:00:00+00:00", "sourceVerifiedTenantId": null, "tokenSequence": [], "expiriesOnUtc": [], "tokenTypes": [], "orderedScopes": [], "tenantProofs": [], "fingerprints": [], "generations": [], "receivedTimeRule": "None", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "None", "failureKind": "GenerationMismatch", "cacheState": "Empty", "finalFlightRegistryCount": 0}
+      }
+    },
+    {
+      "id": "adoption-valid",
+      "runners": ["xunit-compiled", "pester-legacy"],
+      "scenario": "adoption-valid",
+      "authMode": "ManagedIdentity",
+      "callLayerByRunner": {"xunit-compiled": "direct-source", "pester-legacy": "direct-source"},
+      "input": {"tokens": [], "expiresOnUtc": [], "forceFlags": [false], "cancelCaller": false, "fingerprintInput": null, "adoptToken": "task7-adopted", "adoptGeneration": "task7-generation", "adoptReceivedOnUtc": "2026-08-31T12:00:00+00:00", "adoptExpiresOnUtc": "2099-06-01T00:00:00+00:00", "adoptTenantProof": "task7-verified-tenant"},
+      "expectedByRunner": {
+        "xunit-compiled": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com/", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-06-01T00:00:00+00:00", "sourceVerifiedTenantId": "task7-verified-tenant", "tokenSequence": ["task7-adopted"], "expiriesOnUtc": ["2099-06-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": ["task7-verified-tenant"], "fingerprints": ["30b8da1fe4619e861346b4a126726d6c781940797f2446a711666a58256796cc"], "generations": ["task7-generation"], "receivedTimeRule": "LiteralAdopted", "applicationConstructionCount": 1, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "AdoptedAndReturnedSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0},
+        "pester-legacy": {"canRefresh": true, "authMode": "ManagedIdentity", "audience": "https://graph.microsoft.com", "clientId": "00000000-0000-0000-0000-000000000003", "credentialGeneration": "task7-generation", "sourceExpiresOnUtc": "2099-06-01T00:00:00+00:00", "sourceVerifiedTenantId": "task7-verified-tenant", "tokenSequence": ["task7-adopted"], "expiriesOnUtc": ["2099-06-01T00:00:00+00:00"], "tokenTypes": ["Bearer"], "orderedScopes": [["https://graph.microsoft.com/.default"]], "tenantProofs": ["task7-verified-tenant"], "fingerprints": ["30b8da1fe4619e861346b4a126726d6c781940797f2446a711666a58256796cc"], "generations": ["task7-generation"], "receivedTimeRule": "LiteralAdopted", "applicationConstructionCount": 0, "providerAcquisitionCount": 0, "forceFlags": [], "referenceIdentity": "AdoptedAndReturnedSame", "failureKind": null, "cacheState": "Populated", "finalFlightRegistryCount": 0}
+      }
+    }
+  ]
+}

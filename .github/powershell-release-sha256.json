@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "7.4.19": {
+      "releaseUrl": "https://github.com/PowerShell/PowerShell/releases/tag/v7.4.19",
+      "hashesUrl": "https://github.com/PowerShell/PowerShell/releases/download/v7.4.19/hashes.sha256"
+    },
+    "7.6.5": {
+      "releaseUrl": "https://github.com/PowerShell/PowerShell/releases/tag/v7.6.5",
+      "hashesUrl": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/hashes.sha256"
+    }
+  },
+  "sha256": {
+    "7.4.19/PowerShell-7.4.19-win-arm64.zip": "ac3a0249c0cd9f5b55f198f681485099ea73f45838dfd676457571a94d793463",
+    "7.4.19/PowerShell-7.4.19-win-x64.zip": "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9",
+    "7.4.19/powershell-7.4.19-linux-arm64.tar.gz": "2b11aafacf574222abaf691a0b3b2d463e617d17fe337343c2fb93ea871a4691",
+    "7.4.19/powershell-7.4.19-linux-x64.tar.gz": "1b023e097b0e0546ad9566f7a2126cbe0eb8455fa7b0c5de558e317b8ddc16c8",
+    "7.4.19/powershell-7.4.19-osx-arm64.tar.gz": "fb9d6656d0c78c6d3f6e8d08ff15e5e0d867f886bf4ebecfde6484d2fa06c042",
+    "7.4.19/powershell-7.4.19-osx-x64.tar.gz": "bb67378d9b9d469d0c3863aa8a5576a38ad8eaa0fd7aae2c4819e7caf06cb79c",
+    "7.6.5/PowerShell-7.6.5-win-arm64.zip": "20514a755d16428dc4355c85e0883c859531e71cc3e122670aa1fccdbf96ba7e",
+    "7.6.5/PowerShell-7.6.5-win-x64.zip": "32eb8f6cdce08f86e987d625a2733e54ac3e289ae7e1621b14c0b5bcec2434ea",
+    "7.6.5/powershell-7.6.5-linux-arm64.tar.gz": "ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df",
+    "7.6.5/powershell-7.6.5-linux-x64.tar.gz": "b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844",
+    "7.6.5/powershell-7.6.5-osx-arm64.tar.gz": "8196d4b4e7c21b7f6df9d45687bb4e42dc8335f330b580d9eb15f3ef5042a8c3",
+    "7.6.5/powershell-7.6.5-osx-x64.tar.gz": "3db1d177ab39511c1b6b73b05a1630a5db4e8dce22857ca76f14c5d98f2733fd"
+  }
+}

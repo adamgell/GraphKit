@@ -3,7 +3,8 @@ BeforeAll {
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
     $script:sourceManifest = Import-PowerShellDataFile -Path (Join-Path $script:repoRoot 'source/GraphKit.psd1')
-    $script:version = [string] $script:sourceManifest.ModuleVersion
+    $script:baseVersion = [string] $script:sourceManifest.ModuleVersion
+    $script:version = (& (Join-Path $script:repoRoot 'scripts/Get-GraphKitTrainVersion.ps1') -RepositoryRoot $script:repoRoot).Trim()
     $script:packagePath = Join-Path $script:repoRoot "output/GraphKit.$script:version.nupkg"
     $script:graphAuthPath = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
 
@@ -33,7 +34,7 @@ BeforeAll {
         param([Parameter(Mandatory)] [string] $Root)
 
         $modulePath = Join-Path $Root 'Modules'
-        $graphKitDestination = Join-Path $modulePath "GraphKit/$script:version"
+        $graphKitDestination = Join-Path $modulePath "GraphKit/$script:baseVersion"
         $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
         $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
         [System.IO.Compression.ZipFile]::ExtractToDirectory($script:packagePath, $graphKitDestination)
@@ -44,24 +45,28 @@ BeforeAll {
     function Invoke-IsolatedGraphKitProbe {
         param([Parameter(Mandatory)] [string] $ModulePath)
 
-        $isolatedManifest = Join-Path $ModulePath "GraphKit/$script:version/GraphKit.psd1"
+        $isolatedManifest = Join-Path $ModulePath "GraphKit/$script:baseVersion/GraphKit.psd1"
         $probe = @"
 `$ErrorActionPreference = 'Stop'
 `$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
 Import-Module '$($isolatedManifest.Replace("'", "''"))' -Force -ErrorAction Stop
 `$operation = Get-GraphOperation -Type ManagedDevice -Operation List
+`$graphAuthenticationLoaded = [bool] (Get-Module Microsoft.Graph.Authentication)
 `$secretManagementLoaded = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
 # PowerShell re-adds its default module roots while resolving RequiredModules during import.
 # Reset the path after import, then refresh discovery so this is an availability proof rather
 # than a check against either the loaded-module table or stale module-analysis cache state.
 `$env:PSModulePath = '$($ModulePath.Replace("'", "''"))'
+`$graphAuthenticationAvailable = [bool] (Get-Module Microsoft.Graph.Authentication -ListAvailable -Refresh)
 `$secretManagementAvailable = [bool] (Get-Module Microsoft.PowerShell.SecretManagement -ListAvailable -Refresh)
 [pscustomobject]@{
-    Imported                  = `$true
-    ModuleBase                = (Get-Module GraphKit).ModuleBase
-    OperationName             = "`$(`$operation.Type).`$(`$operation.Operation)"
-    SecretManagementLoaded    = `$secretManagementLoaded
-    SecretManagementAvailable = `$secretManagementAvailable
+    Imported                     = `$true
+    ModuleBase                   = (Get-Module GraphKit).ModuleBase
+    OperationName                = "`$(`$operation.Type).`$(`$operation.Operation)"
+    GraphAuthenticationLoaded    = `$graphAuthenticationLoaded
+    GraphAuthenticationAvailable = `$graphAuthenticationAvailable
+    SecretManagementLoaded       = `$secretManagementLoaded
+    SecretManagementAvailable    = `$secretManagementAvailable
 } | ConvertTo-Json -Compress
 "@
 
@@ -87,25 +92,29 @@ Import-Module '$($isolatedManifest.Replace("'", "''"))' -Force -ErrorAction Stop
 }
 
 Describe 'Packed GraphKit dependency contract' -Tag 'QA' {
-    It 'records Microsoft.Graph.Authentication 2.38.1 as its only NuGet dependency' {
+    It 'records only Graph Authentication as an exact NuGet dependency' {
         Test-Path -LiteralPath $script:packagePath -PathType Leaf | Should -BeTrue
         $dependencies = @(Get-PackageDependencies -PackagePath $script:packagePath)
 
         $dependencies.Count | Should -Be 1
-        [string] $dependencies[0].id | Should -Be 'Microsoft.Graph.Authentication'
-        [string] $dependencies[0].version | Should -Be '2.38.1'
+        $dependencyMap = @{}
+        foreach ($dependency in $dependencies) { $dependencyMap[[string] $dependency.id] = [string] $dependency.version }
+        $dependencyMap['Microsoft.Graph.Authentication'] | Should -Be '2.38.1'
+        $dependencyMap.ContainsKey('Microsoft.PowerShell.SecretManagement') | Should -BeFalse -Because 'vault support is optional and resolved on first vault-backed use'
     }
 
-    It 'imports the isolated artifact and inspects the catalog without loading SecretManagement' {
+    It 'imports the isolated artifact with Graph Authentication alone' {
         $modulePath = New-IsolatedGraphKitModulePath -Root (Join-Path $TestDrive 'non-vault')
         $result = Invoke-IsolatedGraphKitProbe -ModulePath $modulePath
 
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Data.Imported | Should -BeTrue
-        $result.Data.ModuleBase | Should -Be (Join-Path $modulePath "GraphKit/$script:version")
+        $result.Data.ModuleBase | Should -Be (Join-Path (Join-Path $modulePath 'GraphKit') $script:baseVersion)
         $result.Data.OperationName | Should -Be 'ManagedDevice.List'
-        $result.Data.SecretManagementLoaded | Should -BeFalse -Because 'catalog inspection does not use a vault'
-        $result.Data.SecretManagementAvailable | Should -BeFalse -Because 'the isolated package probe must not be able to discover the lazy vault dependency anywhere'
+        $result.Data.GraphAuthenticationLoaded | Should -BeTrue -Because 'Graph Authentication remains the R8 transition MSAL delivery vehicle'
+        $result.Data.GraphAuthenticationAvailable | Should -BeTrue -Because 'Graph Authentication remains a required runtime package dependency until cutover'
+        $result.Data.SecretManagementLoaded | Should -BeFalse -Because 'non-vault import must not load an optional vault dependency'
+        $result.Data.SecretManagementAvailable | Should -BeFalse -Because 'the clean package dependency set intentionally omits optional vault support'
     }
 
 }

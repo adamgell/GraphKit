@@ -1,9 +1,11 @@
 # Phase 5 Cutover — completion record, 2026-08-15
 
-> **Superseding operator status, 2026-08-29:** this is a historical execution record, not a
-> current `0.3.0` release checklist. No adopted legacy or customer-tenant runtime uses these
-> paths, so the retained fallback and operator actions described below are not present-day
-> migration blockers. Preserve the original account below as evidence of what was verified.
+> **Superseding operator status, confirmed 2026-09-01:** this is a historical execution record,
+> not a current release checklist. The owner confirmed that there are no installed users, legacy
+> consumers, customer-tenant consumers, or repoint targets. The adopter migration, customer
+> repointing, rollback-window, legacy-retirement, and deleted-directory-purge actions described
+> below are **NotApplicable** and must not be run merely for program closeout. Preserve the original
+> account below as evidence of what was verified.
 
 > **Status as of 2026-08-16:** phase 5 is closed. GraphKit 0.1.0 and 0.1.1 are published to the
 > public PowerShell Gallery and consumed by the TenantPulse rebuild; an external security review
@@ -277,7 +279,7 @@ installable from it. That changes the consumer story: IntuneHealthAutomation v2 
 channel. The channel and bundle remain useful for an offline host and for testing an unreleased
 build, but they are no longer the distribution path.
 
-## Next moves
+## Historical next moves — superseded as a current checklist
 
 1. ~~Run `Test-GraphKitOnWindows.ps1` on the Windows host~~ — **done, 15/15 on PowerShell 7.6.5**.
 2. Grant the five outstanding scopes on the lab app and re-run the descriptor verification.

@@ -15,7 +15,9 @@ BeforeAll {
         GraphBaseUri  = [uri] 'https://graph.microsoft.com'
         ProfileId     = 'ivy24'
         TenantId      = [guid] '00000000-0000-0000-0000-000000000001'
+        ClientId      = '00000000-0000-0000-0000-000000000010'
         IdentityState = 'VerifiedForToken'
+        TokenSource   = [PSCustomObject]@{ AuthMode = 'Certificate' }
     }
 
     function New-TestEnvelope {
@@ -39,7 +41,8 @@ BeforeAll {
         param(
             [string] $Type = 'MobileApp',
             [string] $Operation = 'List',
-            [string] $PagingStrategy = 'NextLink'
+            [string] $PagingStrategy = 'NextLink',
+            [string[]] $SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
         )
 
         @{
@@ -54,6 +57,7 @@ BeforeAll {
             PathTemplate          = '/deviceAppManagement/mobileApps'
             RequiredPagingHeaders = @()
             DeduplicationKey      = 'id'
+            SupportedAuthModes    = $SupportedAuthModes
         }
     }
 
@@ -139,6 +143,55 @@ Describe 'Get-GraphObject' {
             $result.Provenance.ResourceFamily | Should -Be 'Intune.MobileApps'
         }
 
+        It 'retains validated paged transport provenance when the context still says NotAcquired' {
+            $context = [PSCustomObject]@{}
+            foreach ($property in $script:Context.PSObject.Properties) {
+                $context | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+            $context.IdentityState = 'NotAcquired'
+
+            $script:pagedTransportProvenance = @{
+                ProfileId            = 'ivy24'
+                TenantId             = $context.TenantId
+                ActualTenantId       = $context.TenantId
+                ApiVersion           = 'v1.0'
+                ResourceFamily       = 'Intune.MobileApps'
+                RetrievedUtc         = [datetime] '2026-09-01T12:00:00Z'
+                IdentityState        = 'VerifiedForToken'
+                TokenFingerprint     = 'transport-fingerprint'
+                CredentialGeneration = 'transport-generation'
+                Cloud                = 'Global'
+            }
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                $descriptor = New-TestDescriptor -Type 'MobileApp' -Operation 'List'
+                $descriptor.IdentityRequirement = 'Verified'
+                return $descriptor
+            }
+            Mock Resolve-GraphUri -ModuleName GraphKit {
+                [uri] 'https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps'
+            }
+            Mock Invoke-GraphPaging -ModuleName GraphKit {
+                $envelope = New-TestEnvelope -Data @(@{ id = 'a1'; displayName = 'App One' })
+                $envelope.Provenance = $script:pagedTransportProvenance
+                return $envelope
+            }
+
+            $result = Get-GraphObject -Context $context -Type MobileApp -PassThruResult
+
+            [object]::ReferenceEquals($result.Provenance, $script:pagedTransportProvenance) | Should -BeTrue
+            $result.Provenance.IdentityState | Should -BeExactly 'VerifiedForToken'
+            $result.Provenance.TenantId | Should -Be $context.TenantId
+            $result.Provenance.ActualTenantId | Should -Be $context.TenantId
+            $result.Provenance.RetrievedUtc | Should -Be ([datetime] '2026-09-01T12:00:00Z')
+            $result.Provenance.TokenFingerprint | Should -BeExactly 'transport-fingerprint'
+            $result.Provenance.CredentialGeneration | Should -BeExactly 'transport-generation'
+            $result.Provenance.Cloud | Should -BeExactly 'Global'
+            $result.Provenance.Keys | Should -Not -Contain 'ClientId'
+            $result.Provenance.Keys | Should -Not -Contain 'ClientScopeFingerprint'
+            $context.IdentityState | Should -BeExactly 'NotAcquired'
+        }
+
         It 'emits no rows for an empty result set' {
             Mock Get-GraphOperation -ModuleName GraphKit { New-TestDescriptor -Type 'MobileApp' -Operation 'List' }
             Mock Resolve-GraphUri -ModuleName GraphKit { [uri] 'https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps' }
@@ -169,9 +222,84 @@ Describe 'Get-GraphObject' {
             Should-Invoke Invoke-GraphPaging -ModuleName GraphKit -Times 1 -Exactly -ParameterFilter { $MaxPages -eq 7 }
             Should-NotInvoke Invoke-GraphHandlerStrategy -ModuleName GraphKit
         }
+
+        It 'forwards the pager inherited remaining deadline into the retry attempt' {
+            $script:retryDeadlineSeconds = $null
+            $script:retryBoundParameters = $null
+            $script:transportParameterNames = $null
+            Mock Get-GraphOperation -ModuleName GraphKit { New-TestDescriptor -Type 'MobileApp' -Operation 'List' }
+            Mock Resolve-GraphUri -ModuleName GraphKit { [uri] 'https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps' }
+            Mock Invoke-GraphRetry -ModuleName GraphKit {
+                param($DeadlineSeconds)
+                $script:retryBoundParameters = @{} + $PSBoundParameters
+                $script:retryDeadlineSeconds = [double] $DeadlineSeconds
+                New-TestEnvelope -Data @()
+            }
+            Mock Invoke-GraphPaging -ModuleName GraphKit {
+                param($Context, $Descriptor, $FirstPageUri, $RequestFactoryScript, $TransportScript)
+                $script:transportParameterNames = @(
+                    $TransportScript.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+                )
+                & $TransportScript $FirstPageUri 'GET' @{} $null `
+                    ([System.Threading.CancellationToken]::None) 17.25
+            }
+
+            InModuleScope GraphKit -ArgumentList $script:Context {
+                param($Context)
+                Get-GraphObject -Context $Context -Type MobileApp -PassThruResult | Out-Null
+            }
+
+            $script:transportParameterNames | Should -Contain 'DeadlineSeconds'
+            $script:retryBoundParameters.Keys | Should -Contain 'DeadlineSeconds'
+            $script:retryDeadlineSeconds | Should -Be 17.25
+            Should-Invoke Invoke-GraphRetry -ModuleName GraphKit -Times 1 -Exactly -ParameterFilter {
+                [double] $DeadlineSeconds -eq 17.25
+            }
+        }
     }
 
     Context 'Descriptor resolution' {
+        It 'rejects a descriptor that does not support the context auth mode before paging' {
+            $context = [PSCustomObject]@{}
+            foreach ($property in $script:Context.PSObject.Properties) {
+                $context | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+            $context.TokenSource = [PSCustomObject]@{ AuthMode = 'BearerToken' }
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                New-TestDescriptor -Type 'ManagedDevice' -Operation 'List' -SupportedAuthModes @('Certificate')
+            }
+            Mock Resolve-GraphUri -ModuleName GraphKit { throw 'URI resolution must not run' }
+            Mock Invoke-GraphPaging -ModuleName GraphKit { throw 'paging must not run' }
+
+            {
+                Get-GraphObject -Context $context -Type ManagedDevice
+            } | Should -Throw -ExpectedMessage "*does not support auth mode 'BearerToken'*"
+
+            Should-NotInvoke Resolve-GraphUri -ModuleName GraphKit
+            Should-NotInvoke Invoke-GraphPaging -ModuleName GraphKit
+        }
+
+        It 'permits an injected Provider context outside persisted auth-mode policy' {
+            $context = [PSCustomObject]@{}
+            foreach ($property in $script:Context.PSObject.Properties) {
+                $context | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+            $context.TokenSource = [PSCustomObject]@{ AuthMode = 'Provider' }
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                New-TestDescriptor -Type 'ManagedDevice' -Operation 'List' -SupportedAuthModes @('Certificate')
+            }
+            Mock Resolve-GraphUri -ModuleName GraphKit {
+                [uri] 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices'
+            }
+            Mock Invoke-GraphPaging -ModuleName GraphKit { New-TestEnvelope -Data @() }
+
+            Get-GraphObject -Context $context -Type ManagedDevice | Out-Null
+
+            Should-Invoke Invoke-GraphPaging -ModuleName GraphKit -Times 1 -Exactly
+        }
+
         It 'defaults -Operation to List when only -Type is given' {
             Mock Get-GraphOperation -ModuleName GraphKit { New-TestDescriptor -Type 'ManagedDevice' -Operation 'List' }
             Mock Resolve-GraphUri -ModuleName GraphKit { [uri] 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices' }

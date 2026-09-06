@@ -5,6 +5,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The compiled `GraphKit.Auth` authentication boundary. A dependency-free
+  `GraphKit.Auth.Contracts.dll` owns the GraphKit ABI-v1 DTOs, interfaces, strict loader,
+  proxies, and host lifetime and loads in the default `AssemblyLoadContext`. `GraphKit.Auth.dll`
+  and its locked `Microsoft.Identity.Client` 4.82.1 closure load in one named collectible
+  context per module import, so no MSAL type crosses the boundary. The built-in certificate,
+  client-secret, managed-identity, and fixed-bearer modes now construct runspace-neutral
+  compiled sources, while `Get-GraphContext -TokenProvider` and `-MsalFactory` remain the
+  caller-owned legacy same-runspace compatibility seams.
+
+### Fixed
+
+- Release gates now require exactly 77 passing `GraphKit.Auth` tests, independently reconcile the
+  portable Pester floor against fresh discovery, and verify every dynamically selected PowerShell
+  CI archive against a committed checksum copied from that version's official PowerShell release
+  `hashes.sha256` asset before extraction or execution.
+- The PSGallery preflight now scans the verifier-owned package snapshot rather than only selected
+  source-like entries: strict UTF-8 JSON plus printable ASCII/UTF-8 and UTF-16LE strings in every
+  shipped DLL are checked for private paths, identifiers, GUIDs, and contextual certificate
+  thumbprints. The authored `src/GraphKit.Auth` C# tree is scanned separately because compilation
+  can omit source-only literals. Diagnostics retain only fixed categories and SHA-256 evidence
+  fingerprints, and legitimate 40-hex source or vendor revisions are not treated as thumbprints.
+- Restored the `0.3.0` lazy SecretManagement contract after the R8 manifest regressed it to an
+  always-loaded package dependency. R8 packages again require only Graph Authentication at import;
+  SecretManagement 1.1.2+ is discovered at first vault-backed context resolution, while help,
+  catalog inspection, managed identity, and injected-provider contexts remain usable without it.
+- The real retry/sender path now acquires exactly one bearer per physical attempt. Tenant proof,
+  the `Authorization` header, and returned provenance are bound to that same token fingerprint;
+  a rotating no-expiry provider can no longer have one token proved and another sent.
+- A `401` refresh now propagates `WithForceRefresh($true)` into both confidential-client and
+  managed-identity MSAL builders instead of bypassing only GraphKit's local cache. Unproven
+  provider tenant claims no longer populate verified provenance.
+- Cancellation now flows through mutation tenant proof into its nested retry pipeline, so a
+  cancelled proof cannot outlive the caller or proceed to the mutation send.
+- The canonical acquisition tuple is now wired into the production sender. Concurrent contexts
+  share one ordinary or forced-refresh acquisition, while a cancelled waiter can leave without
+  cancelling the shared work or leaking a disposable wait handle. A cancelled leader is replaced
+  only when its own caller token was signalled, and followers adopt shared results through a
+  monotonic per-source cache so an older ordinary result cannot overwrite a newer forced refresh.
+- Credential generations now bind the exact canonical PFX byte snapshot, password/material
+  version references, and unambiguous length-prefixed fields. Mutable unversioned vault and
+  subject selectors are isolated per context, relative PFX paths remain bound after a working-
+  directory change, and resolver-owned password/PFX buffers are disposed or zeroed on every path.
+- GraphKit-owned HTTP clients and credential material now share a compiled module-lifecycle
+  coordinator. Removal cancels active work, waits on both operation and cancellation-callback
+  gates, disposes owned resources asynchronously in LIFO order, and remains bounded even when a
+  callback or `Dispose()` implementation does not cooperate; injected resources remain caller-owned.
+- The sender now rejects a legacy PowerShell token source before it crosses into a different
+  runspace, where nested PowerShell-class acquisition can hang. This is fail-fast containment;
+  the compiled, runspace-neutral `GraphKit.Auth` adapter remains the R8 completion gate.
+
 ## [0.3.0] - 2026-08-30
 
 GraphKit `0.3.0` was published to PSGallery at `2026-08-30T04:38:20.12Z`. The 207381-byte public

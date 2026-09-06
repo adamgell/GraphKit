@@ -10,13 +10,14 @@
     delay parser never decides whether to retry.
 
     Certainty axis (runtime):
-      Succeeded        A 2xx response was received.
+      Succeeded        The caller classified the 2xx as usable (including an
+                       accepted 202, whose status is authoritative by itself).
       Rejected         The service refused before executing (e.g. a clean 429).
       Ambiguous        Timeout, connection reset, or 502/503/504 with no body.
       MayHaveCommitted Ambiguous plus evidence of partial effect (reconciliation).
 
     Decision rules (spec "Retry must be semantics-aware"):
-      - 2xx is always success; a 2xx carrying Retry-After is success + pacing, never replay.
+      - Succeeded certainty is never replayed; Retry-After adds future pacing only.
       - 401 triggers at most one forced refresh (only when the token source can refresh).
       - 403/404 never retry.
       - 409 retries only for known transient inner error codes.
@@ -53,8 +54,8 @@ function Get-GraphRetryDecision {
     $replayPolicy = [string] $Descriptor.ReplayPolicy
     $isRead = $Method -in @('GET', 'HEAD')
 
-    # Successful response: never replay. A 2xx carrying Retry-After is still a
-    # success (the client must pace future traffic, not resend this request).
+    # A response already classified Succeeded is never replayed. Retry-After
+    # paces future traffic; it never turns success into permission to resend.
     if ($AttemptCertainty -eq 'Succeeded') {
         return [pscustomobject] @{
             ShouldRetry  = $false

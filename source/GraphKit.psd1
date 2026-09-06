@@ -12,7 +12,7 @@
 RootModule = 'GraphKit.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.3.0'
+ModuleVersion = '0.4.0'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -57,7 +57,7 @@ RequiredModules = @(
 )
 
 # Assemblies that must be loaded prior to importing this module
-# RequiredAssemblies = @()
+RequiredAssemblies = @()
 
 # Script files (.ps1) that are run in the caller's environment prior to importing this module.
 # ScriptsToProcess = @()
@@ -129,39 +129,15 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-0.3.0
+0.4.0
 
-Integrated next package. The published PSGallery 0.2.2 artifact remains immutable.
-
-CHANGED
-- Microsoft.PowerShell.SecretManagement 1.1.2+ is resolved only at first vault use.
-  Non-vault import, managed identity, help, and catalog inspection no longer require it.
-- Vault commands are module-qualified and the boundary rejects an unavailable or too-old
-  SecretManagement module instead of accepting unrelated same-named functions.
-- Install-GraphKitPinned installs only hard Microsoft.Graph.Authentication by default for
-  0.3.0, offers -InstallSecretManagement for vault hosts, and preserves automatic
-  SecretManagement installation for immutable 0.2.2 pins.
-
-ADDED AND LIVE-VERIFIED 2026-08-29
-- DeviceManagementUnifiedRoleAssignment.ListBeta with required roleDefinition/principals
-  expansion and DeviceManagementRBAC.Read.All.
-- DeviceManagementTemplate.ListBeta, DeviceManagementConfigurationPolicyTemplate.ListBeta,
-  and DeviceManagementIntent.ListBeta for legacy baseline and current Settings Catalog
-  template/version, assignment, lifecycle, and deprecation interpretation.
-- ManagedDeviceCleanupRule.ListBeta, the documented per-platform collection, replacing the
-  obsolete undocumented managedDeviceCleanupSettings singleton.
-
-VERIFICATION CORRECTION
-- NamedLocation.List is positively proven app-only with Policy.Read.All. The narrower
-  Policy.Read.ConditionalAccess scope remains insufficient.
-- DeviceManagementScript.List remains scope-gated: the service named
-  DeviceManagementScripts.Read.All in its 403, but no successful live response is claimed.
+R8 successor prerelease train seed. The immutable public 0.3.0 package remains unchanged.
 
 Requires PowerShell 7.4+.
 '@
 
         # Prerelease string of this module
-        Prerelease =  ''
+        Prerelease = 'r8'
 
         # Flag to indicate whether the module requires explicit user acceptance for install/update/save
         # RequireLicenseAcceptance = $false
@@ -169,8 +145,8 @@ Requires PowerShell 7.4+.
         # External dependent modules of this module
         # Do not mark Microsoft.Graph.Authentication external: Publish-Module omits external
         # modules from the package nuspec, leaving a clean installer with no MSAL dependency
-        # metadata. SecretManagement is intentionally not a RequiredModule; vault-backed paths
-        # validate it on demand so non-vault flows do not install or load it.
+        # metadata. SecretManagement is optional: vault-backed paths discover and import the
+        # tested minimum on first credential resolution, while non-vault paths never load it.
         # ExternalModuleDependencies = @()
 
     } # End of PSData hashtable

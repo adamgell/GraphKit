@@ -103,17 +103,10 @@ function Invoke-GraphBatch {
             throw "Batch subrequest '$id' has unsupported method '$method'."
         }
 
-        $uri = [uri] $item.Uri
-        if ($null -eq $uri -or -not $uri.IsAbsoluteUri) {
-            throw "Batch subrequest '$id' requires an absolute Uri."
-        }
-
         $replaySafe = $false
         $descriptor = $null
 
-        if ($method -in @('GET', 'HEAD')) {
-            $replaySafe = $true
-        } else {
+        if ($method -notin @('GET', 'HEAD')) {
             $hasWrite = $true
 
             if ([string]::IsNullOrWhiteSpace([string] $item.Type) -or [string]::IsNullOrWhiteSpace([string] $item.Operation)) {
@@ -121,6 +114,17 @@ function Invoke-GraphBatch {
             }
 
             $descriptor = Get-GraphOperation -Type $item.Type -Operation $item.Operation
+            $null = Assert-GraphOperationAuthMode -Context $Context -Descriptor $descriptor
+        }
+
+        $uri = [uri] $item.Uri
+        if ($null -eq $uri -or -not $uri.IsAbsoluteUri) {
+            throw "Batch subrequest '$id' requires an absolute Uri."
+        }
+
+        if ($method -in @('GET', 'HEAD')) {
+            $replaySafe = $true
+        } else {
             if ($descriptor.ReplayPolicy -ne 'Safe') {
                 throw "Batch subrequest '$id' is a write ($method) whose descriptor ReplayPolicy is '$($descriptor.ReplayPolicy)'; only Safe writes may be batched."
             }

@@ -37,11 +37,20 @@ Describe 'Built module' -Skip:($null -eq $script:BuiltBase) {
             Test-Path (Join-Path $script:BuiltBase.FullName $Path) | Should -BeTrue -Because 'missing CopyPaths entries vanish silently from the package'
         }
 
-        It 'declares only the always-required runtime dependency' {
+        It 'declares only Graph Authentication as an always-required runtime dependency' {
             $d = Import-PowerShellDataFile $script:Manifest
             $names = @($d.RequiredModules | ForEach-Object { if ($_ -is [hashtable]) { $_.ModuleName } else { $_ } })
             $names | Should -Contain 'Microsoft.Graph.Authentication'
-            $names | Should -Not -Contain 'Microsoft.PowerShell.SecretManagement' -Because 'vault support is loaded only when a vault-backed credential is used'
+            $names | Should -Not -Contain 'Microsoft.PowerShell.SecretManagement' -Because 'vault support imports SecretManagement only when a persisted vault-backed credential is resolved'
+        }
+
+        It 'loads exactly the packaged GraphKit.Auth contracts assembly before module import' {
+            $d = Import-PowerShellDataFile $script:Manifest
+            (@($d.RequiredAssemblies | Where-Object { $null -ne $_ }) -join '|') |
+                Should -BeExactly 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            Test-Path -LiteralPath (
+                Join-Path $script:BuiltBase.FullName 'Assemblies/GraphKit.Auth/GraphKit.Auth.Contracts.dll'
+            ) -PathType Leaf | Should -BeTrue
         }
 
         It 'registers the format file via FormatsToProcess' {

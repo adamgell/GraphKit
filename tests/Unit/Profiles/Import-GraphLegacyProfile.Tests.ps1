@@ -147,7 +147,8 @@ Describe 'Import-GraphLegacyProfile' {
         It 'refuses an entry whose ProfileId already exists in the store' {
             $store = Join-Path $TestDrive 'existing.json'
             Register-GraphTenant -ProfileId 'acme-corp' -Name 'Acme Corp' -Kind customer -TenantId $script:tenantB `
-                -Environment Global -AuthMethod ClientSecret -VaultName v -SecretName s -StorePath $store
+                -Environment Global -AuthMethod ClientSecret -ClientId '11111111-2222-3333-4444-555555555555' `
+                -VaultName v -SecretName s -StorePath $store
 
             $path = New-LegacyFile -Root $TestDrive -Content @{
                 tenants = @(@{ name = 'Acme Corp'; tenantId = $script:tenantA; authMethod = 'ClientSecret'; environment = 'Global' })
@@ -216,7 +217,7 @@ Describe 'Import-GraphLegacyProfile' {
             # reports zero skips - a skipped test turns the whole NUnit result to 'Ignored'.
             $store = Join-Path $TestDrive 'platform.json'
             $path = New-LegacyFile -Root $TestDrive -Content @{
-                tenants = @(@{ name = 'Winonly'; tenantId = $script:tenantA; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); certificateStore = 'CurrentUser'; environment = 'Global' })
+                tenants = @(@{ name = 'Winonly'; tenantId = $script:tenantA; clientId = '7d6e5f44-9999-8888-7777-666655554444'; authMethod = 'Certificate'; certificateThumbprint = ('A' * 40); certificateStore = 'CurrentUser'; environment = 'Global' })
             }
             $report = Import-GraphLegacyProfile -Path $path -StorePath $store
 

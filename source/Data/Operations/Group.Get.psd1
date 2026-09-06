@@ -1,9 +1,9 @@
 <#
     Operation descriptor - data only. Loaded with Import-PowerShellDataFile.
 
-    A single group's protection flags for Intune RBAC group protection (TP.INT.0013).
-    Distinct from Group.List, which returns the collection without these select-only
-    properties.
+    A single group's identity, description, and protection flags for Intune assignment
+    reporting and RBAC group protection (TP.INT.0013). Distinct from Group.List, which
+    returns the collection without these select-only properties.
 
     $select is part of this operation's identity and lives in the PathTemplate.
     isAssignableToRole and isManagementRestricted are omitted unless selected. A Get
@@ -23,7 +23,7 @@
     BetaReason          = $null
 
     Method              = 'GET'
-    PathTemplate        = '/groups/{id}?$select=id,displayName,isAssignableToRole,isManagementRestricted'
+    PathTemplate        = '/groups/{id}?$select=id,displayName,description,isAssignableToRole,isManagementRestricted'
     RequestBodyKind     = $null
     ResponseKind        = 'Json'
     PagingStrategy      = 'None'
@@ -47,7 +47,7 @@
     ResourceFamily      = 'Directory.Group'
     ThrottleClass       = 'Read'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'Group.Read.All' }
     )

@@ -16,6 +16,7 @@ BeforeAll {
         ProfileId     = 'ivy24'
         TenantId      = [guid] '00000000-0000-0000-0000-000000000001'
         IdentityState = 'VerifiedForToken'
+        TokenSource   = [PSCustomObject]@{ AuthMode = 'Certificate' }
     }
 
     $script:NoopDelay = { param([int] $Seconds) }
@@ -115,7 +116,7 @@ Describe 'Invoke-GraphBatch' {
         }
 
         It 'rejects a write whose descriptor is not Safe' {
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'NeverReplay'; Method = 'POST'; PathTemplate = '/write' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'NeverReplay'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity') } }
 
             {
                 Invoke-GraphBatch -Context $script:Context -Requests @(
@@ -126,7 +127,7 @@ Describe 'Invoke-GraphBatch' {
 
         It 'allows a write subrequest proven Safe by its descriptor' {
             Reset-BatchState
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity') } }
             $script:BatchQueue.Enqueue((New-BatchEnvelope @((New-BatchResponse '1' 204))))
 
             Mock Invoke-GraphRetry -ModuleName GraphKit { return $script:BatchQueue.Dequeue() }
@@ -140,10 +141,96 @@ Describe 'Invoke-GraphBatch' {
         }
     }
 
+    Context 'Descriptor auth-mode enforcement' {
+        It 'rejects a descriptor-backed write excluded by the persisted auth-mode policy before sending the batch' {
+            $context = [PSCustomObject]@{
+                Cloud        = 'Global'
+                GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                ProfileId    = 'batch-auth-mode-rejection'
+                TenantId     = [guid] '00000000-0000-0000-0000-000000000001'
+                TokenSource  = [PSCustomObject]@{ AuthMode = 'BearerToken' }
+            }
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                return @{ Type = 'Thing'; Operation = 'Write'; ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate') }
+            }
+            Mock Invoke-GraphRetry -ModuleName GraphKit {
+                return New-BatchEnvelope @((New-BatchResponse '1' 204))
+            }
+
+            {
+                Invoke-GraphBatch -Context $context -Requests @(
+                    @{ Id = '1'; Method = 'POST'; Uri = 'https://graph.microsoft.com/v1.0/write'; Type = 'Thing'; Operation = 'Write' }
+                ) -DelayScript $script:NoopDelay
+            } | Should -Throw -ExpectedMessage "*does not support auth mode 'BearerToken'*"
+
+            Should-NotInvoke Invoke-GraphRetry -ModuleName GraphKit
+        }
+
+        It 'rejects an excluded auth mode before reading a hostile write Uri' {
+            $context = [PSCustomObject]@{
+                Cloud        = 'Global'
+                GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                ProfileId    = 'batch-auth-mode-before-uri'
+                TenantId     = [guid] '00000000-0000-0000-0000-000000000001'
+                TokenSource  = [PSCustomObject]@{ AuthMode = 'BearerToken' }
+            }
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                return @{ Type = 'Thing'; Operation = 'Write'; ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate') }
+            }
+            Mock Invoke-GraphRetry -ModuleName GraphKit {
+                return New-BatchEnvelope @((New-BatchResponse '1' 204))
+            }
+
+            $script:HostileBatchUriReadCount = 0
+            $request = [PSCustomObject]@{
+                Id        = '1'
+                Method    = 'POST'
+                Type      = 'Thing'
+                Operation = 'Write'
+            }
+            $request | Add-Member -MemberType ScriptProperty -Name Uri -Value {
+                $script:HostileBatchUriReadCount++
+                throw 'The hostile Uri property must not be read before auth-mode rejection.'
+            }
+
+            {
+                Invoke-GraphBatch -Context $context -Requests @($request) -DelayScript $script:NoopDelay
+            } | Should -Throw -ExpectedMessage "*does not support auth mode 'BearerToken'*"
+
+            $script:HostileBatchUriReadCount | Should -BeExactly 0
+            Should-Invoke Get-GraphOperation -ModuleName GraphKit -Exactly 1
+            Should-NotInvoke Invoke-GraphRetry -ModuleName GraphKit
+        }
+
+        It 'allows a descriptor-backed write from an injected Provider despite a persisted profile-mode exclusion' {
+            $context = [PSCustomObject]@{
+                Cloud        = 'Global'
+                GraphBaseUri = [uri] 'https://graph.microsoft.com'
+                ProfileId    = 'batch-auth-mode-provider'
+                TenantId     = [guid] '00000000-0000-0000-0000-000000000001'
+                TokenSource  = [PSCustomObject]@{ AuthMode = 'Provider' }
+            }
+            Reset-BatchState
+            $script:BatchQueue.Enqueue((New-BatchEnvelope @((New-BatchResponse '1' 204))))
+
+            Mock Get-GraphOperation -ModuleName GraphKit {
+                return @{ Type = 'Thing'; Operation = 'Write'; ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate') }
+            }
+            Mock Invoke-GraphRetry -ModuleName GraphKit { return $script:BatchQueue.Dequeue() }
+
+            $result = Invoke-GraphBatch -Context $context -Requests @(
+                @{ Id = '1'; Method = 'POST'; Uri = 'https://graph.microsoft.com/v1.0/write'; Type = 'Thing'; Operation = 'Write' }
+            ) -DelayScript $script:NoopDelay
+
+            @($result) | Should -HaveCount 1
+            $result[0].Outcome | Should -BeExactly 'Succeeded'
+        }
+    }
+
     Context 'Write replay safety' {
         It 'never replays a successful write subrequest when retrying failed reads' {
             Reset-BatchState
-            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write' } }
+            Mock Get-GraphOperation -ModuleName GraphKit { return @{ ReplayPolicy = 'Safe'; Method = 'POST'; PathTemplate = '/write'; SupportedAuthModes = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity') } }
 
             $script:BatchQueue.Enqueue((New-BatchEnvelope @(
                         (New-BatchResponse '1' 204),
@@ -231,7 +318,7 @@ Describe 'Batch refuses to carry a mutating subrequest' {
         $script:ctx = [PSCustomObject]@{
             ProfileId    = 'batch-guard-probe'
             GraphBaseUri = [uri] 'https://graph.microsoft.com'
-            TokenSource  = $null
+            TokenSource  = [PSCustomObject]@{ AuthMode = 'Certificate' }
             TenantId     = [guid]::Empty
         }
     }
@@ -286,7 +373,7 @@ Describe 'The batch guard cannot be forged' {
         Import-Module (Join-Path $built.FullName 'GraphKit.psd1') -Force
         $script:ctx = [PSCustomObject]@{
             ProfileId = 'forge-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
-            TokenSource = $null; TenantId = [guid]::Empty
+            TokenSource = [PSCustomObject]@{ AuthMode = 'Certificate' }; TenantId = [guid]::Empty
         }
     }
 
@@ -322,8 +409,12 @@ Describe 'The batch guard cannot be forged' {
         # carries no token source, so the call must fail at credential policy. Asserting
         # -Not -Throw here would be testing the fixture, not the guard.
         $err = $null
+        $rawContext = [PSCustomObject]@{
+            ProfileId = 'raw-forge-probe'; GraphBaseUri = [uri] 'https://graph.microsoft.com'
+            TokenSource = $null; TenantId = [guid]::Empty
+        }
         try {
-            Invoke-GraphBatch -Context $script:ctx -Requests @(
+            Invoke-GraphBatch -Context $rawContext -Requests @(
                 @{ Id = '1'; Method = 'GET'
                    Uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/any-id-here' })
         } catch { $err = $_.Exception.Message }
@@ -333,4 +424,3 @@ Describe 'The batch guard cannot be forged' {
         $err | Should -BeLike '*token source*' -Because 'it should reach credential policy, which is past the guard'
     }
 }
-

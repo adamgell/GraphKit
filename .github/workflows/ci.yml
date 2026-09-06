@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,11 +22,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact source revision
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = $env:EXPECTED_SOURCE_SHA
+          $actual = (& git rev-parse HEAD).Trim()
+          if (-not [string]::Equals($actual, $expected, [StringComparison]::Ordinal)) {
+              throw "Checked-out source mismatch: expected $expected, got $actual"
+          }
+          Write-Host "Exact source revision asserted: $actual"
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
 
       # Each row installs its exact PowerShell version rather than trusting the
       # runner image, then asserts the running version matches before doing work.
-      # Pinned release tags + direct GitHub release assets: no third-party action,
-      # no secrets, fork-safe.
+      # Pinned release tags + direct GitHub release assets + committed official
+      # checksums: no third-party action, no secrets, fork-safe.
       - name: Install PowerShell ${{ matrix.pwsh-version }}
         shell: pwsh
         run: |
@@ -45,16 +69,13 @@ jobs:
 
           $installDir = Join-Path $env:RUNNER_TOOL_CACHE "pwsh-$version"
           $archive = Join-Path $env:RUNNER_TEMP $asset
+          $hashMap = Join-Path $env:GITHUB_WORKSPACE '.github/powershell-release-sha256.json'
 
-          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
           Write-Host "Downloading $asset"
           Invoke-WebRequest -Uri "https://github.com/PowerShell/PowerShell/releases/download/v$version/$asset" -OutFile $archive
-
-          if ($IsWindows) {
-              Expand-Archive -Path $archive -DestinationPath $installDir -Force
-          } else {
-              tar -xzf $archive -C $installDir
-          }
+          & (Join-Path $env:GITHUB_WORKSPACE '.github/scripts/Install-VerifiedPowerShellArchive.ps1') `
+              -Version $version -AssetName $asset -ArchivePath $archive `
+              -InstallDirectory $installDir -HashMapPath $hashMap
 
           Add-Content -Path $env:GITHUB_PATH -Value $installDir
           Write-Host "Installed PowerShell $version to $installDir"
@@ -63,11 +84,9 @@ jobs:
         shell: pwsh
         run: |
           $expected = '${{ matrix.pwsh-version }}'
-          $actual = $PSVersionTable.PSVersion
-          $expectedMajorMinor = (($expected -split '\.')[0..1] -join '.')
-          $actualMajorMinor = "$($actual.Major).$($actual.Minor)"
-          if ($actualMajorMinor -ne $expectedMajorMinor) {
-              throw "PowerShell version mismatch: expected $expectedMajorMinor.x, got $actual"
+          $actual = $PSVersionTable.PSVersion.ToString()
+          if (-not [string]::Equals($actual, $expected, [StringComparison]::Ordinal)) {
+              throw "PowerShell version mismatch: expected $expected, got $actual"
           }
           Write-Host "PowerShell version asserted: $actual"
 
@@ -75,7 +94,7 @@ jobs:
         shell: pwsh
         run: pwsh -File ./build.ps1 -ResolveDependency -Tasks noop
 
-      - name: Pack candidate
+      - name: Pack candidate with Build_GraphKitAuth
         shell: pwsh
         run: pwsh -File ./build.ps1 -Tasks pack
 
@@ -93,4 +112,21 @@ jobs:
           if ($resultFiles.Count -gt 1) {
               throw "Multiple NUnit result files produced: $($resultFiles.Name -join ', ')"
           }
-          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 777 -AllowedSkips 0
+          pwsh -File ./tests/QA/Assert-GateResult.ps1 -ResultPath $resultFiles[0].FullName -MinimumTests 1482 -AllowedSkips 0
+          if ($LASTEXITCODE -ne 0) {
+              throw 'The standalone whole-result gate failed.'
+          }
+
+          $proofPath = 'output/testResults/tested-release-proof.json'
+          if (-not (Test-Path -LiteralPath $proofPath -PathType Leaf)) {
+              throw "No canonical tested-release proof was produced at $proofPath"
+          }
+          $packageFiles = @(Get-ChildItem -Path 'output/GraphKit.*.nupkg' -File -ErrorAction SilentlyContinue)
+          if ($packageFiles.Count -ne 1) {
+              throw "Expected exactly one GraphKit package, found $($packageFiles.Count): $($packageFiles.Name -join ', ')"
+          }
+          & ./scripts/Test-GraphKitReleaseProof.ps1 `
+              -PackagePath $packageFiles[0].FullName `
+              -ProofPath $proofPath `
+              -TestResultPath $resultFiles[0].FullName `
+              -RepositoryRoot $PWD | Out-Null

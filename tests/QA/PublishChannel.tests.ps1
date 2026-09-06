@@ -33,7 +33,7 @@ BeforeAll {
     }
 
     function New-PassingResult {
-        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 777)
+        param([string] $Root, [string] $Version = '9.9.9', [int] $Total = 1482)
         $path = Join-Path $Root "NUnitXml_GraphKit_v$Version.Test.xml"
         @"
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
@@ -89,36 +89,20 @@ Describe 'Publish-GraphKitPackage refusals' {
         $r.Output | Should -BeLike '*-TestResultPath is required*'
     }
 
-    It 'refuses a test result belonging to a different version' {
-        # A green result from another build proves nothing about these bytes.
+    It 'refuses a separately supplied result when no canonical proof binds it' {
+        # A result file is evidence input, not publication authority by itself. The build
+        # workflow must bind it to package/module bytes in tested-release-proof.json.
         $pkg = New-FakeNupkg -Root $TestDrive
         $wrong = New-PassingResult -Root $TestDrive -Version '1.2.3'
-        $r = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = (Join-Path $TestDrive 'ch2'); TestResultPath = $wrong }
+        $r = Invoke-Publish @{
+            PackagePath = $pkg
+            Channel = 'FileSystem'
+            Destination = (Join-Path $TestDrive 'ch2')
+            TestResultPath = $wrong
+            ProofPath = (Join-Path $TestDrive 'missing-tested-release-proof.json')
+        }
         $r.ExitCode | Should -Not -Be 0
-        $r.Output | Should -Match 'does not reference version|not the one the tests ran against|built module at'
-    }
-
-    It 'refuses when the tested build is gone, so provenance cannot be established' {
-        # output/module/GraphKit/9.9.9 does not exist, so nothing ties this package to a run.
-        $pkg = New-FakeNupkg -Root $TestDrive
-        $result = New-PassingResult -Root $TestDrive -Version '9.9.9'
-        $r = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = (Join-Path $TestDrive 'ch3'); TestResultPath = $result }
-        $r.ExitCode | Should -Not -Be 0
-        $r.Output | Should -BeLike '*cannot be tied back to the tested bits*'
-    }
-
-    It 'refuses a gate-failing test result' {
-        $pkg = New-FakeNupkg -Root $TestDrive
-        $failing = Join-Path $TestDrive 'NUnitXml_GraphKit_v9.9.9.Fail.xml'
-        @'
-<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<test-results name="GraphKit" total="777" errors="0" failures="4" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-15" time="12:00:00">
-  <test-suite type="TestFixture" name="GraphKit" executed="True" result="Failure" success="False" time="1.0" asserts="0" />
-</test-results>
-'@ | Set-Content -LiteralPath $failing -Encoding utf8
-        $r = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = (Join-Path $TestDrive 'ch4'); TestResultPath = $failing }
-        $r.ExitCode | Should -Not -Be 0
-        $r.Output | Should -BeLike '*did not pass the whole-result gate*'
+        $r.Output | Should -BeLike '*No tested release proof found*'
     }
 
     Context 'channel immutability' {
@@ -129,11 +113,10 @@ Describe 'Publish-GraphKitPackage refusals' {
             $null = New-Item -ItemType Directory -Path $channel -Force
 
             $first = New-FakeNupkg -Root $TestDrive -Psm1Content 'body one'
-            $r1 = Invoke-Publish @{ PackagePath = $first; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; PinPath = (Join-Path $TestDrive 'p1.json') }
-            $r1.ExitCode | Should -Be 0
+            Copy-Item -LiteralPath $first -Destination (Join-Path $channel (Split-Path $first -Leaf))
 
             $second = New-FakeNupkg -Root (Join-Path $TestDrive 'v2') -Psm1Content 'body two DIFFERENT'
-            $r2 = Invoke-Publish @{ PackagePath = $second; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; PinPath = (Join-Path $TestDrive 'p2.json') }
+            $r2 = Invoke-Publish @{ PackagePath = $second; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; WhatIf = $true; PinPath = (Join-Path $TestDrive 'p2.json') }
             $r2.ExitCode | Should -Not -Be 0
             $r2.Output | Should -BeLike '*DIFFERENT bytes*'
         }
@@ -142,25 +125,43 @@ Describe 'Publish-GraphKitPackage refusals' {
             $channel = Join-Path $TestDrive 'idempotent'
             $null = New-Item -ItemType Directory -Path $channel -Force
             $pkg = New-FakeNupkg -Root (Join-Path $TestDrive 'same') -Psm1Content 'identical body'
+            Copy-Item -LiteralPath $pkg -Destination (Join-Path $channel (Split-Path $pkg -Leaf))
 
-            $r1 = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; PinPath = (Join-Path $TestDrive 'q1.json') }
-            $r2 = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; PinPath = (Join-Path $TestDrive 'q2.json') }
-            $r1.ExitCode | Should -Be 0
+            $r2 = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; WhatIf = $true; PinPath = (Join-Path $TestDrive 'q2.json') }
             $r2.ExitCode | Should -Be 0
             $r2.Output | Should -BeLike '*Already published with identical bytes*'
         }
     }
 
-    It 'writes a pin record naming the exact bytes' {
+    It 'refuses -SkipTestProof outside -WhatIf and writes nothing' {
         $channel = Join-Path $TestDrive 'pinned'
         $pkg = New-FakeNupkg -Root (Join-Path $TestDrive 'pinsrc')
         $pinPath = Join-Path $TestDrive 'pin.json'
         $r = Invoke-Publish @{ PackagePath = $pkg; Channel = 'FileSystem'; Destination = $channel; SkipTestProof = $true; PinPath = $pinPath }
-        $r.ExitCode | Should -Be 0
+        $r.ExitCode | Should -Not -Be 0
+        $r.Output | Should -BeLike '*only allowed with -WhatIf*'
+        Test-Path -LiteralPath $channel | Should -BeFalse
+        Test-Path -LiteralPath $pinPath | Should -BeFalse
 
-        $pin = Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json
-        $pin.version | Should -Be '9.9.9'
-        $pin.sha256 | Should -Be (Get-FileHash -LiteralPath $pkg -Algorithm SHA256).Hash
-        $pin.testProof | Should -BeLike '*without test proof*'
+        $dryRun = Invoke-Publish @{
+            PackagePath = $pkg
+            Channel = 'GitHubRelease'
+            Destination = 'example/graphkit'
+            SkipTestProof = $true
+            WhatIf = $true
+            PinPath = (Join-Path $TestDrive 'github-dry-run-pin.json')
+        }
+        $dryRun.ExitCode | Should -Be 0 -Because $dryRun.Output
+        $dryRun.Output | Should -BeLike '*NONE - WhatIf-only unverified dry run*'
+        $dryRun.Output | Should -Not -BeLike '*releases/download/v9.9.9/*'
+
+        $publisherSource = [IO.File]::ReadAllText($script:publish)
+        $githubBranchIndex = $publisherSource.IndexOf("'GitHubRelease' {", [StringComparison]::Ordinal)
+        $shouldProcessIndex = $publisherSource.IndexOf('$PSCmdlet.ShouldProcess', $githubBranchIndex, [StringComparison]::Ordinal)
+        $ghAvailabilityIndex = $publisherSource.IndexOf('Get-Command gh', $githubBranchIndex, [StringComparison]::Ordinal)
+        $githubBranchIndex | Should -BeGreaterOrEqual 0
+        $shouldProcessIndex | Should -BeGreaterThan $githubBranchIndex
+        $ghAvailabilityIndex | Should -BeGreaterThan $shouldProcessIndex `
+            -Because 'WhatIf must not require a publication-only CLI'
     }
 }

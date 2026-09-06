@@ -1,0 +1,356 @@
+namespace GraphKit.Auth;
+
+internal sealed class GraphTokenSourceProxy : IGraphTokenSource
+{
+    private readonly TaskCompletionSource<GraphAuthException?> _disposalCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private IGraphTokenSource? _inner;
+    private IGraphTokenSource? _retiredInner;
+    private GraphAuthHost? _owner;
+    private WeakReference<GraphAuthHost>? _retirementOwner;
+    private int _activeOperations;
+    private int _disposeState;
+    private int _hostNotificationState;
+
+    internal GraphTokenSourceProxy(
+        GraphAuthHost owner,
+        IGraphTokenSource inner)
+    {
+        _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+    }
+
+    public bool CanRefresh => Read(source => source.CanRefresh);
+
+    public string AuthMode => Read(source => source.AuthMode);
+
+    public string Audience => Read(source => source.Audience);
+
+    public string? ClientId => Read(source => source.ClientId);
+
+    public DateTimeOffset ExpiresOn => Read(source => source.ExpiresOn);
+
+    public string? VerifiedTenantId => Read(source => source.VerifiedTenantId);
+
+    public string CredentialGeneration => Read(source => source.CredentialGeneration);
+
+    public GraphTokenResult Acquire(
+        bool forceRefresh,
+        CancellationToken cancellation)
+    {
+        using ProxyOperation operation = BeginOperation(cancellation);
+        try
+        {
+            return operation.Inner.Acquire(forceRefresh, operation.Cancellation);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
+    }
+
+    public void AdoptSharedResult(GraphTokenResult result, bool forceRefresh)
+    {
+        using ProxyOperation operation = BeginOperation(CancellationToken.None);
+        try
+        {
+            operation.Inner.AdoptSharedResult(result, forceRefresh);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
+    }
+
+    public void Dispose()
+    {
+        Task<GraphAuthException?> completion = StartDisposal();
+        if (completion.IsCompletedSuccessfully &&
+            completion.Result is GraphAuthException failure)
+        {
+            throw failure;
+        }
+    }
+
+    internal Task<GraphAuthException?> DisposeForHostAsync() => StartDisposal();
+
+    private Task<GraphAuthException?> StartDisposal()
+    {
+        if (Interlocked.CompareExchange(ref _disposeState, 1, 0) != 0)
+        {
+            return _disposalCompletion.Task;
+        }
+
+        GraphAuthHost? owner = Interlocked.Exchange(ref _owner, null);
+        if (owner is not null)
+        {
+            Volatile.Write(ref _retirementOwner, new WeakReference<GraphAuthHost>(owner));
+        }
+
+        IGraphTokenSource? inner = Interlocked.Exchange(ref _inner, null);
+        Volatile.Write(ref _retiredInner, inner);
+        DisposeRetiredInnerWhenIdle();
+        return _disposalCompletion.Task;
+    }
+
+    private TResult Read<TResult>(Func<IGraphTokenSource, TResult> reader)
+    {
+        using ProxyOperation operation = BeginOperation(CancellationToken.None);
+        try
+        {
+            return reader(operation.Inner);
+        }
+        catch (Exception exception)
+        {
+            throw ProviderBoundaryFailure.Recreate(
+                exception,
+                operation.Cancellation,
+                "provider_failure",
+                "Provider");
+        }
+    }
+
+    private ProxyOperation BeginOperation(CancellationToken callerCancellation)
+    {
+        if (Volatile.Read(ref _disposeState) != 0)
+        {
+            throw new ObjectDisposedException(nameof(GraphTokenSourceProxy));
+        }
+
+        GraphAuthHost owner = Volatile.Read(ref _owner) ??
+            throw new ObjectDisposedException(nameof(GraphTokenSourceProxy));
+        GraphAuthHost.GraphAuthOperationLease hostLease = owner.EnterOperation(
+            callerCancellation);
+        Interlocked.Increment(ref _activeOperations);
+        try
+        {
+            if (Volatile.Read(ref _disposeState) != 0)
+            {
+                throw new ObjectDisposedException(nameof(GraphTokenSourceProxy));
+            }
+
+            IGraphTokenSource inner = Volatile.Read(ref _inner) ??
+                throw new ObjectDisposedException(nameof(GraphTokenSourceProxy));
+            return new ProxyOperation(this, inner, hostLease);
+        }
+        catch
+        {
+            try
+            {
+                ExitOperation();
+            }
+            finally
+            {
+                hostLease.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    private void ExitOperation()
+    {
+        if (Interlocked.Decrement(ref _activeOperations) == 0)
+        {
+            DisposeRetiredInnerWhenIdle();
+        }
+    }
+
+    private void DisposeRetiredInnerWhenIdle()
+    {
+        if (Volatile.Read(ref _disposeState) == 0 ||
+            Volatile.Read(ref _activeOperations) != 0)
+        {
+            return;
+        }
+
+        IGraphTokenSource? retired = Interlocked.Exchange(ref _retiredInner, null);
+        if (retired is null)
+        {
+            return;
+        }
+
+        GraphAuthException? failure = null;
+        try
+        {
+            retired.Dispose();
+        }
+        catch
+        {
+            failure = CreateProviderDisposalFailure();
+        }
+
+        NotifyHost(failure);
+        _disposalCompletion.TrySetResult(failure);
+    }
+
+    private void NotifyHost(GraphAuthException? failure)
+    {
+        WeakReference<GraphAuthHost>? retirementOwner = Interlocked.Exchange(
+            ref _retirementOwner,
+            null);
+        if (Interlocked.CompareExchange(ref _hostNotificationState, 1, 0) != 0 ||
+            retirementOwner is null ||
+            !retirementOwner.TryGetTarget(out GraphAuthHost? owner))
+        {
+            return;
+        }
+
+        owner.CompleteSourceDisposal(this, failure);
+    }
+
+    private static GraphAuthException CreateProviderDisposalFailure()
+    {
+        return new GraphAuthException(
+            "provider_disposal_failed",
+            "ProviderLifecycle",
+            "The isolated GraphKit.Auth provider failed while disposing a token source.",
+            retryAfter: null,
+            correlationId: null);
+    }
+
+    private sealed class ProxyOperation : IDisposable
+    {
+        private GraphTokenSourceProxy? _proxy;
+        private GraphAuthHost.GraphAuthOperationLease? _hostLease;
+
+        internal ProxyOperation(
+            GraphTokenSourceProxy proxy,
+            IGraphTokenSource inner,
+            GraphAuthHost.GraphAuthOperationLease hostLease)
+        {
+            _proxy = proxy;
+            Inner = inner;
+            _hostLease = hostLease;
+        }
+
+        internal IGraphTokenSource Inner { get; }
+
+        internal CancellationToken Cancellation =>
+            Volatile.Read(ref _hostLease)?.Cancellation ??
+            throw new ObjectDisposedException(nameof(ProxyOperation));
+
+        public void Dispose()
+        {
+            GraphTokenSourceProxy? proxy = Interlocked.Exchange(ref _proxy, null);
+            GraphAuthHost.GraphAuthOperationLease? hostLease = Interlocked.Exchange(
+                ref _hostLease,
+                null);
+            if (proxy is null)
+            {
+                return;
+            }
+
+            try
+            {
+                proxy.ExitOperation();
+            }
+            finally
+            {
+                hostLease?.Dispose();
+            }
+        }
+    }
+}
+
+internal static class ProviderBoundaryFailure
+{
+    private const string CleanupFailureDataKey =
+        "GraphKit.Auth.ProviderConstructionCleanupFailed";
+    private const int MaximumSafeFieldLength = 128;
+    private const string SafeMessage =
+        "The isolated GraphKit.Auth provider could not complete the requested operation.";
+    private const string CancellationMessage =
+        "The GraphKit.Auth provider operation was canceled.";
+
+    internal static Exception Recreate(
+        Exception providerFailure,
+        CancellationToken effectiveCancellation,
+        string unexpectedCode,
+        string unexpectedCategory)
+    {
+        ArgumentNullException.ThrowIfNull(providerFailure);
+        if (providerFailure is OperationCanceledException)
+        {
+            return PreserveSafeMarkers(providerFailure, new OperationCanceledException(
+                CancellationMessage,
+                innerException: null,
+                effectiveCancellation));
+        }
+
+        if (providerFailure is GraphAuthException graphFailure)
+        {
+            return PreserveSafeMarkers(providerFailure, new GraphAuthException(
+                SafeToken(graphFailure.Code, unexpectedCode),
+                SafeToken(graphFailure.Category, unexpectedCategory),
+                SafeMessage,
+                graphFailure.RetryAfter is { } retryAfter && retryAfter >= TimeSpan.Zero
+                    ? retryAfter
+                    : null,
+                SafeCorrelation(graphFailure.CorrelationId) ?? string.Empty));
+        }
+
+        return PreserveSafeMarkers(providerFailure, new GraphAuthException(
+            unexpectedCode,
+            unexpectedCategory,
+            SafeMessage,
+            retryAfter: null,
+            correlationId: null));
+    }
+
+    private static T PreserveSafeMarkers<T>(Exception providerFailure, T recreatedFailure)
+        where T : Exception
+    {
+        try
+        {
+            if (providerFailure.Data[CleanupFailureDataKey] is bool cleanupFailed && cleanupFailed)
+            {
+                recreatedFailure.Data[CleanupFailureDataKey] = true;
+            }
+        }
+        catch
+        {
+            // Data is virtual. Ignore a provider-owned implementation rather than letting
+            // metadata inspection replace the already-sanitized boundary failure.
+        }
+        return recreatedFailure;
+    }
+
+    private static string SafeToken(string value, string fallback)
+    {
+        return IsSafeValue(value, allowColon: false) ? value : fallback;
+    }
+
+    private static string? SafeCorrelation(string? value)
+    {
+        return IsSafeValue(value, allowColon: true) ? value : null;
+    }
+
+    private static bool IsSafeValue(string? value, bool allowColon)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumSafeFieldLength)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            if (!char.IsAsciiLetterOrDigit(character) &&
+                character is not '_' and not '-' and not '.' &&
+                (!allowColon || character != ':'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}

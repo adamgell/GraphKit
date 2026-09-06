@@ -5,9 +5,14 @@ function Test-GraphTenant {
 
     .DESCRIPTION
         Performs metadata-level validation of a tenant profile: required fields
-        are present, the ProfileId matches its canonical regex, TenantId and
-        ClientId are GUIDs (or null), and Kind, AuthMethod and Environment are
-        known values. It never touches the network or resolves any credential.
+        are present, the ProfileId matches its canonical regex, TenantId is a
+        GUID, Kind/AuthMethod/Environment are known, and the identity selector
+        follows the exact authentication-mode schema. Certificate and
+        ClientSecret require one top-level application ClientId; ManagedIdentity
+        permits only Credential.ClientId for user-assigned identity; BearerToken
+        permits no client identity. Invalid successor metadata returns false;
+        re-register the profile with the canonical selector shape. It never
+        touches the network or resolves any credential.
         Accepts either a stored profile by -ProfileId or an in-memory
         -TenantProfile.
 
@@ -87,6 +92,16 @@ function Test-GraphTenant {
     }
     if ($TenantProfile.Environment -notin @('Global', 'China', 'Germany', 'USGov', 'USGovDoD')) {
         return $false
+    }
+
+    try {
+        $null = Assert-GraphTenantProfileAuthSchema -Profile $TenantProfile
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -ceq 'GraphKit.InvalidTenantProfileAuthSchema') {
+            return $false
+        }
+        throw
     }
 
     return $true

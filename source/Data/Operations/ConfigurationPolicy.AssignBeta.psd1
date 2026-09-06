@@ -56,7 +56,7 @@
     ResourceFamily      = 'Intune.SettingsCatalog'
     ThrottleClass       = 'Write'
 
-    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'ManagedIdentity')
+    SupportedAuthModes  = @('Certificate', 'ClientSecret', 'BearerToken', 'ManagedIdentity')
     RequiredPermissions = @(
         @{ Type = 'Application'; Value = 'DeviceManagementConfiguration.ReadWrite.All' }
     )

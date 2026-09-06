@@ -228,15 +228,17 @@ otherwise indistinguishable from a working configuration until a customer engage
 
 ### GraphKit.Auth — the end-state authentication boundary
 
-**Status: much later. Not v1, not phase 1.** Recorded here so the interim above is understood as
-a deliberate stopgap with a known exit, and so the `IGraphTokenSource` contract is designed to
-accommodate it now rather than being retrofitted.
+**Status correction, 2026-08-30: active R8 gate; absent from immutable `0.3.0`.** The interim
+PowerShell source was subsequently proven unsafe when a parent-created source was invoked from a
+child runspace: nested PowerShell-class acquisition can hang before its method guard executes.
+Post-release development therefore rejects crossed legacy sources in the public sender before
+single-flight or method dispatch. That is containment, not delivery of the contract below.
 
-A small compiled adapter owns the MSAL boundary outright:
+The required end state is a small compiled adapter that owns the MSAL boundary outright:
 
-`GraphKit.Auth` is the much-later end-state boundary, not a v1 dependency. In v1, the transitive
-MSAL delivery contract above remains in force; the isolated adapter below is recorded for the
-future migration only.
+`GraphKit.Auth` is the required end-state boundary. The transitive MSAL delivery contract remains
+the immutable `0.3.0` behavior; a successor must not claim runspace-neutral contexts until the
+isolated adapter below replaces the legacy PowerShell acquisition path.
 
 The end-state adapter:
 
@@ -325,6 +327,12 @@ Wall-clock UTC governs token expiry; **monotonic elapsed time governs retry budg
 deadlines**, so a clock change mid-session cannot extend a five-minute budget.
 
 #### Contexts and concurrency
+
+> **Implementation correction, 2026-08-30:** the paragraph below is the approved target contract,
+> not a claim about the post-`0.3.0` legacy source. That source is same-runspace-only and fails fast
+> at the sender if crossed. Creating a fresh child-runspace context can observe credential rotation
+> and is not equivalent to passing one immutable context. `GraphKit.Auth` must restore and prove the
+> target with real runspaces.
 
 Because nothing is process-global, no connection coordinator, lease manager, or session
 generation is required. A context is an immutable value resolved before parallel work begins and

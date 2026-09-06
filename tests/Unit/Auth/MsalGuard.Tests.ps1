@@ -62,6 +62,20 @@ Describe 'Get-GraphLoadedMsalVersion' {
             (Test-Path -LiteralPath $path) | Should -BeTrue -Because 'the guard must locate the SDK-delivered MSAL assembly'
         }
     }
+
+    It '<TypeName> exposes WithForceRefresh(Boolean)' -ForEach @(
+        @{ TypeName = 'AcquireTokenForClientParameterBuilder' }
+        @{ TypeName = 'AcquireTokenForManagedIdentityParameterBuilder' }
+    ) {
+        $assembly = [AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { $_.GetName().Name -eq 'Microsoft.Identity.Client' } |
+            Select-Object -First 1
+        $type = $assembly.GetTypes() | Where-Object Name -eq $TypeName
+        $method = $type.GetMethod('WithForceRefresh', [type[]] @([bool]))
+
+        $method | Should -Not -BeNullOrEmpty -Because 'GraphKit must propagate a 401 refresh through the exact loaded MSAL builder surface'
+        $method.ReturnType | Should -Be $type
+    }
 }
 
 Describe 'Import-time guard' {

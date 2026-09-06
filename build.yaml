@@ -46,12 +46,15 @@ NestedModule:
 # Defining 'Workflows' (suite of InvokeBuild tasks) to be run using their alias
 BuildWorkflow:
   '.': # "." is the default Invoke-Build workflow. It is called when no -Tasks is specified to the build.ps1
-    - build
+    - pack
     - test
 
   build:
+    - Prepare_GraphKitAuth_Clean
     - Clean
+    - Build_GraphKitAuth
     - Build_Module_ModuleBuilder
+    - Copy_GraphKitAuth_Into_BuiltModule
     - Build_NestedModules_ModuleBuilder
     - Create_changelog_release_output
 
@@ -59,7 +62,7 @@ BuildWorkflow:
   pack:
     - build
 
-    - package_module_nupkg
+    - package_graphkit_r8_nupkg
 
 
 
@@ -67,11 +70,19 @@ BuildWorkflow:
   test:
     # Uncomment to modify the PSModulePath in the test pipeline (also requires the build configuration section SetPSModulePath).
     #- Set_PSModulePath
-    - Pester_Tests_Stop_On_Fail
+    # Invalidate stale proof and capture the exact package/module candidate before Pester.
+    - Capture_Tested_Release_Proof_Candidate
+    # The frozen Task 3/4 ABI tests resolve the fixed runtime closure from three historical source-build
+    # paths. One guarded task projects only the five sealed files under exact process-local Git exclusions,
+    # runs Pester, and removes the files plus empty parents in finally before proof finalization.
+    - Pester_Tests_With_GraphKitAuth_ABI_Fixture
     # Use this task if pipeline uses code coverage and the module is using the
     # pattern of Public, Private, Enum, Classes.
     #- Convert_Pester_Coverage
     - Pester_if_Code_Coverage_Under_Threshold
+    # Emit publication authority only after the unchanged candidate and complete result
+    # pair pass the same canonical verifier both publisher scripts consume.
+    - Record_Tested_Release_Proof
 
   # Use this task when you have multiple parallel tests, which produce multiple
   # code coverage files and needs to get merged into one file.
@@ -178,8 +189,3 @@ GitConfig:
 #   FilesToAdd:
 #     - 'CHANGELOG.md'
 #   UpdateChangelogOnPrerelease: false  # Set to true to update changelog on pre-releases too
-
-
-
-
-

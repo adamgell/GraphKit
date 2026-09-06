@@ -113,6 +113,7 @@ function Get-GraphObject {
 
     # 3. Resolve the descriptor.
     $Descriptor = Get-GraphOperation -Type $Type -Operation $Operation
+    $null = Assert-GraphOperationAuthMode -Context $Context -Descriptor $Descriptor
 
     $parameters = if ($PSBoundParameters.ContainsKey('Parameters') -and $null -ne $Parameters) { $Parameters } else { @{} }
 
@@ -132,19 +133,26 @@ function Get-GraphObject {
             [string] $Method,
             [hashtable] $Headers,
             $Body,
-            [System.Threading.CancellationToken] $CancellationToken
+            [System.Threading.CancellationToken] $CancellationToken,
+            [Nullable[double]] $DeadlineSeconds
         )
 
         $null = Test-GraphCredentialPolicy -Uri $Uri -Descriptor $Descriptor -Context $Context
 
-        Invoke-GraphRetry `
-            -Context $Context `
-            -Descriptor $Descriptor `
-            -Uri $Uri `
-            -Method $Method `
-            -Headers $Headers `
-            -Body $Body `
-            -CancellationToken $CancellationToken
+        $retryParameters = @{
+            Context           = $Context
+            Descriptor        = $Descriptor
+            Uri               = $Uri
+            Method            = $Method
+            Headers           = $Headers
+            Body              = $Body
+            CancellationToken = $CancellationToken
+        }
+        if ($null -ne $DeadlineSeconds) {
+            $retryParameters.DeadlineSeconds = [double] $DeadlineSeconds
+        }
+
+        Invoke-GraphRetry @retryParameters
     }
 
     # 7. Execute. Paged collections page through Invoke-GraphPaging (honouring -PageCap); every
@@ -193,6 +201,7 @@ function Get-GraphObject {
         ResourceFamily = $Descriptor.ResourceFamily
         RetrievedUtc   = $retrievedUtc
         IdentityState  = $Context.IdentityState
+        Cloud          = $Context.Cloud
     }
 
     # The operation's declared secret-bearing properties travel with the envelope, so an export

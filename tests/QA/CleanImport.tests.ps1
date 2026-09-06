@@ -96,3 +96,169 @@ Import-Module '$script:manifestPath' -Force
         [int] $count | Should -Be 5 -Because 'all five v1 strategies must register: Collection, Singleton, Action, Reconciliation, LongRunningJob'
     }
 }
+
+Describe 'Non-vault GraphKit paths do not require SecretManagement or a vault' {
+    BeforeAll {
+        $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
+        $built = Get-ChildItem -Path (Join-Path $script:repoRoot 'output/module/GraphKit') -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($null -eq $built) {
+            throw 'GraphKit is not built. Run ./build.ps1 -Tasks build first.'
+        }
+
+        $graphAuth = Join-Path $script:repoRoot 'output/RequiredModules/Microsoft.Graph.Authentication/2.38.1'
+        if (-not (Test-Path -LiteralPath $graphAuth -PathType Container)) {
+            throw 'Microsoft.Graph.Authentication 2.38.1 is not available for the isolated non-vault probe.'
+        }
+
+        $modulePath = Join-Path $TestDrive 'non-vault-modules'
+        $graphKitDestination = Join-Path $modulePath "GraphKit/$($built.Name)"
+        $graphAuthDestination = Join-Path $modulePath 'Microsoft.Graph.Authentication/2.38.1'
+        $null = New-Item -ItemType Directory -Path $graphKitDestination, $graphAuthDestination -Force
+        Copy-Item -Path (Join-Path $built.FullName '*') -Destination $graphKitDestination -Recurse -Force
+        Copy-Item -Path (Join-Path $graphAuth '*') -Destination $graphAuthDestination -Recurse -Force
+
+        $isolatedManifest = Join-Path $graphKitDestination 'GraphKit.psd1'
+        $storePath = Join-Path $TestDrive 'non-vault-profiles.json'
+        $escapedModulePath = $modulePath.Replace("'", "''")
+        $escapedManifest = $isolatedManifest.Replace("'", "''")
+        $escapedStore = $storePath.Replace("'", "''")
+
+        $probe = @"
+`$ErrorActionPreference = 'Stop'
+`$result = [ordered]@{
+    ImportSucceeded                   = `$false
+    FatalStage                        = `$null
+    FatalError                        = `$null
+    HelpName                          = `$null
+    OperationName                     = `$null
+    MiAuthMode                        = `$null
+    MiIdentityState                   = `$null
+    InjectedAuthMode                  = `$null
+    ClientSecretContextError          = `$null
+    BearerContextError                = `$null
+    SecretManagementLoadedAfterImport = `$false
+    SecretManagementLoadedAtEnd       = `$false
+    SecretManagementAvailableAtEnd    = `$false
+}
+`$stage = 'import'
+try {
+    `$env:PSModulePath = '$escapedModulePath'
+    Import-Module '$escapedManifest' -Force -ErrorAction Stop
+    `$result.ImportSucceeded = `$true
+    `$result.SecretManagementLoadedAfterImport = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
+
+    # RequiredModule resolution may re-add the host's default module roots. Reset the
+    # path and loaded-module table before exercising the optional dependency boundary.
+    `$env:PSModulePath = '$escapedModulePath'
+    Remove-Module Microsoft.PowerShell.SecretManagement -Force -ErrorAction SilentlyContinue
+
+    `$stage = 'help-and-catalog'
+    `$help = Get-Help Get-GraphOperation -ErrorAction Stop
+    `$operation = Get-GraphOperation -Type ManagedDevice -Operation List
+    `$result.HelpName = [string] `$help.Name
+    `$result.OperationName = "`$(`$operation.Type).`$(`$operation.Operation)"
+
+    `$stage = 'managed-identity'
+    Register-GraphTenant -ProfileId 'mi-lab' -Name 'Lab' -Kind lab ``
+        -TenantId '3a4b5c6d-1111-2222-3333-444455556666' -Environment Global ``
+        -AuthMethod ManagedIdentity -StorePath '$escapedStore'
+    `$miContext = Get-GraphContext -ProfileId 'mi-lab' -StorePath '$escapedStore'
+    `$result.MiAuthMode = [string] `$miContext.TokenSource.AuthMode
+    `$result.MiIdentityState = [string] `$miContext.IdentityState
+
+    `$stage = 'injected-provider'
+    Register-GraphTenant -ProfileId 'provider-lab' -Name 'Provider' -Kind lab ``
+        -TenantId '3a4b5c6d-1111-2222-3333-444455556666' ``
+        -ClientId '7d6e5f44-9999-8888-7777-666655554444' -Environment Global ``
+        -AuthMethod ClientSecret -VaultName 'missing' -SecretName 'client-secret' ``
+        -StorePath '$escapedStore'
+    `$injected = Get-GraphContext -ProfileId 'provider-lab' -StorePath '$escapedStore' ``
+        -TokenProvider { @{ Token = 'injected-token'; ExpiresOnUtc = [datetime]::UtcNow.AddHours(1) } }
+    `$result.InjectedAuthMode = [string] `$injected.TokenSource.AuthMode
+
+    `$stage = 'client-secret-boundary'
+    try {
+        `$null = Get-GraphContext -ProfileId 'provider-lab' -StorePath '$escapedStore'
+    }
+    catch {
+        `$result.ClientSecretContextError = @(`$_.Exception.Message, `$_.Exception.InnerException.Message, (`$_ | Out-String)) -join ' '
+    }
+
+    `$stage = 'bearer-boundary'
+    Register-GraphTenant -ProfileId 'bearer-lab' -Name 'Bearer' -Kind lab ``
+        -TenantId '3a4b5c6d-1111-2222-3333-444455556666' -Environment Global ``
+        -AuthMethod BearerToken -VaultName 'missing' -SecretName 'bearer' ``
+        -StorePath '$escapedStore'
+    try {
+        `$null = Get-GraphContext -ProfileId 'bearer-lab' -StorePath '$escapedStore'
+    }
+    catch {
+        `$result.BearerContextError = @(`$_.Exception.Message, `$_.Exception.InnerException.Message, (`$_ | Out-String)) -join ' '
+    }
+}
+catch {
+    `$result.FatalStage = `$stage
+    `$result.FatalError = @(`$_.Exception.Message, `$_.Exception.InnerException.Message, (`$_ | Out-String)) -join ' '
+}
+finally {
+    `$result.SecretManagementLoadedAtEnd = [bool] (Get-Module Microsoft.PowerShell.SecretManagement)
+    `$env:PSModulePath = '$escapedModulePath'
+    `$result.SecretManagementAvailableAtEnd = [bool] (Get-Module Microsoft.PowerShell.SecretManagement -ListAvailable -Refresh)
+}
+[pscustomobject] `$result | ConvertTo-Json -Compress
+"@
+
+        $savedModulePath = $env:PSModulePath
+        try {
+            # Set this before creating pwsh so its initial discovery cache cannot see
+            # the developer machine's optional SecretManagement installation.
+            $env:PSModulePath = $modulePath
+            $raw = & pwsh -NoLogo -NoProfile -Command $probe 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $env:PSModulePath = $savedModulePath
+        }
+
+        $json = @($raw | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+        $script:isolated = [pscustomobject]@{
+            ExitCode = $exitCode
+            Data     = if ($json) { $json | ConvertFrom-Json } else { $null }
+            Output   = ($raw | Out-String).Trim()
+        }
+    }
+
+    It 'imports help and catalog inspection without SecretManagement' {
+        $script:isolated.ExitCode | Should -Be 0 -Because $script:isolated.Output
+        $script:isolated.Data | Should -Not -BeNullOrEmpty -Because $script:isolated.Output
+        $script:isolated.Data.ImportSucceeded | Should -BeTrue -Because "stage $($script:isolated.Data.FatalStage): $($script:isolated.Data.FatalError)"
+        $script:isolated.Data.FatalError | Should -BeNullOrEmpty
+        $script:isolated.Data.HelpName | Should -Be 'Get-GraphOperation'
+        $script:isolated.Data.OperationName | Should -Be 'ManagedDevice.List'
+        $script:isolated.Data.SecretManagementLoadedAfterImport | Should -BeFalse
+        $script:isolated.Data.SecretManagementLoadedAtEnd | Should -BeFalse
+        $script:isolated.Data.SecretManagementAvailableAtEnd | Should -BeFalse
+    }
+
+    It 'registers and resolves managed identity without SecretManagement' {
+        $script:isolated.Data.MiAuthMode | Should -Be 'ManagedIdentity'
+        $script:isolated.Data.MiIdentityState | Should -Be 'NotAcquired'
+    }
+
+    It 'resolves an injected token provider without SecretManagement' {
+        $script:isolated.Data.InjectedAuthMode | Should -Be 'Provider'
+    }
+
+    It 'fails a vault-backed client-secret profile actionably at context resolution' {
+        $script:isolated.Data.ClientSecretContextError | Should -Match 'Microsoft\.PowerShell\.SecretManagement'
+        $script:isolated.Data.ClientSecretContextError | Should -Match 'Install-Module'
+        $script:isolated.Data.ClientSecretContextError | Should -Match '1\.1\.2'
+    }
+
+    It 'fails a vault-backed bearer profile with the missing-module message, not an opaque token error' {
+        $script:isolated.Data.BearerContextError | Should -Match 'Microsoft\.PowerShell\.SecretManagement'
+        $script:isolated.Data.BearerContextError | Should -Match 'Install-Module'
+        $script:isolated.Data.BearerContextError | Should -Not -Match '(?i)token.*(invalid|expired|malformed)'
+    }
+}

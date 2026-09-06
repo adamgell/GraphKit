@@ -22,9 +22,10 @@
       BearerToken             vault secret              -> plain-text string
       ManagedIdentity         ClientId or $null          -> no vault call
 
-    X509Certificate2 instances returned here are created by GraphKit, so the caller
-    owns and disposes them. Caller-injected certificates and token providers never
-    pass through this function (they are context-only and never persisted).
+    Credential material carries explicit OwnsMaterial metadata. Certificates
+    constructed from persisted PFX bytes/files and copies of provider-returned
+    certificates are GraphKit-owned; caller-injected certificates never pass
+    through this function and remain caller-owned.
 #>
 
 function Get-GraphVaultCredential {
@@ -51,11 +52,18 @@ function Get-GraphVaultCredential {
                 throw "AuthMethod 'ClientSecret' is missing a SecretName in the persisted credential; cannot resolve the client secret from the vault."
             }
 
+            Assert-GraphSecretVersionSupported -Name $secretName -Version ([string] $Credential.Version)
             Assert-GraphVaultRegistered -VaultName $vault
             $secret = Get-GraphSecret -Vault $vault -Name $secretName -Version ([string] $Credential.Version)
             $secret = ConvertTo-GraphSecureString -Value $secret
 
-            return New-GraphCredentialMaterial -AuthMethod 'ClientSecret' -Material $secret
+            $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                AuthMethod = 'ClientSecret'
+                Credential = $Credential
+            }
+
+            return New-GraphCredentialMaterial -AuthMethod 'ClientSecret' -Material $secret `
+                -OwnsMaterial:$true -CredentialGeneration $generation
         }
 
         'BearerToken' {
@@ -65,6 +73,7 @@ function Get-GraphVaultCredential {
                 throw "AuthMethod 'BearerToken' is missing a SecretName in the persisted credential; cannot resolve the bearer token from the vault."
             }
 
+            Assert-GraphSecretVersionSupported -Name $secretName -Version ([string] $Credential.Version)
             Assert-GraphVaultRegistered -VaultName $vault
             $secret = Get-GraphSecret -Vault $vault -Name $secretName -Version ([string] $Credential.Version)
             $plain = if ($secret -is [System.Security.SecureString]) {
@@ -78,40 +87,91 @@ function Get-GraphVaultCredential {
                 throw "Secret '$secretName' in vault '$vault' resolved to an empty bearer token."
             }
 
-            return New-GraphCredentialMaterial -AuthMethod 'BearerToken' -Material $plain
+            $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                AuthMethod = 'BearerToken'
+                Credential = $Credential
+            }
+            return New-GraphCredentialMaterial -AuthMethod 'BearerToken' -Material $plain `
+                -CredentialGeneration $generation
         }
 
         'Certificate' {
             if ($Credential.ContainsKey('PfxPath') -and -not [string]::IsNullOrEmpty([string] $Credential.PfxPath)) {
-                $password = Resolve-GraphVaultPassword -Password $Credential.Password -DefaultVault $VaultName
-                if ($null -eq $password) {
-                    throw "Certificate (PFX) requires a vault-backed password reference (Password = @{ VaultName; SecretName }) alongside PfxPath."
-                }
-
+                $password = $null
+                $snapshot = $null
                 try {
-                    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([string] $Credential.PfxPath, $password)
-                }
-                catch {
-                    throw "Could not load the PFX certificate from '$($Credential.PfxPath)': $($_.Exception.Message)"
-                }
+                    $password = Resolve-GraphVaultPassword -Password $Credential.Password -DefaultVault $VaultName
+                    if ($null -eq $password) {
+                        throw "Certificate (PFX) requires a vault-backed password reference (Password = @{ VaultName; SecretName }) alongside PfxPath."
+                    }
 
-                return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert
+                    $snapshot = Get-GraphPfxSnapshot -Path ([string] $Credential.PfxPath)
+                    try {
+                        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                            [byte[]] $snapshot.Bytes,
+                            $password
+                        )
+                    }
+                    catch {
+                        throw "Could not load the PFX certificate from '$($Credential.PfxPath)': $($_.Exception.Message)"
+                    }
+
+                    $generation = Get-GraphCredentialGeneration `
+                        -TenantProfile @{ AuthMethod = 'Certificate'; Credential = $Credential } `
+                        -PfxContentSha256 ([string] $snapshot.Sha256) `
+                        -PfxCanonicalPath ([string] $snapshot.Path)
+
+                    return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert `
+                        -OwnsMaterial:$true -CredentialGeneration $generation
+                }
+                finally {
+                    if ($null -ne $password) {
+                        $password.Dispose()
+                    }
+                    if ($null -ne $snapshot -and $snapshot.Bytes -is [byte[]]) {
+                        [System.Security.Cryptography.CryptographicOperations]::ZeroMemory(
+                            [byte[]] $snapshot.Bytes
+                        )
+                    }
+                }
             }
 
             if ($Credential.ContainsKey('CertificateName') -and -not [string]::IsNullOrEmpty([string] $Credential.CertificateName)) {
+                Assert-GraphSecretVersionSupported `
+                    -Name ([string] $Credential.CertificateName) `
+                    -Version ([string] $Credential.Version)
+                Assert-GraphVaultPasswordReference -Password $Credential.Password
                 $vault = Resolve-GraphVaultName -Credential $Credential -DefaultVault $VaultName
                 Assert-GraphVaultRegistered -VaultName $vault
 
-                $raw = Get-GraphSecret -Vault $vault -Name ([string] $Credential.CertificateName) -Version ([string] $Credential.Version)
-                $password = Resolve-GraphVaultPassword -Password $Credential.Password -DefaultVault $VaultName
-                $cert = ConvertTo-GraphCertificate -Raw $raw -VaultName $vault -SecretName ([string] $Credential.CertificateName) -Password $password
+                $password = $null
+                try {
+                    $raw = Get-GraphSecret -Vault $vault -Name ([string] $Credential.CertificateName) -Version ([string] $Credential.Version)
+                    $password = Resolve-GraphVaultPassword -Password $Credential.Password -DefaultVault $VaultName
+                    $cert = ConvertTo-GraphCertificate -Raw $raw -VaultName $vault -SecretName ([string] $Credential.CertificateName) -Password $password
 
-                return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert
+                    $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                        AuthMethod = 'Certificate'
+                        Credential = $Credential
+                    }
+                    return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert `
+                        -OwnsMaterial:$true -CredentialGeneration $generation
+                }
+                finally {
+                    if ($null -ne $password) {
+                        $password.Dispose()
+                    }
+                }
             }
 
             if ($Credential.ContainsKey('StoreLocation') -or $Credential.ContainsKey('StoreName') -or $Credential.ContainsKey('Thumbprint') -or $Credential.ContainsKey('Subject')) {
                 $cert = Get-GraphStoreCertificate -Credential $Credential
-                return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert
+                $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                    AuthMethod = 'Certificate'
+                    Credential = $Credential
+                }
+                return New-GraphCredentialMaterial -AuthMethod 'Certificate' -Material $cert `
+                    -OwnsMaterial:$true -CredentialGeneration $generation
             }
 
             throw "AuthMethod 'Certificate' requires a persisted credential with a PfxPath (+ vault-backed Password), a CertificateName (+ VaultName), or a store lookup (StoreLocation/StoreName with Thumbprint or Subject)."
@@ -122,7 +182,12 @@ function Get-GraphVaultCredential {
             if ($null -ne $clientId) {
                 $clientId = [string] $clientId
             }
-            return New-GraphCredentialMaterial -AuthMethod 'ManagedIdentity' -Material $null -ManagedIdentityClientId $clientId
+            $generation = Get-GraphCredentialGeneration -TenantProfile @{
+                AuthMethod = 'ManagedIdentity'
+                Credential = $Credential
+            }
+            return New-GraphCredentialMaterial -AuthMethod 'ManagedIdentity' -Material $null `
+                -ManagedIdentityClientId $clientId -CredentialGeneration $generation
         }
     }
 }
@@ -253,11 +318,8 @@ function Get-GraphSecret {
     )
 
     $params = @{ Vault = $Vault; Name = $Name; SecretErrorAction = 'SilentlyContinue' }
+    Assert-GraphSecretVersionSupported -Name $Name -Version $Version
     if (-not [string]::IsNullOrEmpty($Version)) {
-        $getSecret = Get-Command -Name Get-Secret -Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
-        if ($null -eq $getSecret -or -not $getSecret.Parameters.ContainsKey('Version')) {
-            throw "A secret version ('$Version') was requested for '$Name' but the loaded Microsoft.PowerShell.SecretManagement does not support per-secret versions. Store each version under a distinct secret name, or upgrade SecretManagement."
-        }
         $params['Version'] = $Version
     }
 
@@ -266,6 +328,41 @@ function Get-GraphSecret {
         throw "Secret '$Name' was not found in vault '$Vault'."
     }
     return $secret
+}
+
+function Assert-GraphSecretVersionSupported {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        [string] $Version
+    )
+
+    if ([string]::IsNullOrEmpty($Version)) {
+        return
+    }
+
+    $null = Import-GraphSecretManagement
+    $getSecret = Get-Command -Name Get-Secret -Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
+    if ($null -eq $getSecret -or -not $getSecret.Parameters.ContainsKey('Version')) {
+        throw "A secret version ('$Version') was requested for '$Name' but the loaded Microsoft.PowerShell.SecretManagement does not support per-secret versions. Store each immutable generation under a distinct secret name; Version metadata cannot be resolved through this Get-Secret API."
+    }
+}
+
+function Assert-GraphVaultPasswordReference {
+    [CmdletBinding()]
+    param([object] $Password)
+
+    if ($Password -isnot [hashtable]) {
+        return
+    }
+
+    $secretName = [string] $Password.SecretName
+    if ([string]::IsNullOrEmpty($secretName)) {
+        throw 'A vault-backed password reference is missing a SecretName.'
+    }
+    Assert-GraphSecretVersionSupported -Name $secretName -Version ([string] $Password.Version)
 }
 
 function Resolve-GraphVaultPassword {
@@ -281,17 +378,17 @@ function Resolve-GraphVaultPassword {
         return $null
     }
     if ($Password -is [System.Security.SecureString]) {
-        return $Password
+        # A directly supplied SecureString is caller-owned. The certificate
+        # resolver disposes only this private copy after import.
+        return $Password.Copy()
     }
     if ($Password -is [hashtable]) {
+        Assert-GraphVaultPasswordReference -Password $Password
         $vault = [string] $Password.VaultName
         if ([string]::IsNullOrEmpty($vault)) {
             $vault = [string] $DefaultVault
         }
         $secretName = [string] $Password.SecretName
-        if ([string]::IsNullOrEmpty($secretName)) {
-            throw "A vault-backed password reference is missing a SecretName."
-        }
 
         Assert-GraphVaultRegistered -VaultName $vault
         $secret = Get-GraphSecret -Vault $vault -Name $secretName -Version ([string] $Password.Version)
@@ -311,7 +408,9 @@ function ConvertTo-GraphSecureString {
     )
 
     if ($Value -is [System.Security.SecureString]) {
-        return $Value
+        # Vault/provider-returned SecureString instances remain provider-owned.
+        # Callers of this helper explicitly own and dispose the returned copy.
+        return $Value.Copy()
     }
     if ($Value -is [string]) {
         $secure = [System.Security.SecureString]::new()
@@ -340,18 +439,29 @@ function ConvertTo-GraphCertificate {
         [System.Security.SecureString] $Password
     )
 
-    # A byte[] flattened by PowerShell pipeline enumeration into an object[]
-    # (for example, a mock returning a byte[] through the pipeline) is reassembled.
-    if ($Raw -is [System.Array] -and $Raw -isnot [byte[]]) {
-        $Raw = [byte[]] @($Raw)
-    }
-
     $bytes = $null
-    if ($Raw -is [byte[]]) {
-        $bytes = $Raw
+    # A byte[] flattened by PowerShell pipeline enumeration into an object[]
+    # (for example, a provider returning a byte[] through the pipeline) is
+    # reassembled directly into the one GraphKit-owned import buffer. Avoid a
+    # second clone whose first copy would otherwise survive until GC.
+    if ($Raw -is [System.Array] -and $Raw -isnot [byte[]]) {
+        $bytes = [byte[]] @($Raw)
+    }
+    elseif ($Raw -is [byte[]]) {
+        # Never zero provider-owned material. Import from a private copy and
+        # deterministically clear that copy below on success or failure.
+        $bytes = [byte[]] $Raw.Clone()
     }
     elseif ($Raw -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
-        return $Raw
+        # Never retain or later dispose a provider-owned certificate object.
+        # X509Certificate2's copy constructor duplicates its native context and
+        # preserves the private-key association without exporting key material.
+        try {
+            return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($Raw)
+        }
+        catch {
+            throw "The certificate secret '$SecretName' in vault '$VaultName' could not be copied into GraphKit-owned material: $($_.Exception.Message)"
+        }
     }
     elseif ($Raw -is [System.Security.SecureString]) {
         $plain = [System.Net.NetworkCredential]::new('', $Raw).Password
@@ -378,6 +488,11 @@ function ConvertTo-GraphCertificate {
     }
     catch {
         throw "The certificate secret '$SecretName' in vault '$VaultName' could not be interpreted as a PFX: $($_.Exception.Message)"
+    }
+    finally {
+        if ($bytes -is [byte[]]) {
+            [System.Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)
+        }
     }
 }
 
@@ -461,7 +576,14 @@ function Get-GraphStoreCertificate {
         throw "Certificate '$($match.Thumbprint)' in Cert:\$location\$storeName has no accessible private key, so it cannot sign a client assertion. Import the PFX with its key, and for LocalMachine make sure this process has permission to read it."
     }
 
-    return $match
+    try {
+        # The certificate-provider wrapper remains provider-owned. Return a
+        # GraphKit-owned duplicate so module cleanup never disposes that wrapper.
+        return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($match)
+    }
+    catch {
+        throw "Certificate '$($match.Thumbprint)' in Cert:\$location\$storeName could not be copied into GraphKit-owned material: $($_.Exception.Message)"
+    }
 }
 
 function New-GraphCredentialMaterial {
@@ -473,7 +595,11 @@ function New-GraphCredentialMaterial {
 
         [object] $Material,
 
-        [object] $ManagedIdentityClientId
+        [object] $ManagedIdentityClientId,
+
+        [bool] $OwnsMaterial = $false,
+
+        [string] $CredentialGeneration
     )
 
     return [PSCustomObject]@{
@@ -481,5 +607,7 @@ function New-GraphCredentialMaterial {
         AuthMethod              = $AuthMethod
         Material                = $Material
         ManagedIdentityClientId = $ManagedIdentityClientId
+        OwnsMaterial            = $OwnsMaterial
+        CredentialGeneration    = $CredentialGeneration
     }
 }
