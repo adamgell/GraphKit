@@ -15,8 +15,8 @@
 
     Type                = 'ManagedDevice'
     Operation           = 'GetBeta'
-    OperationKind       = 'Collection'
-    HandlerStrategyId   = 'Collection.Default'
+    OperationKind       = 'Singleton'
+    HandlerStrategyId   = 'Singleton.Default'
 
     ApiVersion          = 'beta'
     Stability           = 'DualVersion'
