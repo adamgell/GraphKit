@@ -131,7 +131,7 @@ PrivateData = @{
         ReleaseNotes = @'
 0.3.1
 
-Stable-line maintenance bridge for TenantPulse's IntuneHealthAutomation successor path.
+Stable-line maintenance bridge for TenantPulse's successor data path.
 This package has not been published to PSGallery.
 
 ADDED
